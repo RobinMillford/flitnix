@@ -5,7 +5,31 @@ built with Go + Wails v2 + Svelte + TypeScript. No cloud, no relay servers, no a
 
 ## Status
 
-Stage 1 (environment & skeleton) — complete. No transfer functionality yet.
+Stage 1 (environment & skeleton) — complete.
+Stage 2 (standalone phone-page server) — complete. No transfer functionality yet.
+
+The phone webpage server lives in `internal/` (standard library only, no Wails imports) and is
+covered by `go test ./...`.
+
+## Loopback smoke test
+
+Run the phone-page server without the desktop UI:
+
+```bash
+go run ./cmd/flitnix-serve
+# flitnix-serve: serving the phone page at http://127.0.0.1:43821 (Ctrl+C to stop)
+```
+
+Then verify with:
+
+```bash
+curl -i http://127.0.0.1:43821/
+curl -i http://127.0.0.1:43821/healthz
+```
+
+The listen address is configurable via `-addr` (e.g. `-addr 127.0.0.1:44000`); if the port is
+occupied, the server exits with a clear error instead of silently choosing another port. For now it
+binds loopback only — LAN binding (with QR pairing) comes in a later stage.
 
 ## Live Development
 

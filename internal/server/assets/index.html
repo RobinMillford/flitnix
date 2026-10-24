@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#0b1220">
+<meta name="description" content="Flitnix: fast local file transfer. This phone page will handle transfers in a later version.">
+<title>Flitnix</title>
+<!-- Empty favicon keeps the browser from requesting /favicon.ico. -->
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<main class="app">
+
+  <header class="app__header">
+    <div class="brand">
+      <span class="brand__mark" aria-hidden="true">&gt;_</span>
+      <h1 class="brand__name">Flitnix</h1>
+    </div>
+    <p class="tagline">Fast local file transfer</p>
+  </header>
+
+  <section class="status" id="status" data-state="checking" aria-live="polite">
+    <span class="status__dot" aria-hidden="true"></span>
+    <span class="status__text">Checking connection…</span>
+  </section>
+
+  <section class="card card--coming">
+    <h2>File transfers coming in a later stage</h2>
+    <p>This is the Flitnix phone page. Sending and receiving files between your
+    phone and your desktop will be enabled in an upcoming version. You are
+    connected to the Flitnix server on your computer, but no transfer
+    endpoints are available yet.</p>
+  </section>
+
+  <section class="card">
+    <h2>How it will work</h2>
+    <ul>
+      <li>Open this page from your phone's browser on your local network.</li>
+      <li>Pair with the desktop app using a QR code.</li>
+      <li>Send or receive files in either direction, streamed directly over
+      your local connection — no cloud, no accounts.</li>
+    </ul>
+  </section>
+
+  <footer class="app__footer">
+    <p>Flitnix runs entirely on your local network.</p>
+  </footer>
+
+</main>
+<script src="/static/app.js" defer></script>
+</body>
+</html>

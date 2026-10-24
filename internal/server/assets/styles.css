@@ -1,0 +1,150 @@
+/* Flitnix phone page — plain CSS, no external resources. */
+
+:root {
+  color-scheme: dark light;
+  --bg: #0b1220;
+  --surface: #121a2b;
+  --text: #e6ecf5;
+  --text-muted: #97a4b8;
+  --accent: #38d39f;
+  --accent-warn: #f0b429;
+  --line: rgba(151, 164, 184, 0.25);
+  --radius: 14px;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f5f7fb;
+    --surface: #ffffff;
+    --text: #17212f;
+    --text-muted: #5a6675;
+    --accent: #0f9d6e;
+    --line: rgba(90, 102, 117, 0.2);
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; padding: 0; }
+
+body {
+  min-height: 100dvh;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, sans-serif;
+  line-height: 1.5;
+  -webkit-text-size-adjust: 100%;
+}
+
+.app {
+  max-width: 26rem;
+  margin: 0 auto;
+  padding: 0 1rem calc(1.5rem + env(safe-area-inset-bottom));
+}
+
+.app__header {
+  padding-top: calc(2rem + env(safe-area-inset-top));
+  padding-bottom: 1.25rem;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.brand__mark {
+  display: inline-grid;
+  place-items: center;
+  width: 2.4rem;
+  height: 2.4rem;
+  border-radius: 0.7rem;
+  background: linear-gradient(135deg, var(--accent), #2f7ff0);
+  color: #071018;
+  font-weight: 700;
+  font-size: 0.85rem;
+  letter-spacing: 0.05em;
+}
+
+.brand__name {
+  margin: 0;
+  font-size: 1.5rem;
+  letter-spacing: -0.01em;
+}
+
+.tagline {
+  margin: 0.15rem 0 0 3rem;
+  color: var(--text-muted);
+  font-size: 0.95rem;
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.8rem 1rem;
+  margin-bottom: 1.25rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: 0.95rem;
+}
+
+.status__dot {
+  flex: none;
+  width: 0.65rem;
+  height: 0.65rem;
+  border-radius: 50%;
+  background: var(--accent-warn);
+}
+
+.status__text { color: var(--text-muted); }
+
+.status[data-state="connected"] .status__dot {
+  background: var(--accent);
+  box-shadow: 0 0 10px var(--accent);
+}
+
+.status[data-state="connected"] .status__text { color: var(--text); }
+
+.card {
+  padding: 1rem 1.1rem;
+  margin-bottom: 1rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.card h2 {
+  margin: 0 0 0.4rem;
+  font-size: 1.05rem;
+}
+
+.card p,
+.card ul {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.95rem;
+}
+
+.card ul { padding-left: 1.1rem; }
+
+.card li + li { margin-top: 0.35rem; }
+
+.card--coming {
+  border-color: var(--accent-warn);
+}
+
+.card--coming h2 { color: var(--accent-warn); }
+
+.app__footer {
+  margin-top: 1.5rem;
+  text-align: center;
+}
+
+.app__footer p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
