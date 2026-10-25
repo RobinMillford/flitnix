@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -184,6 +185,38 @@ func TestListNetworkInterfaces(t *testing.T) {
 		ifaces[0].FriendlyName != "runtime hotspot" || ifaces[0].ConnectionName != "saved profile" {
 		t.Fatalf("got %+v, want the same candidate to carry address, SSID and profile", ifaces)
 	}
+}
+
+func TestAddDroppedSourcesKeepsValidSelectionWhenAnotherPathFails(t *testing.T) {
+	a := newTestApp(t)
+	root := t.TempDir()
+	folder := filepath.Join(root, "DropFolder")
+	if err := os.MkdirAll(filepath.Join(folder, "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(folder, "nested", "note.txt"), []byte("note"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	views, err := a.AddDroppedSources([]string{folder, filepath.Join(root, "missing.txt")})
+	if err == nil {
+		t.Fatal("mixed drop should report the missing path")
+	}
+	if len(views) != 1 || views[0].Kind != "folder" || views[0].RootName != "DropFolder" ||
+		views[0].ItemCount != 1 {
+		t.Fatalf("valid dropped folder was not retained: %+v", views)
+	}
+	if strings.Contains(string(mustJSON(t, views[0])), folder) {
+		t.Fatal("public dropped-source view disclosed the absolute path")
+	}
+}
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 // ---- server lifecycle through the adapter ----

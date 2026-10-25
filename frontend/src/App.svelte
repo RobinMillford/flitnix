@@ -1,11 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import type { main, netenv } from '../wailsjs/go/models'
+  import { OnFileDrop, OnFileDropOff } from '../wailsjs/runtime/runtime.js'
   import {
     StartSession, EndSession, ListSessions, ListPendingUploads, RecentUploads,
     RecentDownloads, ApproveUpload, RejectUpload, CancelUpload,
     ListPendingBatches, ApproveBatch, RejectBatch, CancelBatch,
-    PickFilesForSharing, ListSharedFiles, RevokeSharedFile, ReceiveDirectory,
+    PickFilesForSharing, PickFolderForSharing, AddDroppedSources,
+    ListSharedFiles, ListSharedSources, RevokeSharedFile, RevokeSharedSource, ReceiveDirectory,
     ListNetworkInterfaces, SessionQR, ServerAddress
   } from '../wailsjs/go/main/App.js'
 
@@ -15,10 +17,12 @@
   let uploads: main.UploadView[] = []
   let downloads: main.DownloadView[] = []
   let files: main.SharedFileView[] = []
+  let sources: main.SharedSourceView[] = []
   let receiveDir = ''
   let errorText = ''
   let starting = false
   let picking = false
+  let pickingFolder = false
   let busy: Record<string, boolean> = {}
   let interfaces: netenv.View[] = []
   let loadingIfaces = false
@@ -55,11 +59,11 @@
   }
   async function refresh(): Promise<void> {
     try {
-      const [s, p, u, d, f, dir, addr, b] = await Promise.all([
+      const [s, p, u, d, f, sourceList, dir, addr, b] = await Promise.all([
         ListSessions(), ListPendingUploads(), RecentUploads(), RecentDownloads(),
-        ListSharedFiles(), ReceiveDirectory(), ServerAddress(), ListPendingBatches()
+        ListSharedFiles(), ListSharedSources(), ReceiveDirectory(), ServerAddress(), ListPendingBatches()
       ])
-      sessions = s; pending = p; uploads = u; downloads = d; files = f; pendingBatches = b
+      sessions = s; pending = p; uploads = u; downloads = d; files = f; sources = sourceList; pendingBatches = b
       receiveDir = dir; serverAddress = addr ?? ''
       if (!s.length) { qrKey = ''; qrUrl = ''; qrError = '' }
       else if (!s.some((x) => x.key === qrKey)) fetchQR(s[0].key)
@@ -150,6 +154,19 @@
     if (picking) return
     picking = true; PickFilesForSharing().then(refresh).catch(report).finally(() => { picking = false })
   }
+  function pickFolder(): void {
+    if (pickingFolder) return
+    pickingFolder = true
+    PickFolderForSharing().then(refresh).catch(report).finally(() => { pickingFolder = false })
+  }
+  function revokeSource(id: string): void {
+    const k = `revoke-source:${id}`; if (isBusy(k)) return
+    setBusy(k, true); RevokeSharedSource(id).then(refresh).catch((e) => report(e, k)).finally(() => setBusy(k, false))
+  }
+  function handleDrop(_x: number, _y: number, paths: string[]): void {
+    if (!paths.length) return
+    AddDroppedSources(paths).then(refresh).catch(report)
+  }
   function revoke(id: string): void {
     const k = `revoke:${id}`; if (isBusy(k)) return
     setBusy(k, true); RevokeSharedFile(id).then(refresh).catch((e) => report(e, k)).finally(() => setBusy(k, false))
@@ -183,7 +200,11 @@
     refresh()
     refreshNetwork()
     const id = setInterval(refresh, 800)
-    return () => clearInterval(id)
+    OnFileDrop(handleDrop, true)
+    return () => {
+      clearInterval(id)
+      OnFileDropOff()
+    }
   })
 </script>
 
@@ -254,13 +275,17 @@
   </section>
 
   <div class="workflow-grid">
-    <section class="panel workflow">
+    <section class="panel workflow drop-target">
       <div class="section-heading"><div><span class="eyebrow accent">Send to phone</span><h2>Shared files</h2></div><span class="count">{files.length}</span></div>
-      <p class="muted">Files listed here are available for download from the phone.</p>
+      <p class="muted">Files listed here are available for direct download from the phone.</p>
       {#each files as f (f.id)}
         <div class="file-row"><div class="file-icon">↗</div><div class="grow"><strong>{f.name}</strong><span>{formatBytes(f.size)}</span></div><button class="button danger small" on:click={() => revoke(f.id)} disabled={isBusy(`revoke:${f.id}`)}>Remove</button></div>
-      {:else}<div class="empty">No files shared yet. Choose files to make them available.</div>{/each}
-      <button class="button secondary" on:click={pickFiles} disabled={picking}>{picking ? 'Opening picker…' : '+ Choose files'}</button>
+      {:else}<div class="empty">No files shared yet. Choose files or drop them here.</div>{/each}
+      <div class="button-row"><button class="button secondary" on:click={pickFiles} disabled={picking || pickingFolder}>{picking ? 'Opening picker…' : '+ Choose files'}</button><button class="button ghost" on:click={pickFolder} disabled={picking || pickingFolder}>{pickingFolder ? 'Reading folder…' : '+ Choose folder'}</button></div>
+      <div class="drop-hint">Drop files or folders here. Folders are prepared privately for a future archive download.</div>
+      {#each sources.filter((source) => source.kind === 'folder') as source (source.id)}
+        <div class="file-row source-row"><div class="file-icon">▣</div><div class="grow"><strong>{source.rootName || source.name}</strong><span>Folder · {source.itemCount} files · {formatBytes(source.totalBytes)} · archive download not yet available</span></div><button class="button danger small" on:click={() => revokeSource(source.id)} disabled={isBusy(`revoke-source:${source.id}`)}>Remove</button></div>
+      {/each}
     </section>
 
     <section class="panel workflow">

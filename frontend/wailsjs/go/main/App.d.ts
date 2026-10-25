@@ -3,6 +3,8 @@
 import {main} from '../models';
 import {netenv} from '../models';
 
+export function AddDroppedSources(arg1:Array<string>):Promise<Array<main.SharedSourceView>>;
+
 export function ApproveBatch(arg1:string):Promise<main.BatchView>;
 
 export function ApproveUpload(arg1:string):Promise<main.UploadView>;
@@ -27,7 +29,11 @@ export function ListSessions():Promise<Array<main.SessionView>>;
 
 export function ListSharedFiles():Promise<Array<main.SharedFileView>>;
 
+export function ListSharedSources():Promise<Array<main.SharedSourceView>>;
+
 export function PickFilesForSharing():Promise<Array<main.SharedFileView>>;
+
+export function PickFolderForSharing():Promise<main.SharedSourceView>;
 
 export function ReceiveDirectory():Promise<string>;
 
@@ -40,6 +46,8 @@ export function RejectBatch(arg1:string):Promise<main.BatchView>;
 export function RejectUpload(arg1:string):Promise<main.UploadView>;
 
 export function RevokeSharedFile(arg1:string):Promise<void>;
+
+export function RevokeSharedSource(arg1:string):Promise<void>;
 
 export function ServerAddress():Promise<string>;
 
