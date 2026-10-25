@@ -120,9 +120,10 @@ type Upload struct {
 	Size      int64     // approved size in bytes
 	Created   time.Time // when the metadata arrived
 	State     State
-	Reason    string // non-empty on failed/canceled records: why the transfer ended
-	Uploaded  int64  // bytes actually received so far (live)
-	Published string // absolute final path; populated exactly in the completed state
+	Reason    string  // non-empty on failed/canceled records: why the transfer ended
+	Uploaded  int64   // bytes actually received so far (live)
+	Speed     float64 // measured bytes per second while receiving
+	Published string  // absolute final path; populated exactly in the completed state
 }
 
 // ContentResult describes a successfully received upload body.
@@ -161,6 +162,9 @@ type upload struct {
 	uploaded  atomic.Int64
 	sink      contentSink // non-nil while a content stream owns the record
 	published string
+	speed     float64
+	lastAt    time.Time
+	lastBytes int64
 }
 
 // snapshotLocked copies the record; the caller must already hold u.mu.
@@ -174,6 +178,7 @@ func (u *upload) snapshotLocked() Upload {
 		State:     u.state,
 		Reason:    u.reason,
 		Uploaded:  u.uploaded.Load(),
+		Speed:     u.speed,
 		Published: u.published,
 	}
 }
@@ -382,6 +387,14 @@ func (s *Service) SubmitContent(id, sessionKey string, body io.Reader, onProgres
 
 	result, serr := streamBody(body, sink, u.size, func(written int64) {
 		u.uploaded.Store(written)
+		u.mu.Lock()
+		now := time.Now()
+		if elapsed := now.Sub(u.lastAt).Seconds(); elapsed > 0 {
+			u.speed = float64(written-u.lastBytes) / elapsed
+		}
+		u.lastAt = now
+		u.lastBytes = written
+		u.mu.Unlock()
 		if onProgress != nil {
 			onProgress(u.snapshot())
 		}
