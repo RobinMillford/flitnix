@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -55,6 +56,7 @@ type testEnv struct {
 	t     *testing.T
 	sess  *session.Manager
 	trans *transfer.Service
+	coord *transfer.Coordinator
 	reg   *transfer.Registry
 	store *transfer.Store
 	clock *fakeClock
@@ -78,11 +80,13 @@ func newTestEnv(t *testing.T) *testEnv {
 		store: store,
 	}
 	env.trans = transfer.NewService(transfer.Config{Store: store})
+	env.coord = transfer.NewCoordinator(transfer.CoordinatorConfig{})
 	env.reg = transfer.NewRegistry()
 	env.srv = New(Config{Services: &Services{
-		Sessions:  env.sess,
-		Transfers: env.trans,
-		Registry:  env.reg,
+		Sessions:    env.sess,
+		Transfers:   env.trans,
+		Coordinator: env.coord,
+		Registry:    env.reg,
 	}})
 	return env
 }
@@ -135,6 +139,65 @@ func (e *testEnv) doHeader(method, target, authValue string, body []byte) *httpt
 	rec := httptest.NewRecorder()
 	e.srv.Handler().ServeHTTP(rec, req)
 	return rec
+}
+
+func TestBatchManifestApprovalAndSequentialContent(t *testing.T) {
+	env := newTestEnv(t)
+	token := env.token()
+	key := env.tokenKey(token)
+	manifest, _ := json.Marshal(transfer.BatchManifest{
+		Direction: transfer.DirectionPhoneToDesktop,
+		Kind:      transfer.BatchKindFiles,
+		Items: []transfer.ManifestItem{
+			{RelativePath: "first.txt", Size: 5},
+			{RelativePath: "second.txt", Size: 6},
+		},
+	})
+	rec := env.do(http.MethodPost, "/api/batches", token, manifest)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create batch status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var batch transfer.BatchView
+	if err := json.Unmarshal(rec.Body.Bytes(), &batch); err != nil {
+		t.Fatal(err)
+	}
+	if len(batch.Items) != 2 || batch.ApprovalState != transfer.ApprovalPending {
+		t.Fatalf("unexpected batch: %+v", batch)
+	}
+	for _, item := range batch.Items {
+		contentID, err := env.coord.ItemContentID(key, batch.ID, item.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = env.trans.Decide(contentID, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := env.coord.ApproveBatch(key, batch.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range batch.Items {
+		body := []byte(item.DisplayName[:0])
+		if item.Sequence == 0 {
+			body = []byte("first")
+		} else {
+			body = []byte("second")
+		}
+		rec = env.do(http.MethodPut, "/api/batches/"+batch.ID+"/items/"+item.ID+"/content", token, body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("item %d status=%d body=%s", item.Sequence, rec.Code, rec.Body.String())
+		}
+	}
+	rec = env.do(http.MethodGet, "/api/batches/"+batch.ID, token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d", rec.Code)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &batch); err != nil {
+		t.Fatal(err)
+	}
+	if batch.State != transfer.BatchStateCompleted || batch.TransferredBytes != 11 {
+		t.Fatalf("batch did not complete: %+v", batch)
+	}
 }
 
 // declare performs the metadata phase and returns the parsed record.

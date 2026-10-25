@@ -151,6 +151,7 @@ func (c *Coordinator) ApproveBatch(sessionKey, batchID string) (BatchView, error
 	if err != nil {
 		return BatchView{}, err
 	}
+
 	if batch.batch.ApprovalState != ApprovalPending || batch.batch.State != BatchStatePending {
 		return BatchView{}, ErrInvalidTransition
 	}
@@ -160,6 +161,48 @@ func (c *Coordinator) ApproveBatch(sessionKey, batchID string) (BatchView, error
 		batch.batch.Items[i].State = ItemStateQueued
 	}
 	return batch.batch.View(), nil
+}
+
+// SetItemContentID associates a coordinator item with the legacy streaming
+// service record that owns its bytes. The ID is internal and never appears
+// in ItemView.
+func (c *Coordinator) SetItemContentID(sessionKey, batchID, itemID, contentID string) error {
+	if contentID == "" {
+		return ErrInvalidBatchID
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	batch, err := c.ownedBatchLocked(sessionKey, batchID)
+	if err != nil {
+		return err
+	}
+	item := findItem(&batch.batch, itemID)
+	if item == nil {
+		return ErrItemNotFound
+	}
+	if item.ContentID != "" {
+		return ErrInvalidTransition
+	}
+	item.ContentID = contentID
+	return nil
+}
+
+// ItemContentID returns the internal streaming-service record ID for an item.
+func (c *Coordinator) ItemContentID(sessionKey, batchID, itemID string) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	batch, err := c.ownedBatchLocked(sessionKey, batchID)
+	if err != nil {
+		return "", err
+	}
+	item := findItem(&batch.batch, itemID)
+	if item == nil {
+		return "", ErrItemNotFound
+	}
+	if item.ContentID == "" {
+		return "", ErrInvalidTransition
+	}
+	return item.ContentID, nil
 }
 
 // RejectBatch permanently rejects a batch that has not completed or already

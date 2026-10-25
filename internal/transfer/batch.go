@@ -95,6 +95,7 @@ type TransferItem struct {
 	SHA256       string
 	Error        string
 	SourcePath   string
+	ContentID    string
 }
 
 // BatchManifest is the pure control-plane input validated before a batch is

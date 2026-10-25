@@ -48,6 +48,7 @@
   var appState = { ended: false };
   var queue = [];      // upload jobs, FIFO
   var pumpBusy = false; // one upload in flight at a time
+  var activeBatch = null;
 
   // ------------------------------------------------------------------
   // Small helpers
@@ -220,7 +221,7 @@
         file: f, id: null, phase: "queued", uploaded: 0,
         failures: 0, retryable: false, err: null,
         xhr: null, timer: null, removed: false,
-        el: null, refs: null, btnAction: null
+        el: null, refs: null, btnAction: null, batchID: null, itemID: null
       };
       queue.push(job);
       queueEl.appendChild(buildItem(job));
@@ -291,34 +292,148 @@
 
   function pump() {
     if (pumpBusy || appState.ended) return;
-    var job = null;
-    for (var i = 0; i < queue.length; i++) {
-      if (queue[i].phase === "queued") { job = queue[i]; break; }
-    }
-    if (!job) return;
+    var jobs = queue.filter(function (job) { return job.phase === "queued"; });
+    if (!jobs.length) return;
     pumpBusy = true;
-    job.phase = "declaring";
-    paint(job);
-    api("/api/uploads", {
+    jobs.forEach(function (job) { job.phase = "declaring"; paint(job); });
+    api("/api/batches", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: job.file.name, size: job.file.size })
-    }).then(function (up) {
-      if (job.removed || appState.ended) { pumpBusy = false; return; }
-      if (!up || !up.id) throw new Error("The desktop gave an unexpected reply");
-      job.id = up.id;
-      job.phase = "waiting";
-      paint(job);
-      watch(job);
-    }).catch(function (err) {
-      if (err && err.silent) { pumpBusy = false; return; }
-      if (!err || !err.status || err.status >= 500) {
-        failJob(job, "Could not reach the desktop. Check the Wi-Fi connection and retry.", true);
-      } else if (err.status === 503) {
-        failJob(job, "The desktop is busy with too many transfers. Try again shortly.", true);
-      } else {
-        failJob(job, err.message || "The desktop refuses this file.", true);
+      body: JSON.stringify({
+        direction: "phone_to_desktop",
+        kind: "files",
+        items: jobs.map(function (job) {
+          return { relativePath: job.file.name, size: job.file.size };
+        })
+      })
+    }).then(function (batch) {
+      if (appState.ended) { pumpBusy = false; return; }
+      if (!batch || !batch.id || !Array.isArray(batch.items) ||
+          batch.items.length !== jobs.length) {
+        throw new Error("The desktop gave an unexpected batch reply");
       }
+      activeBatch = { id: batch.id, jobs: jobs, failures: 0, timer: null };
+      batch.items.forEach(function (item, index) {
+        jobs[index].batchID = batch.id;
+        jobs[index].itemID = item.id;
+        jobs[index].phase = "waiting";
+        paint(jobs[index]);
+      });
+      pumpBusy = false;
+      watchBatch();
+    }).catch(function (err) {
+      jobs.forEach(function (job) {
+        if (job.removed) return;
+        job.phase = "failed";
+        job.err = (!err || !err.status || err.status >= 500)
+          ? "Could not reach the desktop. Check the Wi-Fi connection and retry."
+          : (err.message || "The desktop refuses this batch.");
+        job.retryable = true;
+        paint(job);
+      });
+      pumpBusy = false;
+    });
+  }
+
+  function watchBatch() {
+    if (!activeBatch || appState.ended) return;
+    activeBatch.timer = setTimeout(pollBatch, POLL_MS);
+  }
+
+  function pollBatch() {
+    if (!activeBatch || appState.ended) return;
+    api("/api/batches/" + encodeURIComponent(activeBatch.id)).then(function (batch) {
+      if (!activeBatch || appState.ended) return;
+      activeBatch.failures = 0;
+      batch.items.forEach(function (item) {
+        var job = activeBatch.jobs[item.sequence];
+        if (!job) return;
+        job.uploaded = item.transferred || 0;
+        if (item.state === "completed") job.phase = "done";
+        else if (item.state === "failed") {
+          job.phase = "failed"; job.err = item.error || "Transfer failed."; job.retryable = true;
+        } else if (item.state === "canceled") {
+          job.phase = "canceled"; job.err = "Upload canceled.";
+        } else if (item.state === "uploading") job.phase = "sending";
+        paint(job);
+      });
+      if (batch.state === "paused") {
+        activeBatch.jobs.forEach(function (job) {
+          if (job.phase === "waiting") job.phase = "queued";
+          paint(job);
+        });
+        activeBatch = null; pumpBusy = false; pump(); return;
+      }
+      var next = activeBatch.jobs.find(function (job) { return job.phase === "waiting"; });
+      if (batch.approvalState === "rejected" || batch.state === "rejected") {
+        activeBatch.jobs.forEach(function (job) {
+          if (job.phase !== "done") { job.phase = "failed"; job.err = "The desktop declined this batch."; job.retryable = false; paint(job); }
+        });
+        activeBatch = null; pump(); return;
+      }
+      if (next && (batch.approvalState === "approved" || batch.state === "queued")) {
+        next.phase = "sending"; next.uploaded = 0; paint(next);
+        sendBatchItem(next);
+        return;
+      }
+      if (!next) {
+        activeBatch = null; pumpBusy = false; pump(); return;
+      }
+      watchBatch();
+    }).catch(function (err) {
+      if (!activeBatch || appState.ended || (err && err.silent)) return;
+      activeBatch.failures += 1;
+      if (activeBatch.failures >= MAX_POLL_FAILURES) {
+        activeBatch.jobs.forEach(function (job) {
+          if (job.phase !== "done") { job.phase = "failed"; job.err = "Lost contact with the desktop. Rescan or retry."; job.retryable = true; paint(job); }
+        });
+        activeBatch = null; pumpBusy = false; return;
+      }
+      watchBatch();
+    });
+  }
+
+  function sendBatchItem(job) {
+    putBatchContent(job).then(function () {
+      job.phase = "done"; job.err = null; paint(job);
+      watchBatch();
+    }).catch(function (e) {
+      if (!activeBatch || job.removed || appState.ended) return;
+      if (e && e.aborted) { job.phase = "canceled"; job.err = "Upload canceled."; }
+      else { job.phase = "failed"; job.err = (e && e.message) || "Transfer failed."; job.retryable = true; }
+      activeBatch.jobs.forEach(function (other) {
+        if (other !== job && other.phase === "waiting") other.phase = "queued";
+        if (other !== job) paint(other);
+      });
+      paint(job);
+      activeBatch = null; pumpBusy = false;
+    });
+  }
+
+  function putBatchContent(job) {
+    return new Promise(function (resolve, reject) {
+      var xhr = new XMLHttpRequest();
+      job.xhr = xhr;
+      xhr.open("PUT", "/api/batches/" + encodeURIComponent(job.batchID) +
+        "/items/" + encodeURIComponent(job.itemID) + "/content");
+      xhr.setRequestHeader("Authorization", "Bearer " + token);
+      xhr.setRequestHeader("Content-Type", "application/octet-stream");
+      xhr.onload = function () {
+        job.xhr = null;
+        if (job.removed || appState.ended) { reject({ aborted: true }); return; }
+        if (xhr.status === 401) { endUnauthorized(); reject({ aborted: true }); return; }
+        if (xhr.status >= 200 && xhr.status < 300) { resolve(); return; }
+        var msg = "Upload failed (" + xhr.status + ")";
+        try { var parsed = JSON.parse(xhr.responseText); if (parsed && parsed.error) msg = parsed.error; } catch (e) {}
+        reject(new Error(msg));
+      };
+      xhr.upload.onprogress = function (ev) {
+        if (!ev.lengthComputable) return;
+        job.uploaded = ev.loaded; paint(job);
+      };
+      xhr.onerror = function () { job.xhr = null; reject(new Error("Network error while uploading.")); };
+      xhr.onabort = function () { job.xhr = null; reject({ aborted: true }); };
+      xhr.send(job.file);
     });
   }
 

@@ -80,6 +80,9 @@ func newAPIMux(services *Services, stall time.Duration) http.Handler {
 	mux.HandleFunc("POST /api/uploads", handleUploadDeclare(services, stall))
 	mux.HandleFunc("GET /api/uploads/{id}", handleUploadStatus(services))
 	mux.HandleFunc("PUT /api/uploads/{id}/content", handleUploadContent(services, stall))
+	mux.HandleFunc("POST /api/batches", handleBatchCreate(services))
+	mux.HandleFunc("GET /api/batches/{id}", handleBatchStatus(services))
+	mux.HandleFunc("PUT /api/batches/{batchID}/items/{itemID}/content", handleBatchContent(services, stall))
 	mux.HandleFunc("GET /api/files", serveFilesList(services))
 	mux.HandleFunc("GET /api/files/{id}/download", serveFileDownload(services, stall))
 	return mux
@@ -174,6 +177,8 @@ func (d *stallWriter) Write(p []byte) (int, error) {
 // this, so 4 KiB is a hugely generous bound and anything larger is plainly
 // not metadata.
 const maxMetadataBytes = 4 * 1024
+
+const maxBatchMetadataBytes = 1024 * 1024
 
 // uploadJSON is the phone-visible view of an upload record. It deliberately
 // omits the session key and the server-side absolute paths: the phone needs
@@ -316,12 +321,8 @@ func handleUploadContent(svcs *Services, stall time.Duration) http.HandlerFunc {
 			return
 		}
 		id := r.PathValue("id")
-
-		// Pin the session: an idle-expiry while a multi-gigabyte file
-		// streams in would otherwise abort it.
 		sess.Begin()
 		defer sess.End()
-
 		body := &stallBodyReader{
 			ReadCloser: r.Body,
 			rc:         http.NewResponseController(w),
@@ -333,6 +334,142 @@ func handleUploadContent(svcs *Services, stall time.Duration) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, uploadResultJSON{Written: res.Written, SHA256: res.SHA256})
+	}
+}
+
+func handleBatchCreate(svcs *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess := sessionFrom(r)
+		if sess == nil || svcs.Coordinator == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBatchMetadataBytes))
+		if err != nil || len(body) > maxBatchMetadataBytes {
+			writeError(w, http.StatusRequestEntityTooLarge, "batch manifest too large")
+			return
+		}
+		var manifest transfer.BatchManifest
+		dec := json.NewDecoder(bytes.NewReader(body))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&manifest); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid batch manifest JSON")
+			return
+		}
+		if manifest.Kind == transfer.BatchKindFiles {
+			for i := range manifest.Items {
+				if manifest.Items[i].DisplayName == "" {
+					name, nameErr := transfer.SanitizeRelativePath(manifest.Items[i].RelativePath)
+					if nameErr != nil || strings.Contains(name, "/") {
+						writeError(w, http.StatusBadRequest, "invalid batch filename")
+						return
+					}
+					manifest.Items[i].DisplayName = name
+				}
+				manifest.Items[i].RelativePath = ""
+			}
+		}
+		view, err := svcs.Coordinator.CreateBatch(sess.Key(), manifest)
+		if err != nil {
+			writeBatchError(w, err)
+			return
+		}
+		for _, item := range view.Items {
+			up, declareErr := svcs.Transfers.Declare(sess.Key(), item.DisplayName, item.DeclaredSize)
+			if declareErr != nil {
+				_, _ = svcs.Coordinator.CancelBatch(sess.Key(), view.ID)
+				writeBatchError(w, declareErr)
+				return
+			}
+			if mapErr := svcs.Coordinator.SetItemContentID(sess.Key(), view.ID, item.ID, up.ID); mapErr != nil {
+				_ = svcs.Transfers.Cancel(up.ID)
+				_, _ = svcs.Coordinator.CancelBatch(sess.Key(), view.ID)
+				writeBatchError(w, mapErr)
+				return
+			}
+		}
+		writeJSON(w, http.StatusCreated, view)
+	}
+}
+
+func handleBatchStatus(svcs *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess := sessionFrom(r)
+		if sess == nil || svcs.Coordinator == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		view, err := svcs.Coordinator.GetBatch(sess.Key(), r.PathValue("id"))
+		if err != nil {
+			writeBatchError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, view)
+	}
+}
+
+func handleBatchContent(svcs *Services, stall time.Duration) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess := sessionFrom(r)
+		if sess == nil || svcs.Coordinator == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		batchID, itemID := r.PathValue("batchID"), r.PathValue("itemID")
+		sess.Begin()
+		defer sess.End()
+		lease, err := svcs.Coordinator.ClaimNext(sess.Key())
+		if err != nil {
+			writeBatchError(w, err)
+			return
+		}
+		if lease.BatchID != batchID || lease.ItemID != itemID {
+			writeBatchError(w, transfer.ErrNoEligibleItem)
+			return
+		}
+		contentID, err := svcs.Coordinator.ItemContentID(sess.Key(), batchID, itemID)
+		if err != nil {
+			writeBatchError(w, err)
+			return
+		}
+		_ = svcs.Coordinator.RegisterCancellation(sess.Key(), lease, func() { _ = svcs.Transfers.Cancel(contentID) })
+		body := &stallBodyReader{ReadCloser: r.Body, rc: http.NewResponseController(w), stall: stall}
+		res, streamErr := svcs.Transfers.SubmitContent(contentID, sess.Key(), body, func(up transfer.Upload) {
+			_ = svcs.Coordinator.UpdateItemProgress(sess.Key(), lease, up.Uploaded)
+		})
+		if streamErr != nil {
+			_, _ = svcs.Coordinator.FailItem(sess.Key(), lease, streamErr)
+			writeUploadStreamError(w, streamErr)
+			return
+		}
+		view, completeErr := svcs.Coordinator.CompleteItem(sess.Key(), lease, res.SHA256)
+		if completeErr != nil {
+			writeBatchError(w, completeErr)
+			return
+		}
+		writeJSON(w, http.StatusOK, struct {
+			Written int64              `json:"written"`
+			SHA256  string             `json:"sha256"`
+			Batch   transfer.BatchView `json:"batch"`
+		}{res.Written, res.SHA256, view})
+	}
+}
+
+func writeBatchError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, transfer.ErrBatchNotFound), errors.Is(err, transfer.ErrItemNotFound),
+		errors.Is(err, transfer.ErrWrongSession):
+		writeError(w, http.StatusNotFound, "batch not found")
+	case errors.Is(err, transfer.ErrQueuePaused), errors.Is(err, transfer.ErrNoEligibleItem),
+		errors.Is(err, transfer.ErrInvalidTransition), errors.Is(err, transfer.ErrLeaseInvalid):
+		writeError(w, http.StatusConflict, "batch item is not eligible")
+	case errors.Is(err, transfer.ErrInvalidBatch), errors.Is(err, transfer.ErrInvalidFilename),
+		errors.Is(err, transfer.ErrInvalidRelativePath):
+		writeError(w, http.StatusBadRequest, "invalid batch manifest")
+	case errors.Is(err, transfer.ErrNoCapacity):
+		writeError(w, http.StatusServiceUnavailable, "transfer capacity unavailable")
+	default:
+		writeError(w, http.StatusInternalServerError, "batch operation failed")
 	}
 }
 

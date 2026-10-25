@@ -4,12 +4,14 @@
   import {
     StartSession, EndSession, ListSessions, ListPendingUploads, RecentUploads,
     RecentDownloads, ApproveUpload, RejectUpload, CancelUpload,
+    ListPendingBatches, ApproveBatch, RejectBatch, CancelBatch,
     PickFilesForSharing, ListSharedFiles, RevokeSharedFile, ReceiveDirectory,
     ListNetworkInterfaces, SessionQR, ServerAddress
   } from '../wailsjs/go/main/App.js'
 
   let sessions: main.SessionView[] = []
   let pending: main.UploadView[] = []
+  let pendingBatches: main.BatchView[] = []
   let uploads: main.UploadView[] = []
   let downloads: main.DownloadView[] = []
   let files: main.SharedFileView[] = []
@@ -53,11 +55,11 @@
   }
   async function refresh(): Promise<void> {
     try {
-      const [s, p, u, d, f, dir, addr] = await Promise.all([
+      const [s, p, u, d, f, dir, addr, b] = await Promise.all([
         ListSessions(), ListPendingUploads(), RecentUploads(), RecentDownloads(),
-        ListSharedFiles(), ReceiveDirectory(), ServerAddress()
+        ListSharedFiles(), ReceiveDirectory(), ServerAddress(), ListPendingBatches()
       ])
-      sessions = s; pending = p; uploads = u; downloads = d; files = f
+      sessions = s; pending = p; uploads = u; downloads = d; files = f; pendingBatches = b
       receiveDir = dir; serverAddress = addr ?? ''
       if (!s.length) { qrKey = ''; qrUrl = ''; qrError = '' }
       else if (!s.some((x) => x.key === qrKey)) fetchQR(s[0].key)
@@ -128,6 +130,17 @@
     setBusy(k, true)
     const call = approve ? ApproveUpload(u.id) : RejectUpload(u.id)
     call.then(refresh).catch((e) => report(e, k)).finally(() => setBusy(k, false))
+  }
+  function decideBatch(batch: main.BatchView, approve: boolean): void {
+    const k = `${approve ? 'approve' : 'reject'}-batch:${batch.id}`; if (isBusy(k)) return
+    setBusy(k, true)
+    const call = approve ? ApproveBatch(batch.id) : RejectBatch(batch.id)
+    call.then(refresh).catch((e) => report(e, k)).finally(() => setBusy(k, false))
+  }
+  function cancelBatch(batch: main.BatchView): void {
+    const k = `cancel-batch:${batch.id}`; if (isBusy(k)) return
+    setBusy(k, true)
+    CancelBatch(batch.id).then(refresh).catch((e) => report(e, k)).finally(() => setBusy(k, false))
   }
   function cancelUpload(id: string): void {
     const k = `cancel:${id}`; if (isBusy(k)) return
@@ -251,11 +264,14 @@
     </section>
 
     <section class="panel workflow">
-      <div class="section-heading"><div><span class="eyebrow blue">Receive from phone</span><h2>Approval inbox</h2></div><span class="count">{pending.length}</span></div>
+      <div class="section-heading"><div><span class="eyebrow blue">Receive from phone</span><h2>Approval inbox</h2></div><span class="count">{pending.length + pendingBatches.length}</span></div>
       <p class="muted">Review each request before any file contents reach this computer.</p>
       {#each pending as u (u.id)}
         <div class="request-row"><div class="file-icon">↙</div><div class="grow"><strong>{u.name}</strong><span>{formatBytes(u.size)} · waiting for approval</span></div><div class="button-row"><button class="button primary small" on:click={() => decide(u, true)} disabled={isBusy(`approve:${u.id}`)}>Allow</button><button class="button danger small" on:click={() => decide(u, false)} disabled={isBusy(`reject:${u.id}`)}>Deny</button></div></div>
       {:else}<div class="empty">No files are waiting for approval.</div>{/each}
+      {#each pendingBatches as b (b.id)}
+        <div class="request-row"><div class="file-icon">↙</div><div class="grow"><strong>Batch · {b.totalItemCount} files</strong><span>{formatBytes(b.declaredTotalBytes)} · waiting for approval</span><small>{b.items.map((item) => item.displayName).join(', ')}</small></div><div class="button-row"><button class="button primary small" on:click={() => decideBatch(b, true)} disabled={isBusy(`approve-batch:${b.id}`)}>Allow batch</button><button class="button danger small" on:click={() => decideBatch(b, false)} disabled={isBusy(`reject-batch:${b.id}`)}>Deny</button><button class="text-button" on:click={() => cancelBatch(b)} disabled={isBusy(`cancel-batch:${b.id}`)}>Cancel</button></div></div>
+      {/each}
     </section>
   </div>
 

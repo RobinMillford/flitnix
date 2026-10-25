@@ -113,10 +113,11 @@ type Config struct {
 // application is the composition root: it owns these instances (and the
 // receive Store inside the transfer Service) and handed to Config.
 type Services struct {
-	Sessions  *session.Manager
-	Transfers *transfer.Service
-	Registry  *transfer.Registry
-	Downloads *transfer.DownloadRegistry
+	Sessions    *session.Manager
+	Transfers   *transfer.Service
+	Coordinator *transfer.Coordinator
+	Registry    *transfer.Registry
+	Downloads   *transfer.DownloadRegistry
 }
 
 // normalize fills in zero-value defaults.
