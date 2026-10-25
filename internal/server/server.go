@@ -116,6 +116,7 @@ type Services struct {
 	Sessions  *session.Manager
 	Transfers *transfer.Service
 	Registry  *transfer.Registry
+	Downloads *transfer.DownloadRegistry
 }
 
 // normalize fills in zero-value defaults.

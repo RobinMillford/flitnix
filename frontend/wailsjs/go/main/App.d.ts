@@ -21,6 +21,8 @@ export function PickFilesForSharing():Promise<Array<main.SharedFileView>>;
 
 export function ReceiveDirectory():Promise<string>;
 
+export function RecentDownloads():Promise<Array<main.DownloadView>>;
+
 export function RecentUploads():Promise<Array<main.UploadView>>;
 
 export function RejectUpload(arg1:string):Promise<main.UploadView>;

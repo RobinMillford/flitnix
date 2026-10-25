@@ -38,6 +38,10 @@ export function ReceiveDirectory() {
   return window['go']['main']['App']['ReceiveDirectory']();
 }
 
+export function RecentDownloads() {
+  return window['go']['main']['App']['RecentDownloads']();
+}
+
 export function RecentUploads() {
   return window['go']['main']['App']['RecentUploads']();
 }

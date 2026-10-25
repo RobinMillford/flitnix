@@ -61,7 +61,20 @@ type UploadView struct {
 	Created  time.Time `json:"created"`
 	State    string    `json:"state"`
 	Uploaded int64     `json:"uploaded"`
+	Speed    float64   `json:"speed"`
 	Reason   string    `json:"reason,omitempty"`
+}
+
+type DownloadView struct {
+	ID      string    `json:"id"`
+	FileID  string    `json:"fileId"`
+	Name    string    `json:"name"`
+	Size    int64     `json:"size"`
+	Created time.Time `json:"created"`
+	State   string    `json:"state"`
+	Written int64     `json:"written"`
+	Speed   float64   `json:"speed"`
+	Reason  string    `json:"reason,omitempty"`
 }
 
 // SharedFileView is the UI projection of one file currently shared with
@@ -81,6 +94,7 @@ type App struct {
 	sessions  *session.Manager
 	transfers *transfer.Service
 	registry  *transfer.Registry
+	downloads *transfer.DownloadRegistry
 
 	// source supplies live network-interface state for the session
 	// address decisions; tests inject synthetic interfaces.
@@ -107,6 +121,7 @@ func NewApp() (*App, error) {
 		sessions:  session.NewManager(session.Config{}),
 		transfers: transfer.NewService(transfer.Config{Store: store}),
 		registry:  transfer.NewRegistry(),
+		downloads: transfer.NewDownloadRegistry(),
 		source:    netenv.DefaultSource(),
 	}, nil
 }
@@ -125,6 +140,7 @@ func (a *App) startup(ctx context.Context) {
 func (a *App) shutdown(ctx context.Context) {
 	for _, s := range a.sessions.ActiveSessions() {
 		a.transfers.CancelSession(s.Key())
+		a.downloads.CancelSession(s.Key())
 	}
 	a.sessions.Close()
 	a.registry.Clear()
@@ -166,6 +182,7 @@ func (a *App) startServerLocked(listen string) error {
 			Sessions:  a.sessions,
 			Transfers: a.transfers,
 			Registry:  a.registry,
+			Downloads: a.downloads,
 		},
 	})
 	serveCtx, cancel := context.WithCancel(context.Background())
@@ -219,6 +236,8 @@ func (a *App) endAllSessions() {
 	for _, s := range a.sessions.ActiveSessions() {
 		key := s.Key()
 		a.transfers.CancelSession(key)
+		a.downloads.CancelSession(key)
+		a.downloads.CancelSession(key)
 		for _, sf := range a.registry.ListSession(key) {
 			a.registry.Remove(sf.ID)
 		}
@@ -411,6 +430,10 @@ func (a *App) RecentUploads() []UploadView {
 	return uploadViews(a.transfers.List())
 }
 
+func (a *App) RecentDownloads() []DownloadView {
+	return downloadViews(a.downloads.List())
+}
+
 // ApproveUpload accepts the pending upload with the given ID. The phone
 // may then stream exactly its approved content.
 func (a *App) ApproveUpload(id string) (UploadView, error) {
@@ -507,6 +530,7 @@ func uploadView(u transfer.Upload) UploadView {
 		Created:  u.Created,
 		State:    string(u.State),
 		Uploaded: u.Uploaded,
+		Speed:    u.Speed,
 		Reason:   u.Reason,
 	}
 }
@@ -526,4 +550,20 @@ func sharedFileView(sf transfer.SharedFile) SharedFileView {
 		Size:    sf.Size,
 		Created: sf.Created,
 	}
+}
+
+func downloadView(d transfer.Download) DownloadView {
+	return DownloadView{
+		ID: d.ID, FileID: d.FileID, Name: d.Name, Size: d.Size,
+		Created: d.Created, State: string(d.State), Written: d.Written,
+		Speed: d.Speed, Reason: d.Reason,
+	}
+}
+
+func downloadViews(list []transfer.Download) []DownloadView {
+	out := make([]DownloadView, 0, len(list))
+	for _, d := range list {
+		out = append(out, downloadView(d))
+	}
+	return out
 }

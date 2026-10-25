@@ -427,6 +427,15 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 		defer f.Close()
 
 		size := info.Size()
+		var downloadID string
+		if svcs.Downloads != nil {
+			dl, trackErr := svcs.Downloads.Start(sf.ID, sf.Name, sess.Key(), size)
+			if trackErr != nil {
+				writeError(w, http.StatusInternalServerError, "could not start download tracking")
+				return
+			}
+			downloadID = dl.ID
+		}
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 		w.Header().Set("Accept-Ranges", "none")
@@ -454,8 +463,14 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 			if n > 0 {
 				wn, werr := out.Write(buf[:n])
 				written += int64(wn)
+				if svcs.Downloads != nil {
+					svcs.Downloads.Progress(downloadID, written)
+				}
 				if werr != nil || wn != n {
 					// Body is committed; the client sees the cut stream.
+					if svcs.Downloads != nil {
+						svcs.Downloads.Fail(downloadID, "connection ended before the file was sent", written)
+					}
 					return
 				}
 			}
@@ -468,8 +483,14 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 				// connection rather than letting the client read a
 				// complete-appearing but truncated body.
 				_ = forceClose(w, f)
+				if svcs.Downloads != nil {
+					svcs.Downloads.Fail(downloadID, "file changed while it was being sent", written)
+				}
 				return
 			}
+		}
+		if svcs.Downloads != nil {
+			svcs.Downloads.Finish(downloadID, written)
 		}
 	}
 }
