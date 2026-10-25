@@ -5,14 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
 <meta name="theme-color" content="#0b1220">
-<meta name="description" content="Flitnix: fast local file transfer. This phone page will handle transfers in a later version.">
+<meta name="description" content="Flitnix phone transfer page: send files to the desktop and download shared files over the local network.">
 <title>Flitnix</title>
 <!-- Empty favicon keeps the browser from requesting /favicon.ico. -->
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
-<main class="app">
+<main class="app" data-app="phone-transfer">
 
   <header class="app__header">
     <div class="brand">
@@ -22,34 +22,53 @@
     <p class="tagline">Fast local file transfer</p>
   </header>
 
+  <noscript>
+    <section class="card card--warn">
+      <p>Flitnix needs JavaScript to run transfers. Enable it and reload.</p>
+    </section>
+  </noscript>
+
   <section class="status" id="status" data-state="checking" aria-live="polite">
     <span class="status__dot" aria-hidden="true"></span>
     <span class="status__text">Checking connection…</span>
   </section>
 
-  <section class="card card--coming">
-    <h2>File transfers coming in a later stage</h2>
-    <p>This is the Flitnix phone page. Sending and receiving files between your
-    phone and your desktop will be enabled in an upcoming version. You are
-    connected to the Flitnix server on your computer, but no transfer
-    endpoints are available yet.</p>
+  <!-- Shown only when there is no usable session token: either the page was
+       opened without a QR link or the session it belonged to has ended. -->
+  <section class="card card--warn" id="rescan" hidden>
+    <h2>Scan the QR code</h2>
+    <p id="rescan-text">Open this page by scanning the QR code shown on the Flitnix desktop. Each link works for one session only.</p>
   </section>
 
-  <section class="card">
-    <h2>How it will work</h2>
-    <ul>
-      <li>Open this page from your phone's browser on your local network.</li>
-      <li>Pair with the desktop app using a QR code.</li>
-      <li>Send or receive files in either direction, streamed directly over
-      your local connection — no cloud, no accounts.</li>
-    </ul>
+  <section class="flow" id="flow" hidden>
+
+    <section class="panel">
+      <div class="panel__head">
+        <h2>Send to desktop</h2>
+        <button type="button" class="btn" id="pick-btn">Pick files</button>
+      </div>
+      <p class="muted">Each file starts only after you approve it on the desktop. Transfers run one at a time.</p>
+      <input id="file-input" type="file" multiple hidden>
+      <ul class="queue" id="queue" aria-live="polite"></ul>
+    </section>
+
+    <section class="panel">
+      <div class="panel__head">
+        <h2>Files on the desktop</h2>
+        <button type="button" class="btn btn--ghost" id="refresh-btn">Refresh</button>
+      </div>
+      <p class="muted" id="files-empty">Nothing is shared with this session yet.</p>
+      <ul class="file-list" id="files"></ul>
+    </section>
+
+    <p class="footnote">Transfers run over plain HTTP inside your own hotspot network — connect only devices you trust.</p>
   </section>
 
   <footer class="app__footer">
-    <p>Flitnix runs entirely on your local network.</p>
+    <p>Flitnix works entirely on your local network. No cloud. No accounts.</p>
   </footer>
 
 </main>
-<script src="/static/app.js" defer></script>
+<script src="/static/app.js"></script>
 </body>
 </html>

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import type { main } from '../wailsjs/go/models'
+  import type { main, netenv } from '../wailsjs/go/models'
   import {
     StartSession,
     EndSession,
@@ -13,7 +13,10 @@
     PickFilesForSharing,
     ListSharedFiles,
     RevokeSharedFile,
-    ReceiveDirectory
+    ReceiveDirectory,
+    ListNetworkInterfaces,
+    SessionQR,
+    ServerAddress
   } from '../wailsjs/go/main/App.js'
 
   let sessions: main.SessionView[] = []
@@ -27,6 +30,22 @@
   // In-flight action keys ("approve:<id>", "end:<key>", ...) used to
   // disable the buttons whose request is running.
   let busy: Record<string, boolean> = {}
+
+  // Stage 4 live connection state.
+  let interfaces: netenv.View[] = []
+  let loadingIfaces = false
+  let ifaceError = ''
+  // '' means "let the desktop pick the default" — only offered when a
+  // single interface exists; several interfaces demand an explicit choice.
+  let selectedIp = ''
+  let serverAddress = ''
+  let qrUrl = ''
+  let qrError = ''
+  let qrKey = ''
+  let activeInterfaceName = ''
+  let activeAddress = ''
+
+  const SESSION_PORT = '43821'
 
   function stringOfError(err: unknown): string {
     if (err instanceof Error) return err.message
@@ -45,22 +64,76 @@
     return !!busy[key]
   }
 
+  function hostPort(): string {
+    if (serverAddress) return serverAddress
+    if (activeAddress) return `${activeAddress}:${SESSION_PORT}`
+    return `…:${SESSION_PORT}`
+  }
+
   async function refresh(): Promise<void> {
     try {
-      const [s, p, r, f, dir] = await Promise.all([
+      const [s, p, r, f, dir, addr] = await Promise.all([
         ListSessions(),
         ListPendingUploads(),
         RecentUploads(),
         ListSharedFiles(),
-        ReceiveDirectory()
+        ReceiveDirectory(),
+        ServerAddress()
       ])
       sessions = s
       pending = p
       transfers = r
       files = f
       receiveDir = dir
+      serverAddress = addr ?? ''
+      if (s.length === 0) {
+        if (qrKey || qrUrl || qrError) {
+          qrKey = ''
+          qrUrl = ''
+          qrError = ''
+        }
+      } else if (!s.some((x) => x.key === qrKey)) {
+        // First session (or a page reload): fetch the pairing QR only once
+        // the server is confirmed running.
+        fetchQR(s[0].key)
+      }
     } catch (err) {
       errorText = stringOfError(err)
+    }
+  }
+
+  async function fetchQR(key: string): Promise<void> {
+    if (!key) return
+    qrKey = key
+    try {
+      const data = await SessionQR(key)
+      if (qrKey === key) {
+        qrUrl = data
+        qrError = ''
+      }
+    } catch (err) {
+      if (qrKey === key) {
+        qrUrl = ''
+        qrError = stringOfError(err)
+      }
+    }
+  }
+
+  async function loadInterfaces(): Promise<void> {
+    loadingIfaces = true
+    try {
+      const views = await ListNetworkInterfaces()
+      interfaces = views
+      ifaceError = ''
+      // One usable interface preselects itself; several demand an
+      // explicit user choice (the select stays unset).
+      selectedIp = views.length === 1 ? views[0].ip : ''
+    } catch (err) {
+      interfaces = []
+      selectedIp = ''
+      ifaceError = stringOfError(err)
+    } finally {
+      loadingIfaces = false
     }
   }
 
@@ -71,8 +144,17 @@
 
   function startSession(now: boolean): void {
     if (starting) return
+    if (interfaces.length > 1 && !selectedIp) {
+      errorText = 'Choose the network interface that connects to the phone, then start.'
+      return
+    }
     starting = true
-    StartSession()
+    StartSession(selectedIp)
+      .then((v) => {
+        activeInterfaceName = v.interfaceName ?? ''
+        activeAddress = v.address ?? ''
+        return fetchQR(v.key)
+      })
       .then(refresh)
       .catch((err) => report(err))
       .finally(() => {
@@ -163,6 +245,7 @@
 
   onMount(() => {
     refresh()
+    loadInterfaces()
     const id = setInterval(refresh, 800)
     return () => clearInterval(id)
   })
@@ -182,7 +265,65 @@
   {/if}
 
   <section class="card">
-    <h2>Sessions</h2>
+    <h2>Connection</h2>
+
+    <div class="row">
+      <div class="grow">
+        <div class="name">Network interface</div>
+        <div class="meta">The network this laptop will share with the phone. Verify before starting.</div>
+      </div>
+      {#if interfaces.length > 0}
+        <select class="select" bind:value={selectedIp} aria-label="Network interface">
+          {#if interfaces.length > 1}
+            <option value="" disabled selected>Choose one…</option>
+          {/if}
+          {#each interfaces as itf (itf.ip)}
+            <option value={itf.ip}>{itf.name} — {itf.ip}</option>
+          {/each}
+        </select>
+      {:else}
+        <span class="meta">{loadingIfaces ? 'Scanning…' : 'No usable network found'}</span>
+      {/if}
+      <button class="btn" on:click={() => loadInterfaces()} disabled={loadingIfaces}>
+        {loadingIfaces ? '…' : 'Rescan'}
+      </button>
+    </div>
+    {#if ifaceError}
+      <div class="warning">{ifaceError}</div>
+    {/if}
+    {#if interfaces.length === 0 && !loadingIfaces && !ifaceError}
+      <div class="warning">Connect this laptop to the phone's hotspot (or another local network), then Rescan.</div>
+    {/if}
+
+    {#if sessions.length > 0}
+      {#if qrUrl}
+        <div class="qr-row">
+          <img class="qr" src={qrUrl} alt="Pairing QR code — scan it with the phone's camera" />
+          <div class="grow">
+            <div class="chips">
+              <span class="chip ok">● {activeInterfaceName || 'running'}</span>
+              <span class="chip">{hostPort()}</span>
+            </div>
+            <div class="url"><code>http://{hostPort()}/</code></div>
+            <div class="meta">Scan to open the transfer page on the phone. Every incoming file asks for approval here first.</div>
+            <div class="actions">
+              <button class="btn" on:click={() => fetchQR(qrKey)} disabled={!qrKey}>Regenerate QR</button>
+              <button class="btn reject" on:click={() => endSession(qrKey)} disabled={isBusy(`end:${qrKey}`)}>
+                {isBusy(`end:${qrKey}`) ? 'Stopping…' : 'Stop session'}
+              </button>
+            </div>
+          </div>
+        </div>
+      {:else}
+        <div class="row">
+          <div class="grow">
+            <div class="meta">{qrError || 'Preparing the QR code…'}</div>
+          </div>
+          <button class="btn" on:click={() => fetchQR(qrKey)} disabled={!qrKey}>Retry QR</button>
+        </div>
+      {/if}
+    {/if}
+
     {#each sessions as s (s.key)}
       <div class="row">
         <div class="grow">
@@ -197,14 +338,22 @@
         </button>
       </div>
     {:else}
-      <div class="empty">No active session. Start one to make this desktop reachable over the local network.</div>
+      <div class="empty">No active session. Start one after picking the network interface.</div>
     {/each}
+
     <div class="actions">
-      <button class="btn primary" on:click={() => startSession(true)} disabled={starting}>
+      <button
+        class="btn primary"
+        on:click={() => startSession(true)}
+        disabled={starting || (interfaces.length > 1 && !selectedIp)}
+      >
         {starting ? 'Starting…' : 'Start session'}
       </button>
     </div>
-    <div class="note">Phone pairing via QR code arrives with LAN support in the next stage.</div>
+
+    <div class="warning">
+      ✋ Transfers use plain HTTP inside your own hotspot or LAN — connect only devices you control, and stop the session when done.
+    </div>
   </section>
 
   <section class="card">
@@ -362,6 +511,7 @@
     margin-top: 10px;
     display: flex;
     gap: 10px;
+    flex-wrap: wrap;
   }
 
   .btn {
@@ -408,6 +558,75 @@
   .btn-group {
     display: flex;
     gap: 6px;
+  }
+
+  .select {
+    background: rgba(255, 255, 255, 0.08);
+    color: inherit;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 6px;
+    padding: 6px 8px;
+    font-size: 13px;
+    max-width: 220px;
+  }
+
+  .select option {
+    background: #1b2330;
+    color: inherit;
+  }
+
+  .qr-row {
+    display: flex;
+    gap: 14px;
+    align-items: flex-start;
+    padding: 10px 0 4px;
+  }
+
+  .qr {
+    width: 160px;
+    height: 160px;
+    flex: none;
+    border-radius: 8px;
+    background: #ffffff;
+    padding: 8px;
+  }
+
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 4px;
+  }
+
+  .chip {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.09);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .chip.ok {
+    background: rgba(97, 193, 145, 0.18);
+    border-color: rgba(97, 193, 145, 0.4);
+    color: #8fe0b4;
+  }
+
+  .url {
+    margin: 2px 0 4px;
+  }
+
+  .warning {
+    font-size: 12px;
+    margin-top: 10px;
+    padding: 7px 10px;
+    border-radius: 6px;
+    background: rgba(240, 180, 41, 0.12);
+    border: 1px solid rgba(240, 180, 41, 0.4);
+    overflow-wrap: anywhere;
   }
 
   .badge {
