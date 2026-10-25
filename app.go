@@ -98,7 +98,7 @@ type App struct {
 
 	// source supplies live network-interface state for the session
 	// address decisions; tests inject synthetic interfaces.
-	source netenv.Source
+	source netenv.Provider
 
 	srvMu       sync.Mutex
 	srv         *server.Server
