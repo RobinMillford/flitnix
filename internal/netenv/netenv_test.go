@@ -68,7 +68,7 @@ func TestEnumerateFiltersUnsuitableAddresses(t *testing.T) {
 	if len(views) != 1 {
 		t.Fatalf("got %d views %+v, want exactly 1", len(views), views)
 	}
-	want := View{Name: "br0", IP: "192.168.4.10", CIDR: "192.168.4.10/24", FriendlyName: "Network connection", Type: "Network", Active: true}
+	want := View{Name: "br0", IP: "192.168.4.10", CIDR: "192.168.4.10/24", FriendlyName: "Network connection", Type: "Network", FriendlyNameSource: "Unavailable", Active: true}
 	if views[0] != want {
 		t.Fatalf("got %+v, want %+v", views[0], want)
 	}
@@ -249,7 +249,7 @@ func TestTransferURL(t *testing.T) {
 func TestViewJSONShape(t *testing.T) {
 	// Views cross the Wails bridge as JSON; the field names are part of
 	// that contract, so this decodes and verifies them precisely.
-	data, err := json.Marshal(View{Name: "wlo1", IP: "10.42.0.8", CIDR: "10.42.0.8/24", FriendlyName: "Synthetic hotspot", Type: "Wi-Fi", MetadataAvailable: true, ConnectionName: "saved-profile", Active: true})
+	data, err := json.Marshal(View{Name: "wlo1", IP: "10.42.0.8", CIDR: "10.42.0.8/24", FriendlyName: "Synthetic hotspot", Type: "Wi-Fi", MetadataAvailable: true, ConnectionName: "saved-profile", FriendlyNameSource: "SSID", Active: true})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -257,7 +257,7 @@ func TestViewJSONShape(t *testing.T) {
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	for _, key := range []string{"name", "ip", "cidr", "friendlyName", "type", "connectionName"} {
+	for _, key := range []string{"name", "ip", "cidr", "friendlyName", "type", "connectionName", "friendlyNameSource"} {
 		if got[key] == nil || got[key] == "" {
 			t.Errorf("field %q missing or empty in %s", key, data)
 		}
@@ -300,6 +300,7 @@ func TestEnumerateFriendlyMetadataAndFallbacks(t *testing.T) {
 	}
 	if byName["wlo1"].FriendlyName != "Synthetic hotspot" ||
 		byName["wlo1"].ConnectionName != "phone-profile" ||
+		byName["wlo1"].FriendlyNameSource != "SSID" ||
 		!byName["wlo1"].Active {
 		t.Fatalf("SSID/profile metadata = %+v", byName["wlo1"])
 	}
@@ -338,5 +339,35 @@ func TestMissingSSIDUsesExplicitFallback(t *testing.T) {
 	view := withMetadata(View{}, Metadata{Type: "Wi-Fi"})
 	if view.FriendlyName != "Wi-Fi network · Name unavailable" {
 		t.Fatalf("fallback = %q", view.FriendlyName)
+	}
+	if view.FriendlyNameSource != "Unavailable" {
+		t.Fatalf("fallback source = %q, want Unavailable", view.FriendlyNameSource)
+	}
+}
+
+func TestProfileNameIsFriendlyFallbackWhenSSIDUnavailable(t *testing.T) {
+	view := withMetadata(View{}, Metadata{
+		Type:           "Wi-Fi",
+		ConnectionName: "moto edge 60 pro_3360",
+	})
+	if view.FriendlyName != "moto edge 60 pro_3360" {
+		t.Fatalf("friendly fallback = %q, want profile name", view.FriendlyName)
+	}
+	if view.FriendlyNameSource != "Connection profile" {
+		t.Fatalf("fallback source = %q, want Connection profile", view.FriendlyNameSource)
+	}
+	if !view.MetadataAvailable {
+		t.Fatal("profile fallback should report metadata available")
+	}
+}
+
+func TestSSIDRemainsPrimaryWhenProfileDiffers(t *testing.T) {
+	view := withMetadata(View{}, Metadata{
+		Type:           "Wi-Fi",
+		SSID:           "actual hotspot",
+		ConnectionName: "saved profile",
+	})
+	if view.FriendlyName != "actual hotspot" || view.FriendlyNameSource != "SSID" {
+		t.Fatalf("SSID did not remain primary: %+v", view)
 	}
 }
