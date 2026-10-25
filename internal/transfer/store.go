@@ -92,7 +92,7 @@ func randHex(n int) (string, error) {
 
 // newID returns a random 128-bit hex ID for uploads and shared files. IDs
 // are opaque to every client.
-func newID() (string, error) { return randHex(16) }
+func newID() (string, error) { return NewOpaqueID() }
 
 // withinDir verifies that path is inside the store's directory. Defense in
 // depth next to SanitizeName: even if a name slipped a separator through a
