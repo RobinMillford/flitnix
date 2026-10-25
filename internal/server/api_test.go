@@ -1,6 +1,7 @@
 package server
 
 import (
+	"archive/zip"
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
@@ -383,6 +384,7 @@ func (e *testEnv) shareFile(dir, name string, content []byte) transfer.SharedFil
 	if err := os.WriteFile(path, content, 0o600); err != nil {
 		e.t.Fatalf("cannot create shared file: %v", err)
 	}
+
 	sf, err := e.reg.Add(path, name, "")
 	if err != nil {
 		e.t.Fatalf("registry.Add failed: %v", err)
@@ -391,6 +393,88 @@ func (e *testEnv) shareFile(dir, name string, content []byte) transfer.SharedFil
 		e.t.Fatal("registry.Add produced an empty id")
 	}
 	return sf
+}
+
+func TestDownloadGrantStreamsSharedFileWithoutBuffering(t *testing.T) {
+	env := newTestEnv(t)
+	tok := env.token()
+	sf := env.shareFile(t.TempDir(), "hello.txt", []byte("hello from desktop"))
+	body, _ := json.Marshal(map[string]any{"sourceIds": []string{sf.ID}})
+	rec := env.do(http.MethodPost, "/api/download-grants", tok, body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("grant status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	var grant createGrantResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &grant); err != nil {
+		t.Fatal(err)
+	}
+	if grant.Archive {
+		t.Fatal("single file grant unexpectedly creates an archive")
+	}
+	cookie := rec.Result().Cookies()[0]
+	req := httptest.NewRequest(http.MethodGet, grant.DownloadURL, nil)
+	req.AddCookie(cookie)
+	out := httptest.NewRecorder()
+	env.srv.Handler().ServeHTTP(out, req)
+	if out.Code != http.StatusOK || out.Body.String() != "hello from desktop" {
+		t.Fatalf("download = %d %q", out.Code, out.Body.String())
+	}
+	replay := httptest.NewRecorder()
+	env.srv.Handler().ServeHTTP(replay, req)
+	if replay.Code != http.StatusForbidden {
+		t.Fatalf("grant replay status = %d, want 403", replay.Code)
+	}
+}
+
+func TestDownloadGrantStreamsFolderArchive(t *testing.T) {
+	env := newTestEnv(t)
+	tok := env.token()
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "nested", "note.txt"), []byte("nested"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source, err := env.reg.AddFolder(root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(map[string]any{"sourceIds": []string{source.ID}})
+	rec := env.do(http.MethodPost, "/api/download-grants", tok, body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("grant status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var grant createGrantResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &grant); err != nil {
+		t.Fatal(err)
+	}
+	if !grant.Archive {
+		t.Fatal("folder grant did not create an archive")
+	}
+	req := httptest.NewRequest(http.MethodGet, grant.DownloadURL, nil)
+	req.AddCookie(rec.Result().Cookies()[0])
+	out := httptest.NewRecorder()
+	env.srv.Handler().ServeHTTP(out, req)
+	if out.Code != http.StatusOK {
+		t.Fatalf("archive status = %d", out.Code)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(out.Body.Bytes()), int64(out.Body.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(zr.File) != 1 || zr.File[0].Name != source.RootName+"/nested/note.txt" {
+		t.Fatalf("archive entries = %v", archiveNames(zr.File))
+	}
+}
+
+func archiveNames(files []*zip.File) []string {
+	names := make([]string, 0, len(files))
+	for _, file := range files {
+		names = append(names, file.Name)
+	}
+	return names
 }
 
 // ---- authentication ----

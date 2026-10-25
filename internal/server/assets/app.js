@@ -46,6 +46,7 @@
   var filesEl = document.getElementById("files");
   var filesEmptyEl = document.getElementById("files-empty");
   var refreshBtn = document.getElementById("refresh-btn");
+  var downloadSelectedBtn = document.getElementById("download-selected-btn");
 
   var appState = { ended: false };
   var queue = [];      // upload jobs, FIFO
@@ -550,7 +551,7 @@
     refreshBtn.disabled = true;
     var prev = refreshBtn.textContent;
     refreshBtn.textContent = "Loading…";
-    api("/api/files").then(function (data) {
+    api("/api/sources").then(function (data) {
       if (appState.ended) return;
       drawFiles(data || []);
     }).catch(function (err) {
@@ -581,22 +582,33 @@
     var li = el("li", "file-item");
     var left = el("div", "file-item__meta");
     left.appendChild(el("span", "file-item__name", f.name));
-    left.appendChild(el("span", "file-item__size", fmtBytes(f.size)));
+    left.appendChild(el("span", "file-item__size", f.kind === "folder"
+      ? (f.itemCount + " items · " + fmtBytes(f.totalBytes))
+      : fmtBytes(f.totalBytes)));
+    var check = document.createElement("input");
+    check.type = "checkbox";
+    check.className = "source-check";
+    check.value = f.id;
+    check.setAttribute("aria-label", "Select " + f.name);
+    check.addEventListener("change", updateDownloadSelection);
+    li.appendChild(check);
     var btn = el("button", "btn btn--small");
     btn.type = "button";
     btn.textContent = "Download";
-    btn.addEventListener("click", function () { download(f, btn); });
+    btn.addEventListener("click", function () { downloadSources([f], btn); });
     li.appendChild(left);
     li.appendChild(btn);
     return li;
   }
 
-  function download(f, btn) {
+  function downloadSources(sources, btn) {
     btn.disabled = true;
     var prev = btn.textContent;
     btn.textContent = "Preparing…";
-    fetch("/api/files/" + encodeURIComponent(f.id) + "/download", {
-      headers: { "Authorization": "Bearer " + token },
+    fetch("/api/download-grants", {
+      method: "POST",
+      headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceIds: sources.map(function (source) { return source.id; }) }),
       cache: "no-store"
     }).then(function (res) {
       if (res.status === 401) {
@@ -613,9 +625,10 @@
           throw new Error(msg);
         });
       }
-      var cd = res.headers.get("Content-Disposition") || "";
-      return res.blob().then(function (blob) {
-        saveBlob(blob, dispositionName(cd, f.name));
+      return res.json().then(function (grant) {
+        if (!grant || !grant.downloadUrl) throw new Error("The desktop returned an invalid download grant.");
+        window.location.href = grant.downloadUrl;
+        if (grant.progressId) watchDownloadProgress(grant.progressId);
       });
     }).catch(function (err) {
       if (err && err.message === "silent") return;
@@ -623,11 +636,28 @@
       if (err instanceof TypeError) {
         msg = "Network error — could not reach the desktop.";
       }
-      showDownloadError(f, msg);
+      showDownloadError(sources[0], msg);
     }).then(function () {
       btn.disabled = false;
       btn.textContent = prev;
     });
+  }
+
+  function updateDownloadSelection() {
+    var selected = filesEl.querySelectorAll(".source-check:checked");
+    downloadSelectedBtn.disabled = selected.length === 0;
+  }
+
+  function watchDownloadProgress(id) {
+    var timer = setInterval(function () {
+      if (appState.ended) { clearInterval(timer); return; }
+      api("/api/download-progress/" + encodeURIComponent(id)).then(function (p) {
+        if (p.state === "completed" || p.state === "failed") {
+          clearInterval(timer);
+          if (p.state === "failed") filesEmptyEl.textContent = "Download failed: " + (p.error || "source unavailable");
+        }
+      }).catch(function () { clearInterval(timer); });
+    }, 500);
   }
 
   function showDownloadError(f, msg) {
@@ -708,6 +738,13 @@
       fileInput.value = "";
     });
     refreshBtn.addEventListener("click", refreshFiles);
+    downloadSelectedBtn.addEventListener("click", function () {
+      var selected = Array.prototype.slice.call(filesEl.querySelectorAll(".source-check:checked"));
+      var sources = selected.map(function (input) {
+        return { id: input.value, name: input.getAttribute("aria-label") || "selected source" };
+      });
+      if (sources.length) downloadSources(sources, downloadSelectedBtn);
+    });
 
     if (!token) {
       endSession("Scan the QR code",

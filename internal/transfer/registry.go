@@ -238,8 +238,22 @@ func (r *Registry) ListSources() []SharedSource {
 			source.EmptyDirs = append([]string(nil), source.EmptyDirs...)
 			out = append(out, source)
 		}
+
 	}
 	return out
+}
+
+// GetSource returns a private snapshot of one desktop source.
+func (r *Registry) GetSource(id string) (SharedSource, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	source, ok := r.sources[id]
+	if !ok {
+		return SharedSource{}, false
+	}
+	source.Items = append([]SourceItem(nil), source.Items...)
+	source.EmptyDirs = append([]string(nil), source.EmptyDirs...)
+	return source, true
 }
 
 // RemoveSource removes only the selected source. Original files are never

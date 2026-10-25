@@ -41,7 +41,7 @@ import (
 // a GET registration also serves HEAD (the body is stripped by net/http).
 // Everything below /api/ that is unknown yields 404 within the API router.
 // With a nil Services every /api/ path answers 404 (page-only server).
-func newRouter(services *Services, stall time.Duration) http.Handler {
+func newRouter(services *Services, stall time.Duration, grants *DownloadGrantStore) http.Handler {
 	index, err := pageAssets.ReadFile("assets/index.html")
 	if err != nil {
 		panic("server: embedded assets missing: " + err.Error())
@@ -66,8 +66,9 @@ func newRouter(services *Services, stall time.Duration) http.Handler {
 		// /api/* paths and method mismatches are answered only after
 		// authentication; a token holder learns nothing about the
 		// endpoint set without a live session either way.
-		api := newAPIMux(services, stall)
+		api := newAPIMux(services, stall, grants)
 		mux.Handle("/api/", requireSession(services.Sessions, api.ServeHTTP))
+		mux.HandleFunc("GET /api/downloads/{id}/content", serveArchiveDownload(services, grants, stall))
 	}
 	return mux
 }
@@ -75,7 +76,7 @@ func newRouter(services *Services, stall time.Duration) http.Handler {
 // newAPIMux registers the transfer endpoints. Authentication is applied at
 // the /api/ boundary by newRouter, so nothing reaches these handlers
 // without an authenticated session in the request context.
-func newAPIMux(services *Services, stall time.Duration) http.Handler {
+func newAPIMux(services *Services, stall time.Duration, grants *DownloadGrantStore) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/uploads", handleUploadDeclare(services, stall))
 	mux.HandleFunc("GET /api/uploads/{id}", handleUploadStatus(services))
@@ -85,6 +86,9 @@ func newAPIMux(services *Services, stall time.Duration) http.Handler {
 	mux.HandleFunc("PUT /api/batches/{batchID}/items/{itemID}/content", handleBatchContent(services, stall))
 	mux.HandleFunc("GET /api/files", serveFilesList(services))
 	mux.HandleFunc("GET /api/files/{id}/download", serveFileDownload(services, stall))
+	mux.HandleFunc("GET /api/sources", serveSourcesList(services))
+	mux.HandleFunc("POST /api/download-grants", createDownloadGrant(services, grants))
+	mux.HandleFunc("GET /api/download-progress/{id}", serveDownloadProgress(services, grants))
 	return mux
 }
 

@@ -158,7 +158,8 @@ type Server struct {
 // behaviour (all /api/ paths 404).
 func New(cfg Config) *Server {
 	cfg.normalize()
-	handler := newRouter(cfg.Services, cfg.TransferStall)
+	grants := newGrantStore()
+	handler := newRouter(cfg.Services, cfg.TransferStall, grants)
 	return &Server{
 		cfg: cfg,
 		http: &http.Server{
