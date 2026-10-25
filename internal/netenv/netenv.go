@@ -33,15 +33,12 @@
 package netenv
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net"
 	"net/netip"
-	"os/exec"
 	"sort"
 	"strings"
-	"time"
 )
 
 // View is one usable local interface address as presented to the desktop.
@@ -75,6 +72,16 @@ type Metadata struct {
 	Type           string
 }
 
+// Provider is the platform-neutral discovery contract used by the common
+// candidate and selection logic. Source is the default implementation and
+// remains injectable so platform adapters and tests do not touch the
+// transfer engine.
+type Provider interface {
+	InterfacesFor() ([]net.Interface, error)
+	AddressesFor(net.Interface) ([]net.Addr, error)
+	MetadataFor(net.Interface) Metadata
+}
+
 // Errors surfaced for the three decision failures callers must handle.
 var (
 	// ErrNoCandidate means no interface address passed the filters.
@@ -103,24 +110,26 @@ type Source struct {
 	Metadata func(net.Interface) Metadata
 }
 
+var _ Provider = Source{}
+
 // DefaultSource builds the operating-system-backed source.
 func DefaultSource() Source { return Source{} }
 
-func (s Source) interfaces() ([]net.Interface, error) {
+func (s Source) InterfacesFor() ([]net.Interface, error) {
 	if s.Interfaces != nil {
 		return s.Interfaces()
 	}
 	return net.Interfaces()
 }
 
-func (s Source) addrs(iface net.Interface) ([]net.Addr, error) {
+func (s Source) AddressesFor(iface net.Interface) ([]net.Addr, error) {
 	if s.Addrs != nil {
 		return s.Addrs(iface)
 	}
 	return iface.Addrs()
 }
 
-func (s Source) metadata(iface net.Interface) Metadata {
+func (s Source) MetadataFor(iface net.Interface) Metadata {
 	if s.Metadata != nil {
 		return s.Metadata(iface)
 	}
@@ -150,119 +159,6 @@ func withMetadata(view View, metadata Metadata) View {
 	return view
 }
 
-// systemMetadata obtains active connection data without requiring iw,
-// elevated permissions, or network changes. NetworkManager's terse output
-// is used because it is available on supported Fedora installations.
-func systemMetadata(iface net.Interface) Metadata {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "nmcli", "-t", "-g", "GENERAL.TYPE,GENERAL.CONNECTION", "device", "show", iface.Name)
-	out, err := cmd.Output()
-	if err != nil || ctx.Err() != nil {
-		return Metadata{Type: typeFromInterface(iface)}
-	}
-	metadata := parseNMCLIOutput(string(out), iface)
-	if metadata.Type != "Wi-Fi" {
-		return metadata
-	}
-
-	// GENERAL.CONNECTION is the saved profile name, not necessarily the
-	// broadcast SSID. Ask NetworkManager for the active AP on this device.
-	wifi := exec.CommandContext(ctx, "nmcli", "-t", "-f", "IN-USE,SSID,DEVICE", "device", "wifi", "list", "ifname", iface.Name)
-	wifiOut, err := wifi.Output()
-	if err != nil || ctx.Err() != nil {
-		return metadata
-	}
-	metadata.SSID = activeSSID(string(wifiOut), iface.Name)
-	return metadata
-}
-
-func parseNMCLIOutput(output string, iface net.Interface) Metadata {
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-	var rawType, rawProfile string
-	if len(lines) > 0 {
-		rawType = unescapeNMCLI(lines[0])
-	}
-	if len(lines) > 1 {
-		rawProfile = unescapeNMCLI(lines[1])
-	}
-	metadata := Metadata{Type: friendlyType(rawType, iface)}
-	metadata.ConnectionName = rawProfile
-	return metadata
-}
-
-func activeSSID(output, interfaceName string) string {
-	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
-		fields := splitNMCLIFields(line)
-		if len(fields) < 3 || strings.TrimSpace(fields[0]) != "*" || strings.TrimSpace(fields[2]) != interfaceName {
-			continue
-		}
-		if fields[1] == "" || fields[1] == "--" {
-			return ""
-		}
-		return fields[1]
-	}
-	return ""
-}
-
-func splitNMCLIFields(line string) []string {
-	var fields []string
-	var field strings.Builder
-	escaped := false
-	for _, r := range line {
-		if escaped {
-			field.WriteRune(r)
-			escaped = false
-			continue
-		}
-		if r == '\\' {
-			escaped = true
-		} else if r == ':' {
-			fields = append(fields, field.String())
-			field.Reset()
-		} else {
-			field.WriteRune(r)
-		}
-	}
-	if escaped {
-		field.WriteByte('\\')
-	}
-	return append(fields, field.String())
-}
-
-func unescapeNMCLI(value string) string {
-	var b strings.Builder
-	escaped := false
-	for _, r := range value {
-		if escaped {
-			b.WriteRune(r)
-			escaped = false
-			continue
-		}
-		if r == '\\' {
-			escaped = true
-			continue
-		}
-		b.WriteRune(r)
-	}
-	if escaped {
-		b.WriteByte('\\')
-	}
-	return strings.TrimSpace(b.String())
-}
-
-func friendlyType(raw string, iface net.Interface) string {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "wifi", "802-11-wireless":
-		return "Wi-Fi"
-	case "ethernet":
-		return "Ethernet"
-	case "wireguard", "vpn":
-		return "VPN"
-	}
-	return typeFromInterface(iface)
-}
-
 func typeFromInterface(iface net.Interface) string {
 	if iface.Flags&net.FlagPointToPoint != 0 {
 		return "VPN"
@@ -275,8 +171,8 @@ func typeFromInterface(iface net.Interface) string {
 // interfaces and addresses are filtered out; an address-listing failure
 // for one interface skips that interface rather than failing the whole
 // enumeration, because the remaining interfaces still matter.
-func Enumerate(src Source) ([]View, error) {
-	ifaces, err := src.interfaces()
+func Enumerate(src Provider) ([]View, error) {
+	ifaces, err := src.InterfacesFor()
 	if err != nil {
 		return nil, fmt.Errorf("netenv: listing interfaces: %w", err)
 	}
@@ -286,11 +182,11 @@ func Enumerate(src Source) ([]View, error) {
 		if !interfaceSuitable(iface) {
 			continue
 		}
-		addrs, err := src.addrs(iface)
+		addrs, err := src.AddressesFor(iface)
 		if err != nil {
 			continue
 		}
-		metadata := src.metadata(iface)
+		metadata := src.MetadataFor(iface)
 		var ifaceViews []View
 		for _, addr := range addrs {
 			if v, ok := addressView(iface, addr); ok {
@@ -412,7 +308,7 @@ func PickDefault(views []View) (View, error) {
 // suitable interface. It must be called immediately before starting a
 // session: a hotspot disconnect or DHCP address change invalidates the
 // previous choice and returns ErrGone.
-func InterfaceFor(src Source, ip string) (View, error) {
+func InterfaceFor(src Provider, ip string) (View, error) {
 	target, err := netip.ParseAddr(ip)
 	if err != nil {
 		return View{}, fmt.Errorf("netenv: %q is not an IP address: %w", ip, err)
