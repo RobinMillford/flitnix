@@ -1,10 +1,11 @@
 # Batch transfer contract
 
-This document defines the batch contract through Phase 4. Phase 3 added
+This document defines the batch contract through Phase 5. Phase 3 added
 phone-to-desktop folder selection and sequential folder uploads. Phase 4 adds
 desktop-private file/folder source selection, native folder enumeration, and
 Wails file-drop registration. It does not add desktop-to-phone batch
-downloads, ZIP downloads, persistence, or resumable transfers.
+downloads, and Phase 5 adds browser-native desktop-to-phone downloads. Queue
+persistence and resumable transfers are still not included.
 
 ## Domain model
 
@@ -26,8 +27,33 @@ one regular-file item and retains the existing direct-download registration.
 A folder source has a private absolute root and trusted items with normalized
 paths relative to that root. `SourceView` contains only an opaque ID,
 kind, display/root name, item count, total bytes, and creation time. Folder
-sources are not included in the phone-facing `/api/files` listing until
-Phase 5 adds the archive pipeline.
+The phone-facing `/api/sources` projection includes both source records and
+legacy shared files without exposing their paths.
+
+## Desktop-to-phone downloads
+
+`POST /api/download-grants` accepts an ordered list of source IDs and
+pre-validates the complete archive manifest before returning. A single regular
+file remains a direct streamed response; collections and folders are streamed
+as an uncompressed `zip.Store` archive. Folder roots, nested paths, and empty
+directory entries are retained. Duplicate archive names receive deterministic
+numeric suffixes.
+
+The response contains a short-lived opaque download URL and a progress ID.
+The URL contains no bearer token. A separate random, `HttpOnly`,
+`SameSite=Strict` cookie is scoped to that exact URL and is consumed
+atomically, so grants are one-use, expire after approximately one minute, and
+cannot be replayed. Grant and progress state are in-memory and session-bound
+to the authenticated creator; they are removed with process state and are not
+resumable.
+
+Archive generation validates trusted source files again immediately before
+opening them, streams one file at a time, and does not buffer the archive or
+write a temporary complete ZIP. Progress reports server-side bytes processed;
+it cannot prove that a mobile browser finished saving a native download.
+Disconnects and source changes fail the operation honestly. The browser
+cannot create arbitrary folders in Downloads, so ZIP extraction remains a
+user/device action.
 
 ## Coordinator and queue semantics
 
