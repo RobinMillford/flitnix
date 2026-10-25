@@ -1,15 +1,49 @@
 // Package server implements Flitnix's standalone HTTP server for the
 // phone-facing webpage.
 //
-// The package depends only on the Go standard library and is deliberately
-// independent of the Wails desktop layer: the desktop application constructs
-// a server with New and runs it with Serve, and the routing can be exercised
-// with plain [httptest] under go test.
+// The package depends only on the Go standard library, the session manager
+// and the transfer service, and is deliberately independent of the Wails
+// desktop layer: the desktop application (the composition root) constructs
+// a server with New — wiring Config.Services when the transfer endpoints
+// should exist — and runs it with Serve. The routing can be exercised with
+// plain [httptest] under go test.
 //
 // For this stage the server is loopback-only (default address
-// 127.0.0.1:43821) and serves no file-transfer endpoints; those arrive in
-// later stages. If the configured address is already in use, Serve returns a
-// clear error instead of silently picking another port.
+// 127.0.0.1:43821). If Config.Services is nil the server serves only the
+// page routes and every /api/ path 404s; otherwise /api/* carries the
+// file-transfer endpoints behind Bearer-token authentication. If the
+// configured address is already in use, Serve returns a clear error instead
+// of silently picking another port.
+//
+// # Timeout policy
+//
+// A file-transfer server cannot use blanket ReadTimeout/WriteTimeout on
+// http.Server: those are absolute per-connection bounds that would kill a
+// legitimately large transfer that simply needs longer than the bound, and
+// a laptop-sized network hiccup would abort hours of upload. The policy
+// here is deliberately generous for throughput and strict for stalls:
+//
+//   - ReadHeaderTimeout (10s) bounds how long a fresh connection may take
+//     to deliver its request headers; this is the classic baseline defence
+//     against slowloris clients.
+//   - Transfer-stall timeout (Config.TransferStall, default 30s; negative
+//     disables it) bounds inactivity, not duration: on /api/* request endpoints
+//     a rolling per-request read/write deadline is refreshed before every
+//     body read and every response write via http.NewResponseController.
+//     A sender that pushes a gigabyte non-stop never trips it; a sender that
+//     stops making progress (or a client that stops draining a download)
+//     is cut after the stall window. The sessions' own idle-expiry never
+//     aborts an in-flight transfer because the handlers pin the session
+//     for the duration of streaming.
+//   - No absolute cap exists on transfer duration or file size by design.
+//   - Shutdown: Serve's graceful drain uses Config.ShutdownTimeout; when
+//     the drain window elapses the remaining connections are force-closed,
+//     which promptly fails any transfer still in flight (its record ends
+//     failed, not silently 200).
+//
+// The transfer-stall deadline is best effort: ResponseController is
+// unsupported in some testing sinks, and a failure to set it is ignored
+// rather than failing an otherwise good request.
 package server
 
 import (
@@ -21,6 +55,9 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/itsyamin/flitnix/internal/session"
+	"github.com/itsyamin/flitnix/internal/transfer"
 )
 
 // DefaultListenAddr is the loopback-only address the server binds to unless
@@ -30,13 +67,16 @@ const DefaultListenAddr = "127.0.0.1:43821"
 const (
 	defaultShutdownTimeout = 5 * time.Second
 	readHeaderTimeout      = 10 * time.Second
-	readTimeout            = 30 * time.Second
-	writeTimeout           = 60 * time.Second
 	idleTimeout            = 2 * time.Minute
+
+	// defaultTransferStall is the default inactivity window for /api/*
+	// request bodies and response writes.
+	defaultTransferStall = 30 * time.Second
 )
 
 // Config controls server startup. Zero values are valid: ListenAddr
-// defaults to DefaultListenAddr and ShutdownTimeout to a 5s drain window.
+// defaults to DefaultListenAddr, ShutdownTimeout to a 5s drain window and
+// TransferStall to 30s.
 type Config struct {
 	// ListenAddr is the TCP host:port to bind, e.g. "127.0.0.1:43821".
 	ListenAddr string
@@ -44,6 +84,28 @@ type Config struct {
 	// ShutdownTimeout bounds the graceful-drain phase when a Serve context
 	// is cancelled. After it elapses remaining connections are closed.
 	ShutdownTimeout time.Duration
+
+	// TransferStall bounds inactivity (not duration) on the /api/*
+	// transfer endpoints: a rolling read/write deadline is refreshed
+	// before every body read and every response write, so slow-but-alive
+	// transfers of any size pass while stuck ones are cut after the
+	// window. 0 selects the default (30s); a negative value disables the
+	// per-request deadlines entirely.
+	TransferStall time.Duration
+
+	// Services wires the session manager and transfer layer behind the
+	// /api/ endpoints. A nil Services keeps the server page-only: every
+	// /api/ path answers 404. It must be fully populated otherwise.
+	Services *Services
+}
+
+// Services bundles the collaborators the API endpoints need. The desktop
+// application is the composition root: it owns these instances (and the
+// receive Store inside the transfer Service) and handed to Config.
+type Services struct {
+	Sessions  *session.Manager
+	Transfers *transfer.Service
+	Registry  *transfer.Registry
 }
 
 // normalize fills in zero-value defaults.
@@ -54,6 +116,10 @@ func (c *Config) normalize() {
 	if c.ShutdownTimeout <= 0 {
 		c.ShutdownTimeout = defaultShutdownTimeout
 	}
+	if c.TransferStall == 0 {
+		c.TransferStall = defaultTransferStall
+	}
+	// A negative TransferStall is kept: it disables per-request deadlines.
 }
 
 // Server is the HTTP server for the phone page. A Server is created once
@@ -75,18 +141,24 @@ type Server struct {
 }
 
 // New prepares a server. No network is touched until Serve is called, so
-// construction cannot fail.
+// construction cannot fail. A fully populated Services yields a server with
+// authenticated transfer endpoints; a nil Services keeps the page-only
+// behaviour (all /api/ paths 404).
 func New(cfg Config) *Server {
 	cfg.normalize()
-	handler := newRouter()
+	handler := newRouter(cfg.Services, cfg.TransferStall)
 	return &Server{
 		cfg: cfg,
 		http: &http.Server{
 			Handler:           handler,
 			ReadHeaderTimeout: readHeaderTimeout,
-			ReadTimeout:       readTimeout,
-			WriteTimeout:      writeTimeout,
-			IdleTimeout:       idleTimeout,
+			// ReadTimeout/WriteTimeout are deliberately NOT set: they
+			// are absolute per-connection bounds that cannot express
+			// "any size goes through, stalls do not". The /api/*
+			// handlers enforce rolling per-request deadlines instead
+			// (see the package timeout policy); the page routes need
+			// no body handling.
+			IdleTimeout: idleTimeout,
 		},
 		handler: handler,
 		ready:   make(chan struct{}),
