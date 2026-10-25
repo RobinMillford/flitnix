@@ -2,7 +2,10 @@
 
 package netenv
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestParseNMCLIOutputSeparatesProfileAndSSID(t *testing.T) {
 	metadata := parseNMCLIOutput("802-11-wireless\nHome\\: 5G\n", upIf("wlo1"))
@@ -24,5 +27,33 @@ func TestActiveSSIDMatchesInterfaceAndUnescapesFields(t *testing.T) {
 	}
 	if got := activeSSID(output, "wlan0"); got != "" {
 		t.Fatalf("inactive interface SSID = %q, want empty", got)
+	}
+}
+
+func TestActiveSSIDWithRetryHandlesNetworkManagerWarmup(t *testing.T) {
+	attempts := 0
+	got := activeSSIDWithRetry(context.Background(), "wlo1", func() (string, error) {
+		attempts++
+		if attempts == 1 {
+			return "*:--:wlo1\n", nil
+		}
+		return "*:moto\\: hotspot:wlo1\n", nil
+	})
+	if got != "moto: hotspot" {
+		t.Fatalf("activeSSIDWithRetry = %q, want the active SSID", got)
+	}
+	if attempts != 2 {
+		t.Fatalf("query attempts = %d, want bounded retry count 2", attempts)
+	}
+}
+
+func TestActiveSSIDWithRetryDoesNotRetryAfterSuccess(t *testing.T) {
+	attempts := 0
+	got := activeSSIDWithRetry(context.Background(), "wlo1", func() (string, error) {
+		attempts++
+		return "*:connected:wlo1\n", nil
+	})
+	if got != "connected" || attempts != 1 {
+		t.Fatalf("got %q after %d attempts, want one successful lookup", got, attempts)
 	}
 }

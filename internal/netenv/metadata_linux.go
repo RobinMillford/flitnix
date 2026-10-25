@@ -24,12 +24,36 @@ func systemMetadata(iface net.Interface) Metadata {
 	if metadata.Type != "Wi-Fi" {
 		return metadata
 	}
-	wifi := exec.CommandContext(ctx, "nmcli", "-t", "-f", "IN-USE,SSID,DEVICE", "device", "wifi", "list", "ifname", iface.Name)
-	wifiOut, err := wifi.Output()
-	if err == nil && ctx.Err() == nil {
-		metadata.SSID = activeSSID(string(wifiOut), iface.Name)
-	}
+	metadata.SSID = activeSSIDWithRetry(ctx, iface.Name, func() (string, error) {
+		wifi := exec.CommandContext(ctx, "nmcli", "-t", "-f", "IN-USE,SSID,DEVICE", "device", "wifi", "list", "ifname", iface.Name)
+		out, err := wifi.Output()
+		return string(out), err
+	})
 	return metadata
+}
+
+// activeSSIDWithRetry allows NetworkManager a short, bounded window to expose
+// the active access point after the interface becomes usable. It never
+// retries indefinitely and does not publish a partial metadata result.
+func activeSSIDWithRetry(ctx context.Context, interfaceName string, query func() (string, error)) string {
+	for attempt := 0; attempt < 2; attempt++ {
+		output, err := query()
+		if err == nil {
+			if ssid := activeSSID(output, interfaceName); ssid != "" {
+				return ssid
+			}
+		}
+		if attempt == 0 {
+			timer := time.NewTimer(100 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ""
+			case <-timer.C:
+			}
+		}
+	}
+	return ""
 }
 
 func parseNMCLIOutput(output string, iface net.Interface) Metadata {

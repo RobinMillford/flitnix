@@ -29,6 +29,7 @@
   let activeInterfaceName = ''
   let activeAddress = ''
   let networkChooserOpen = false
+  let networkRefreshGeneration = 0
   const SESSION_PORT = '43821'
 
   function stringOfError(err: unknown): string {
@@ -72,34 +73,51 @@
       if (qrKey === key) { qrUrl = ''; qrError = stringOfError(err) }
     }
   }
-  async function loadInterfaces(): Promise<void> {
+  async function refreshNetwork(): Promise<void> {
+    const generation = ++networkRefreshGeneration
     loadingIfaces = true
+    ifaceError = ''
     try {
       const next = await ListNetworkInterfaces()
+      if (generation !== networkRefreshGeneration) return
       interfaces = next
-      ifaceError = ''
       if (next.length === 1) {
         selectedIp = next[0].ip
         networkChooserOpen = false
       } else if (!next.some((item) => item.ip === selectedIp)) {
         selectedIp = ''
-        networkChooserOpen = next.length > 1
+        networkChooserOpen = false
       }
     } catch (err) {
+      if (generation !== networkRefreshGeneration) return
       interfaces = []; selectedIp = ''; ifaceError = stringOfError(err)
-    } finally { loadingIfaces = false }
+    } finally {
+      if (generation === networkRefreshGeneration) loadingIfaces = false
+    }
   }
-  function startSession(): void {
+  async function startSession(): Promise<void> {
     if (starting) return
     if (interfaces.length > 1 && !selectedIp) {
       errorText = 'Choose the network interface that connects to the phone, then start.'
       return
     }
     starting = true
-    StartSession(selectedIp).then((v) => {
+    try {
+      await refreshNetwork()
+      if (ifaceError) throw new Error(ifaceError)
+      if (interfaces.length === 0) throw new Error('No network available. Connect to Wi-Fi or Ethernet to continue.')
+      if (interfaces.length > 1 && !selectedIp) {
+        throw new Error('Choose the network interface that connects to the phone, then start.')
+      }
+      const v = await StartSession(selectedIp)
       activeInterfaceName = v.interfaceName ?? ''; activeAddress = v.address ?? ''
-      return fetchQR(v.key)
-    }).then(refresh).catch(report).finally(() => { starting = false })
+      await fetchQR(v.key)
+      await refresh()
+    } catch (err) {
+      report(err)
+    } finally {
+      starting = false
+    }
   }
   function endSession(key: string): void {
     const k = `end:${key}`; if (isBusy(k)) return
@@ -149,7 +167,8 @@
     : interfaces.find((item) => item.ip === selectedIp) ?? null
 
   onMount(() => {
-    refresh(); loadInterfaces()
+    refresh()
+    refreshNetwork()
     const id = setInterval(refresh, 800)
     return () => clearInterval(id)
   })
@@ -196,7 +215,7 @@
               <option value="" disabled>Select a network…</option>
               {#each interfaces as itf (itf.ip)}<option value={itf.ip}>{itf.friendlyName || `${itf.type || 'Network'} · Name unavailable`} · {itf.type || 'Network'}</option>{/each}
             </select>
-            <button class="button ghost" on:click={loadInterfaces} disabled={loadingIfaces}>{loadingIfaces ? 'Scanning…' : 'Rescan'}</button>
+            <button class="button ghost" on:click={refreshNetwork} disabled={loadingIfaces}>{loadingIfaces ? 'Refreshing…' : 'Rescan'}</button>
           </div>
         {/if}
         {#if currentNetwork}
