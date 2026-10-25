@@ -163,16 +163,26 @@ func TestStartSessionRequiresRuntimeContext(t *testing.T) {
 // addresses, unfiltered by anything product-logic-specific.
 func TestListNetworkInterfaces(t *testing.T) {
 	a := newTestApp(t)
-	a.source = fakeSource(
-		[]net.Interface{upIf("eth9")},
-		map[string][]net.Addr{"eth9": {ipnet24(192, 168, 3, 3)}},
-	)
+	a.source = netenv.Source{
+		Interfaces: func() ([]net.Interface, error) { return []net.Interface{upIf("wlo1")}, nil },
+		Addrs: func(ic net.Interface) ([]net.Addr, error) {
+			return []net.Addr{ipnet24(192, 168, 3, 3)}, nil
+		},
+		Metadata: func(ic net.Interface) netenv.Metadata {
+			return netenv.Metadata{
+				SSID:           "runtime hotspot",
+				ConnectionName: "saved profile",
+				Type:           "Wi-Fi",
+			}
+		},
+	}
 	ifaces, err := a.ListNetworkInterfaces()
 	if err != nil {
 		t.Fatalf("ListNetworkInterfaces: %v", err)
 	}
-	if len(ifaces) != 1 || ifaces[0].Name != "eth9" || ifaces[0].IP != "192.168.3.3" {
-		t.Fatalf("got %+v, want exactly eth9/192.168.3.3", ifaces)
+	if len(ifaces) != 1 || ifaces[0].Name != "wlo1" || ifaces[0].IP != "192.168.3.3" ||
+		ifaces[0].FriendlyName != "runtime hotspot" || ifaces[0].ConnectionName != "saved profile" {
+		t.Fatalf("got %+v, want the same candidate to carry address, SSID and profile", ifaces)
 	}
 }
 
