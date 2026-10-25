@@ -86,15 +86,46 @@ type SharedFileView struct {
 	Created time.Time `json:"created"`
 }
 
+type BatchItemView struct {
+	ID           string `json:"id"`
+	BatchID      string `json:"batchId"`
+	Sequence     int    `json:"sequence"`
+	RelativePath string `json:"relativePath,omitempty"`
+	DisplayName  string `json:"displayName"`
+	DeclaredSize int64  `json:"declaredSize"`
+	Transferred  int64  `json:"transferred"`
+	State        string `json:"state"`
+	SHA256       string `json:"sha256,omitempty"`
+	Error        string `json:"error,omitempty"`
+}
+
+type BatchView struct {
+	ID                 string          `json:"id"`
+	Direction          string          `json:"direction"`
+	Kind               string          `json:"kind"`
+	RootName           string          `json:"rootName,omitempty"`
+	Items              []BatchItemView `json:"items"`
+	TotalItemCount     int             `json:"totalItemCount"`
+	DeclaredTotalBytes int64           `json:"declaredTotalBytes"`
+	TransferredBytes   int64           `json:"transferredBytes"`
+	State              string          `json:"state"`
+	ApprovalState      string          `json:"approvalState"`
+	CreatedAt          time.Time       `json:"createdAt"`
+	StartedAt          time.Time       `json:"startedAt,omitempty"`
+	CompletedAt        time.Time       `json:"completedAt,omitempty"`
+	Error              string          `json:"error,omitempty"`
+}
+
 // App owns the Flitnix core instances and the desktop lifecycle.
 type App struct {
 	ctx context.Context
 
-	store     *transfer.Store
-	sessions  *session.Manager
-	transfers *transfer.Service
-	registry  *transfer.Registry
-	downloads *transfer.DownloadRegistry
+	store       *transfer.Store
+	sessions    *session.Manager
+	transfers   *transfer.Service
+	coordinator *transfer.Coordinator
+	registry    *transfer.Registry
+	downloads   *transfer.DownloadRegistry
 
 	// source supplies live network-interface state for the session
 	// address decisions; tests inject synthetic interfaces.
@@ -117,12 +148,13 @@ func NewApp() (*App, error) {
 		return nil, err
 	}
 	return &App{
-		store:     store,
-		sessions:  session.NewManager(session.Config{}),
-		transfers: transfer.NewService(transfer.Config{Store: store}),
-		registry:  transfer.NewRegistry(),
-		downloads: transfer.NewDownloadRegistry(),
-		source:    netenv.DefaultSource(),
+		store:       store,
+		sessions:    session.NewManager(session.Config{}),
+		transfers:   transfer.NewService(transfer.Config{Store: store}),
+		coordinator: transfer.NewCoordinator(transfer.CoordinatorConfig{}),
+		registry:    transfer.NewRegistry(),
+		downloads:   transfer.NewDownloadRegistry(),
+		source:      netenv.DefaultSource(),
 	}, nil
 }
 
@@ -140,6 +172,7 @@ func (a *App) startup(ctx context.Context) {
 func (a *App) shutdown(ctx context.Context) {
 	for _, s := range a.sessions.ActiveSessions() {
 		a.transfers.CancelSession(s.Key())
+		_ = a.coordinator.CloseSession(s.Key())
 		a.downloads.CancelSession(s.Key())
 	}
 	a.sessions.Close()
@@ -179,10 +212,11 @@ func (a *App) startServerLocked(listen string) error {
 	srv := server.New(server.Config{
 		ListenAddr: listen,
 		Services: &server.Services{
-			Sessions:  a.sessions,
-			Transfers: a.transfers,
-			Registry:  a.registry,
-			Downloads: a.downloads,
+			Sessions:    a.sessions,
+			Transfers:   a.transfers,
+			Coordinator: a.coordinator,
+			Registry:    a.registry,
+			Downloads:   a.downloads,
 		},
 	})
 	serveCtx, cancel := context.WithCancel(context.Background())
@@ -236,6 +270,7 @@ func (a *App) endAllSessions() {
 	for _, s := range a.sessions.ActiveSessions() {
 		key := s.Key()
 		a.transfers.CancelSession(key)
+		_ = a.coordinator.CloseSession(key)
 		a.downloads.CancelSession(key)
 		for _, sf := range a.registry.ListSession(key) {
 			a.registry.Remove(sf.ID)
@@ -394,6 +429,7 @@ func (a *App) EndSession(key string) error {
 		return errors.New("flitnix: no active session matches that identifier")
 	}
 	a.transfers.CancelSession(key)
+	_ = a.coordinator.CloseSession(key)
 	for _, sf := range a.registry.ListSession(key) {
 		a.registry.Remove(sf.ID)
 	}
@@ -456,6 +492,116 @@ func (a *App) RejectUpload(id string) (UploadView, error) {
 // receive file is closed immediately and the record ends canceled.
 func (a *App) CancelUpload(id string) error {
 	return a.transfers.Cancel(id)
+}
+
+func (a *App) ListPendingBatches() []BatchView {
+	return a.listBatches(func(v transfer.BatchView) bool {
+		return v.ApprovalState == transfer.ApprovalPending
+	})
+}
+
+func (a *App) ListBatches() []BatchView {
+	return a.listBatches(func(transfer.BatchView) bool { return true })
+}
+
+func (a *App) GetBatch(id string) (BatchView, error) {
+	key, err := a.findBatchSession(id)
+	if err != nil {
+		return BatchView{}, err
+	}
+	v, err := a.coordinator.GetBatch(key, id)
+	return batchView(v), err
+}
+
+func (a *App) ApproveBatch(id string) (BatchView, error) {
+	key, err := a.findBatchSession(id)
+	if err != nil {
+		return BatchView{}, err
+	}
+	v, err := a.coordinator.GetBatch(key, id)
+	if err != nil {
+		return BatchView{}, err
+	}
+	for _, item := range v.Items {
+		contentID, contentErr := a.coordinator.ItemContentID(key, id, item.ID)
+		if contentErr != nil {
+			return BatchView{}, contentErr
+		}
+		if _, decideErr := a.transfers.Decide(contentID, true); decideErr != nil {
+			for _, cleanup := range v.Items {
+				if cleanupID, cleanupErr := a.coordinator.ItemContentID(key, id, cleanup.ID); cleanupErr == nil {
+					_ = a.transfers.Cancel(cleanupID)
+				}
+			}
+			_, _ = a.coordinator.RejectBatch(key, id)
+			return BatchView{}, decideErr
+		}
+	}
+	v, err = a.coordinator.ApproveBatch(key, id)
+	if err != nil {
+		return BatchView{}, err
+	}
+	v, err = a.coordinator.GetBatch(key, id)
+	return batchView(v), err
+}
+
+func (a *App) RejectBatch(id string) (BatchView, error) {
+	key, err := a.findBatchSession(id)
+	if err != nil {
+		return BatchView{}, err
+	}
+	v, err := a.coordinator.RejectBatch(key, id)
+	if err != nil {
+		return BatchView{}, err
+	}
+	for _, item := range v.Items {
+		if contentID, contentErr := a.coordinator.ItemContentID(key, id, item.ID); contentErr == nil {
+			_ = a.transfers.Cancel(contentID)
+		}
+	}
+	return batchView(v), nil
+}
+
+func (a *App) CancelBatch(id string) error {
+	key, err := a.findBatchSession(id)
+	if err != nil {
+		return err
+	}
+	v, err := a.coordinator.CancelBatch(key, id)
+	if err != nil {
+		return err
+	}
+	for _, item := range v.Items {
+		if contentID, contentErr := a.coordinator.ItemContentID(key, id, item.ID); contentErr == nil {
+			_ = a.transfers.Cancel(contentID)
+		}
+	}
+	return nil
+}
+
+func (a *App) listBatches(filter func(transfer.BatchView) bool) []BatchView {
+	var out []BatchView
+	for _, sess := range a.sessions.ActiveSessions() {
+		items, err := a.coordinator.ListBatches(sess.Key())
+		if err != nil {
+			continue
+		}
+		for _, item := range items {
+			if filter(item) {
+				out = append(out, batchView(item))
+			}
+		}
+	}
+	return out
+}
+
+func (a *App) findBatchSession(id string) (string, error) {
+	for _, sess := range a.sessions.ActiveSessions() {
+		if _, err := a.coordinator.GetBatch(sess.Key(), id); err == nil {
+			return sess.Key(), nil
+		}
+	}
+	return "", errors.New("flitnix: batch not found")
 }
 
 // ---- Bound methods: shared files ----
@@ -548,6 +694,26 @@ func sharedFileView(sf transfer.SharedFile) SharedFileView {
 		Name:    sf.Name,
 		Size:    sf.Size,
 		Created: sf.Created,
+	}
+}
+
+func batchView(b transfer.BatchView) BatchView {
+	items := make([]BatchItemView, 0, len(b.Items))
+	for _, item := range b.Items {
+		items = append(items, BatchItemView{
+			ID: item.ID, BatchID: item.BatchID, Sequence: item.Sequence,
+			RelativePath: item.RelativePath, DisplayName: item.DisplayName,
+			DeclaredSize: item.DeclaredSize, Transferred: item.Transferred,
+			State: string(item.State), SHA256: item.SHA256, Error: item.Error,
+		})
+	}
+	return BatchView{
+		ID: b.ID, Direction: string(b.Direction), Kind: string(b.Kind),
+		RootName: b.RootName, Items: items, TotalItemCount: b.TotalItemCount,
+		DeclaredTotalBytes: b.DeclaredTotalBytes, TransferredBytes: b.TransferredBytes,
+		State: string(b.State), ApprovalState: string(b.ApprovalState),
+		CreatedAt: b.CreatedAt, StartedAt: b.StartedAt, CompletedAt: b.CompletedAt,
+		Error: b.Error,
 	}
 }
 

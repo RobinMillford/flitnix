@@ -3,13 +3,23 @@
 import {main} from '../models';
 import {netenv} from '../models';
 
+export function ApproveBatch(arg1:string):Promise<main.BatchView>;
+
 export function ApproveUpload(arg1:string):Promise<main.UploadView>;
+
+export function CancelBatch(arg1:string):Promise<void>;
 
 export function CancelUpload(arg1:string):Promise<void>;
 
 export function EndSession(arg1:string):Promise<void>;
 
+export function GetBatch(arg1:string):Promise<main.BatchView>;
+
+export function ListBatches():Promise<Array<main.BatchView>>;
+
 export function ListNetworkInterfaces():Promise<Array<netenv.View>>;
+
+export function ListPendingBatches():Promise<Array<main.BatchView>>;
 
 export function ListPendingUploads():Promise<Array<main.UploadView>>;
 
@@ -24,6 +34,8 @@ export function ReceiveDirectory():Promise<string>;
 export function RecentDownloads():Promise<Array<main.DownloadView>>;
 
 export function RecentUploads():Promise<Array<main.UploadView>>;
+
+export function RejectBatch(arg1:string):Promise<main.BatchView>;
 
 export function RejectUpload(arg1:string):Promise<main.UploadView>;
 
