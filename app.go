@@ -21,7 +21,9 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -84,6 +86,19 @@ type SharedFileView struct {
 	Name    string    `json:"name"`
 	Size    int64     `json:"size"`
 	Created time.Time `json:"created"`
+}
+
+// SharedSourceView describes a desktop selection without exposing its local
+// path. Folder sources are prepared for a later archive-transfer phase and
+// are not yet listed as downloadable phone files.
+type SharedSourceView struct {
+	ID         string    `json:"id"`
+	Kind       string    `json:"kind"`
+	Name       string    `json:"name"`
+	RootName   string    `json:"rootName,omitempty"`
+	ItemCount  int       `json:"itemCount"`
+	TotalBytes int64     `json:"totalBytes"`
+	Created    time.Time `json:"created"`
 }
 
 type BatchItemView struct {
@@ -275,6 +290,9 @@ func (a *App) endAllSessions() {
 		for _, sf := range a.registry.ListSession(key) {
 			a.registry.Remove(sf.ID)
 		}
+		for _, source := range a.registry.ListSourceSession(key) {
+			a.registry.RemoveSource(source.ID)
+		}
 		a.sessions.RevokeSession(s)
 	}
 	if a.sessions.Len() == 0 {
@@ -432,6 +450,9 @@ func (a *App) EndSession(key string) error {
 	_ = a.coordinator.CloseSession(key)
 	for _, sf := range a.registry.ListSession(key) {
 		a.registry.Remove(sf.ID)
+	}
+	for _, source := range a.registry.ListSourceSession(key) {
+		a.registry.RemoveSource(source.ID)
 	}
 	a.sessions.RevokeSession(target)
 	if a.sessions.Len() == 0 {
@@ -621,13 +642,63 @@ func (a *App) PickFilesForSharing() ([]SharedFileView, error) {
 	}
 	views := make([]SharedFileView, 0, len(paths))
 	for _, p := range paths {
-		sf, addErr := a.registry.Add(p, filepath.Base(p), "")
+		source, addErr := a.registry.AddFileSource(p, filepath.Base(p), "")
 		if addErr != nil {
 			// Keep what succeeded so far; tell the user about the file
 			// that could not be registered.
 			return views, fmt.Errorf("%s: %w", filepath.Base(p), addErr)
 		}
-		views = append(views, sharedFileView(sf))
+		views = append(views, SharedFileView{
+			ID: source.ID, Name: source.Name, Size: source.Items[0].Size,
+			Created: source.Created,
+		})
+	}
+	return views, nil
+}
+
+// PickFolderForSharing opens the native directory picker and prepares one
+// folder source. The source stays desktop-private until archive downloads are
+// implemented. Canceling leaves existing selections unchanged.
+func (a *App) PickFolderForSharing() (SharedSourceView, error) {
+	path, err := runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Choose a folder to share",
+	})
+	if err != nil || path == "" {
+		return SharedSourceView{}, nil
+	}
+	source, err := a.registry.AddFolder(path, "")
+	if err != nil {
+		return SharedSourceView{}, err
+	}
+	return sharedSourceView(source), nil
+}
+
+// AddDroppedSources registers native paths delivered by Wails file-drop
+// integration. Each path is handled independently so one invalid drop does
+// not remove or invalidate existing selections.
+func (a *App) AddDroppedSources(paths []string) ([]SharedSourceView, error) {
+	views := make([]SharedSourceView, 0, len(paths))
+	var failures []string
+	for _, path := range paths {
+		info, err := os.Lstat(path)
+		if err != nil {
+			failures = append(failures, filepath.Base(path)+": "+err.Error())
+			continue
+		}
+		var source transfer.SharedSource
+		if info.IsDir() {
+			source, err = a.registry.AddFolder(path, "")
+		} else {
+			source, err = a.registry.AddFileSource(path, filepath.Base(path), "")
+		}
+		if err != nil {
+			failures = append(failures, filepath.Base(path)+": "+err.Error())
+			continue
+		}
+		views = append(views, sharedSourceView(source))
+	}
+	if len(failures) > 0 {
+		return views, fmt.Errorf("could not add dropped source(s): %s", strings.Join(failures, "; "))
 	}
 	return views, nil
 }
@@ -642,11 +713,31 @@ func (a *App) ListSharedFiles() []SharedFileView {
 	return views
 }
 
+// ListSharedSources returns desktop-private source selections. It is
+// intentionally separate from ListSharedFiles until Phase 5 adds archive
+// downloads for folders and collections.
+func (a *App) ListSharedSources() []SharedSourceView {
+	sources := a.registry.ListSources()
+	views := make([]SharedSourceView, 0, len(sources))
+	for _, source := range sources {
+		views = append(views, sharedSourceView(source))
+	}
+	return views
+}
+
 // RevokeSharedFile unlists the shared file with the given ID. The file on
 // disk is never touched.
 func (a *App) RevokeSharedFile(id string) error {
 	if !a.registry.Remove(id) {
 		return errors.New("flitnix: that file is no longer shared")
+	}
+	return nil
+}
+
+// RevokeSharedSource removes only the selected desktop source.
+func (a *App) RevokeSharedSource(id string) error {
+	if !a.registry.RemoveSource(id) {
+		return errors.New("flitnix: that source is no longer selected")
 	}
 	return nil
 }
@@ -694,6 +785,18 @@ func sharedFileView(sf transfer.SharedFile) SharedFileView {
 		Name:    sf.Name,
 		Size:    sf.Size,
 		Created: sf.Created,
+	}
+}
+
+func sharedSourceView(source transfer.SharedSource) SharedSourceView {
+	var total int64
+	for _, item := range source.Items {
+		total += item.Size
+	}
+	return SharedSourceView{
+		ID: source.ID, Kind: string(source.Kind), Name: source.Name,
+		RootName: source.RootName, ItemCount: len(source.Items),
+		TotalBytes: total, Created: source.Created,
 	}
 }
 

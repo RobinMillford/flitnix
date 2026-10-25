@@ -1,9 +1,10 @@
 # Batch transfer contract
 
-This document defines the batch contract through Phase 3. Phase 3 adds
-phone-to-desktop folder selection and sequential folder uploads. It does not
-add drag-and-drop, desktop-to-phone batch downloads, ZIP downloads,
-persistence, or resumable transfers.
+This document defines the batch contract through Phase 4. Phase 3 added
+phone-to-desktop folder selection and sequential folder uploads. Phase 4 adds
+desktop-private file/folder source selection, native folder enumeration, and
+Wails file-drop registration. It does not add desktop-to-phone batch
+downloads, ZIP downloads, persistence, or resumable transfers.
 
 ## Domain model
 
@@ -19,6 +20,14 @@ private source path.
 contain session ownership keys, bearer tokens, or absolute desktop paths.
 The server calculates aggregate declared bytes from validated item sizes.
 No batch state is persisted in this phase.
+
+Desktop selections use a separate `SharedSource` record. A file source has
+one regular-file item and retains the existing direct-download registration.
+A folder source has a private absolute root and trusted items with normalized
+paths relative to that root. `SourceView` contains only an opaque ID,
+kind, display/root name, item count, total bytes, and creation time. Folder
+sources are not included in the phone-facing `/api/files` listing until
+Phase 5 adds the archive pipeline.
 
 ## Coordinator and queue semantics
 
@@ -109,6 +118,13 @@ syntax, traversal, empty components, control characters, invalid UTF-8,
 overlong/deep paths, colons, trailing spaces/dots, and Windows device names.
 This does not by itself prove that a later filesystem operation is safe.
 
+Desktop folder enumeration does not follow directory symlinks and skips
+symlinked files and special files. It records empty directories internally,
+but does not claim they are downloadable until archive generation supports
+them. Enumeration is bounded to 100,000 files and 100,000 empty directories;
+each normalized source path is bounded to 4,096 bytes. A failed enumeration
+does not register a partial source.
+
 Initial defaults are 5,000 items, 4,096 bytes per canonical relative path,
 230 bytes per component, 64 components per path, and an `int64` total-size
 ceiling. Limits are configurable through `ManifestLimits`.
@@ -133,3 +149,13 @@ Desktop-to-phone folders will use a streamed, uncompressed ZIP as the
 universal default. Ordinary mobile browsers cannot universally create
 arbitrary directory trees in Downloads, and File System Access API support and
 secure-context requirements vary. ZIP extraction remains a user/device action.
+
+## Desktop source selection
+
+The native Wails multi-file picker remains the direct single-file workflow.
+The directory picker and native file-drop callback feed the same source
+registry. Re-adding the same file source is idempotent; separate folder
+selections always receive distinct opaque identities, even when their display
+names match. Removing a source only unlists it and never modifies the
+original files. Wails drop listeners are registered once on component mount
+and removed on unmount.

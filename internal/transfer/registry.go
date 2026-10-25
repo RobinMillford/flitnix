@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -44,15 +45,17 @@ type SharedFile struct {
 // safe for concurrent use. Revoking a file only unlists it; the original
 // file stays on the user's disk untouched.
 type Registry struct {
-	mu    sync.Mutex
-	next  int64
-	files map[string]SharedFile
-	order []string // insertion order for stable listing
+	mu          sync.Mutex
+	next        int64
+	files       map[string]SharedFile
+	order       []string // insertion order for stable listing
+	sources     map[string]SharedSource
+	sourceOrder []string
 }
 
 // NewRegistry prepares an empty registry.
 func NewRegistry() *Registry {
-	return &Registry{files: make(map[string]SharedFile)}
+	return &Registry{files: make(map[string]SharedFile), sources: make(map[string]SharedSource)}
 }
 
 // Add registers an existing regular file as shared. The name is sanitized
@@ -102,13 +105,22 @@ func (r *Registry) Add(path, rawName, sessionKey string) (SharedFile, error) {
 func (r *Registry) Remove(id string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, ok := r.files[id]; !ok {
+	_, fileOK := r.files[id]
+	_, sourceOK := r.sources[id]
+	if !fileOK && !sourceOK {
 		return false
 	}
 	delete(r.files, id)
+	delete(r.sources, id)
 	for i, cur := range r.order {
 		if cur == id {
 			r.order = append(r.order[:i], r.order[i+1:]...)
+			break
+		}
+	}
+	for i, cur := range r.sourceOrder {
+		if cur == id {
+			r.sourceOrder = append(r.sourceOrder[:i], r.sourceOrder[i+1:]...)
 			break
 		}
 	}
@@ -151,6 +163,102 @@ func (r *Registry) ListSession(sessionKey string) []SharedFile {
 	return out
 }
 
+// AddFolder enumerates a selected folder without reading file contents. The
+// selection is committed only after enumeration succeeds.
+func (r *Registry) AddFolder(path, sessionKey string) (SharedSource, error) {
+	rootName, items, emptyDirs, err := enumerateFolder(path)
+	if err != nil {
+		return SharedSource{}, err
+	}
+	root, err := filepath.Abs(path)
+	if err != nil {
+		return SharedSource{}, err
+	}
+	id, err := newID()
+	if err != nil {
+		return SharedSource{}, err
+	}
+	source := SharedSource{
+		ID: id, Kind: SourceKindFolder, Name: rootName, RootName: rootName,
+		Path: root, Items: items, EmptyDirs: emptyDirs, Session: sessionKey,
+		Created: time.Now(),
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.sources) >= registryMaxFiles {
+		return SharedSource{}, fmt.Errorf("%w: too many sources are shared", ErrNoCapacity)
+	}
+	r.sources[id] = source
+	r.sourceOrder = append(r.sourceOrder, id)
+	return source, nil
+}
+
+// AddFileSource registers a file as a source while preserving the legacy
+// SharedFile registration used by the direct-download endpoint.
+func (r *Registry) AddFileSource(path, rawName, sessionKey string) (SharedSource, error) {
+	file, err := r.Add(path, rawName, sessionKey)
+	if err != nil {
+		return SharedSource{}, err
+	}
+	source := SharedSource{
+		ID: file.ID, Kind: SourceKindFile, Name: file.Name, Path: file.Path,
+		Items:   []SourceItem{{RelativePath: file.Name, Size: file.Size, Path: file.Path}},
+		Session: file.Session, Created: file.Created,
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if existing, ok := r.sources[source.ID]; ok {
+		return existing, nil
+	}
+	for _, existing := range r.sources {
+		if existing.Kind == SourceKindFile && existing.Path == path && existing.Session == sessionKey {
+			delete(r.files, file.ID)
+			for i, current := range r.order {
+				if current == file.ID {
+					r.order = append(r.order[:i], r.order[i+1:]...)
+					break
+				}
+			}
+			return existing, nil
+		}
+	}
+	r.sources[source.ID] = source
+	r.sourceOrder = append(r.sourceOrder, source.ID)
+	return source, nil
+}
+
+// ListSources returns stable desktop source metadata in insertion order.
+func (r *Registry) ListSources() []SharedSource {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]SharedSource, 0, len(r.sources))
+	for _, id := range r.sourceOrder {
+		if source, ok := r.sources[id]; ok {
+			source.Items = append([]SourceItem(nil), source.Items...)
+			source.EmptyDirs = append([]string(nil), source.EmptyDirs...)
+			out = append(out, source)
+		}
+	}
+	return out
+}
+
+// RemoveSource removes only the selected source. Original files are never
+// modified. Legacy file registrations are removed with file sources.
+func (r *Registry) RemoveSource(id string) bool {
+	return r.Remove(id)
+}
+
+// ListSourceSession returns sources owned by one session.
+func (r *Registry) ListSourceSession(sessionKey string) []SharedSource {
+	var out []SharedSource
+	for _, source := range r.ListSources() {
+		if source.Session == sessionKey {
+			out = append(out, source)
+		}
+	}
+	return out
+}
+
 // Clear drops every registration. Called on session end: any previously
 // handed-out download URL dies with the session (downloads also always
 // require a valid live session, so this clearing is a belt-and-braces
@@ -160,6 +268,8 @@ func (r *Registry) Clear() {
 	defer r.mu.Unlock()
 	r.files = make(map[string]SharedFile)
 	r.order = nil
+	r.sources = make(map[string]SharedSource)
+	r.sourceOrder = nil
 }
 
 // Len returns the number of currently shared files.
