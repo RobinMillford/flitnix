@@ -33,12 +33,15 @@
 package netenv
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
 	"net/netip"
+	"os/exec"
 	"sort"
 	"strings"
+	"time"
 )
 
 // View is one usable local interface address as presented to the desktop.
@@ -51,6 +54,25 @@ type View struct {
 	IP string `json:"ip"`
 	// CIDR is the address with its prefix length, e.g. "192.168.1.42/24".
 	CIDR string `json:"cidr"`
+	// FriendlyName is safe to show as the primary connection identity.
+	FriendlyName string `json:"friendlyName"`
+	// Type is a broad connection type such as Wi-Fi or Ethernet.
+	Type string `json:"type"`
+	// MetadataAvailable reports whether the OS supplied connection metadata.
+	MetadataAvailable bool `json:"metadataAvailable"`
+	// ConnectionName is the saved OS connection profile name, when known.
+	// It is intentionally separate from FriendlyName/SSID.
+	ConnectionName string `json:"connectionName"`
+	// Active is true because this view represents an interface with a
+	// currently usable local address.
+	Active bool `json:"active"`
+}
+
+// Metadata is optional connection identity supplied by a platform adapter.
+type Metadata struct {
+	SSID           string
+	ConnectionName string
+	Type           string
 }
 
 // Errors surfaced for the three decision failures callers must handle.
@@ -75,6 +97,10 @@ type Source struct {
 	// Addrs lists the addresses of one interface. nil uses the
 	// interface's own Addrs method.
 	Addrs func(net.Interface) ([]net.Addr, error)
+	// Metadata returns optional user-facing connection metadata. A nil
+	// function uses the operating-system adapter and never blocks enumeration
+	// for more than its bounded command timeout.
+	Metadata func(net.Interface) Metadata
 }
 
 // DefaultSource builds the operating-system-backed source.
@@ -92,6 +118,156 @@ func (s Source) addrs(iface net.Interface) ([]net.Addr, error) {
 		return s.Addrs(iface)
 	}
 	return iface.Addrs()
+}
+
+func (s Source) metadata(iface net.Interface) Metadata {
+	if s.Metadata != nil {
+		return s.Metadata(iface)
+	}
+	return systemMetadata(iface)
+}
+
+func withMetadata(view View, metadata Metadata) View {
+	view.Type = strings.TrimSpace(metadata.Type)
+	if view.Type == "" {
+		view.Type = "Network"
+	}
+	view.FriendlyName = strings.TrimSpace(metadata.SSID)
+	if view.FriendlyName == "" {
+		switch view.Type {
+		case "Wi-Fi":
+			view.FriendlyName = "Wi-Fi network · Name unavailable"
+		case "Ethernet":
+			view.FriendlyName = "Ethernet connection"
+		default:
+			view.FriendlyName = view.Type + " connection"
+		}
+	}
+	view.MetadataAvailable = strings.TrimSpace(metadata.SSID) != "" ||
+		strings.TrimSpace(metadata.ConnectionName) != ""
+	view.ConnectionName = strings.TrimSpace(metadata.ConnectionName)
+	view.Active = true
+	return view
+}
+
+// systemMetadata obtains active connection data without requiring iw,
+// elevated permissions, or network changes. NetworkManager's terse output
+// is used because it is available on supported Fedora installations.
+func systemMetadata(iface net.Interface) Metadata {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "nmcli", "-t", "-g", "GENERAL.TYPE,GENERAL.CONNECTION", "device", "show", iface.Name)
+	out, err := cmd.Output()
+	if err != nil || ctx.Err() != nil {
+		return Metadata{Type: typeFromInterface(iface)}
+	}
+	metadata := parseNMCLIOutput(string(out), iface)
+	if metadata.Type != "Wi-Fi" {
+		return metadata
+	}
+
+	// GENERAL.CONNECTION is the saved profile name, not necessarily the
+	// broadcast SSID. Ask NetworkManager for the active AP on this device.
+	wifi := exec.CommandContext(ctx, "nmcli", "-t", "-f", "IN-USE,SSID,DEVICE", "device", "wifi", "list", "ifname", iface.Name)
+	wifiOut, err := wifi.Output()
+	if err != nil || ctx.Err() != nil {
+		return metadata
+	}
+	metadata.SSID = activeSSID(string(wifiOut), iface.Name)
+	return metadata
+}
+
+func parseNMCLIOutput(output string, iface net.Interface) Metadata {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	var rawType, rawProfile string
+	if len(lines) > 0 {
+		rawType = unescapeNMCLI(lines[0])
+	}
+	if len(lines) > 1 {
+		rawProfile = unescapeNMCLI(lines[1])
+	}
+	metadata := Metadata{Type: friendlyType(rawType, iface)}
+	metadata.ConnectionName = rawProfile
+	return metadata
+}
+
+func activeSSID(output, interfaceName string) string {
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		fields := splitNMCLIFields(line)
+		if len(fields) < 3 || strings.TrimSpace(fields[0]) != "*" || strings.TrimSpace(fields[2]) != interfaceName {
+			continue
+		}
+		if fields[1] == "" || fields[1] == "--" {
+			return ""
+		}
+		return fields[1]
+	}
+	return ""
+}
+
+func splitNMCLIFields(line string) []string {
+	var fields []string
+	var field strings.Builder
+	escaped := false
+	for _, r := range line {
+		if escaped {
+			field.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if r == '\\' {
+			escaped = true
+		} else if r == ':' {
+			fields = append(fields, field.String())
+			field.Reset()
+		} else {
+			field.WriteRune(r)
+		}
+	}
+	if escaped {
+		field.WriteByte('\\')
+	}
+	return append(fields, field.String())
+}
+
+func unescapeNMCLI(value string) string {
+	var b strings.Builder
+	escaped := false
+	for _, r := range value {
+		if escaped {
+			b.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if r == '\\' {
+			escaped = true
+			continue
+		}
+		b.WriteRune(r)
+	}
+	if escaped {
+		b.WriteByte('\\')
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func friendlyType(raw string, iface net.Interface) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "wifi", "802-11-wireless":
+		return "Wi-Fi"
+	case "ethernet":
+		return "Ethernet"
+	case "wireguard", "vpn":
+		return "VPN"
+	}
+	return typeFromInterface(iface)
+}
+
+func typeFromInterface(iface net.Interface) string {
+	if iface.Flags&net.FlagPointToPoint != 0 {
+		return "VPN"
+	}
+	return "Network"
 }
 
 // Enumerate returns every usable local IPv4 address, ordered
@@ -114,9 +290,11 @@ func Enumerate(src Source) ([]View, error) {
 		if err != nil {
 			continue
 		}
+		metadata := src.metadata(iface)
 		var ifaceViews []View
 		for _, addr := range addrs {
 			if v, ok := addressView(iface, addr); ok {
+				v = withMetadata(v, metadata)
 				ifaceViews = append(ifaceViews, v)
 			}
 		}

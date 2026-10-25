@@ -28,6 +28,7 @@
   let qrKey = ''
   let activeInterfaceName = ''
   let activeAddress = ''
+  let networkChooserOpen = false
   const SESSION_PORT = '43821'
 
   function stringOfError(err: unknown): string {
@@ -74,9 +75,16 @@
   async function loadInterfaces(): Promise<void> {
     loadingIfaces = true
     try {
-      interfaces = await ListNetworkInterfaces()
+      const next = await ListNetworkInterfaces()
+      interfaces = next
       ifaceError = ''
-      selectedIp = interfaces.length === 1 ? interfaces[0].ip : ''
+      if (next.length === 1) {
+        selectedIp = next[0].ip
+        networkChooserOpen = false
+      } else if (!next.some((item) => item.ip === selectedIp)) {
+        selectedIp = ''
+        networkChooserOpen = next.length > 1
+      }
     } catch (err) {
       interfaces = []; selectedIp = ''; ifaceError = stringOfError(err)
     } finally { loadingIfaces = false }
@@ -136,6 +144,9 @@
     return ['pending', 'approved', 'uploading'].includes(u.state)
   }
   function activeDownload(d: main.DownloadView): boolean { return d.state === 'transferring' }
+  $: currentNetwork = interfaces.length === 1
+    ? interfaces[0]
+    : interfaces.find((item) => item.ip === selectedIp) ?? null
 
   onMount(() => {
     refresh(); loadInterfaces()
@@ -158,19 +169,42 @@
   {#if errorText}<div class="alert" role="alert"><span>{errorText}</span><button on:click={() => errorText = ''} aria-label="Dismiss">×</button></div>{/if}
 
   <section class="connection panel">
-    <div class="section-heading"><div><span class="eyebrow">Connection</span><h2>Pair a phone</h2></div><span class="pill">{sessions.length} active</span></div>
+    <div class="section-heading"><div><span class="eyebrow connection-eyebrow"><span class="network-glyph" aria-hidden="true">⌁</span> Connection</span><h2>Ready to pair</h2></div><span class="pill">{sessions.length ? 'Session active' : 'Ready'}</span></div>
     <div class="connection-grid">
       <div>
-        <label for="interface">Network interface</label>
-        <div class="control-row">
-          {#if interfaces.length}
-            <select id="interface" bind:value={selectedIp} aria-label="Network interface">
-              {#if interfaces.length > 1}<option value="" disabled>Choose one…</option>{/if}
-              {#each interfaces as itf (itf.ip)}<option value={itf.ip}>{itf.name} · {itf.ip}</option>{/each}
+        <span class="connection-label">Current network</span>
+        {#if currentNetwork}
+          <div class="network-identity">
+            <span class="network-dot" aria-hidden="true"></span>
+            <div><strong>{currentNetwork.friendlyName || `${currentNetwork.type || 'Network'} · Name unavailable`}</strong><span>{currentNetwork.type || 'Network'} · Connected</span></div>
+          </div>
+          <button class="button ghost change-network" on:click={() => networkChooserOpen = !networkChooserOpen}>
+            {networkChooserOpen ? 'Hide networks' : 'Change network'}
+          </button>
+        {:else if loadingIfaces}
+          <div class="network-identity"><span class="network-dot unavailable"></span><div><strong>Looking for a network…</strong><span>Scanning available connections</span></div></div>
+        {:else if interfaces.length > 1}
+          <div class="network-identity"><span class="network-dot unavailable"></span><div><strong>Choose a network</strong><span>Multiple connections are available</span></div></div>
+          <button class="button ghost change-network" on:click={() => networkChooserOpen = true}>Change network</button>
+        {:else}
+          <div class="network-identity"><span class="network-dot unavailable"></span><div><strong>No network available</strong><span>Connect to Wi-Fi or Ethernet to continue</span></div></div>
+        {/if}
+        {#if networkChooserOpen || interfaces.length > 1}
+          <div class="network-picker">
+            <label for="interface">Choose a network</label>
+            <select id="interface" bind:value={selectedIp} aria-label="Choose a network">
+              <option value="" disabled>Select a network…</option>
+              {#each interfaces as itf (itf.ip)}<option value={itf.ip}>{itf.friendlyName || `${itf.type || 'Network'} · Name unavailable`} · {itf.type || 'Network'}</option>{/each}
             </select>
-          {:else}<span class="muted">{loadingIfaces ? 'Scanning…' : 'No usable network found'}</span>{/if}
-          <button class="button ghost" on:click={loadInterfaces} disabled={loadingIfaces}>Rescan</button>
-        </div>
+            <button class="button ghost" on:click={loadInterfaces} disabled={loadingIfaces}>{loadingIfaces ? 'Scanning…' : 'Rescan'}</button>
+          </div>
+        {/if}
+        {#if currentNetwork}
+          <details class="network-details">
+            <summary>Network details</summary>
+            <dl><div><dt>Interface</dt><dd>{currentNetwork.name || 'Unavailable'}</dd></div><div><dt>IPv4 address</dt><dd>{currentNetwork.ip || 'Unavailable'}</dd></div><div><dt>Connection type</dt><dd>{currentNetwork.type || 'Network'}</dd></div><div><dt>Profile name</dt><dd>{currentNetwork.connectionName || 'Unavailable'}</dd></div><div><dt>Metadata</dt><dd>{currentNetwork.metadataAvailable ? 'Available' : 'Name unavailable'}</dd></div></dl>
+          </details>
+        {/if}
         {#if ifaceError}<p class="error-text">{ifaceError}</p>{/if}
       </div>
       {#if sessions.length && qrUrl}
