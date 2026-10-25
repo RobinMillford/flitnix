@@ -27,11 +27,28 @@ const (
 	// component at 255 bytes; the headroom absorbs the collision
 	// suffixes (" (999)") appended later.
 	MaxFilenameBytes = 230
+
+	// MaxRelativePathBytes bounds a canonical folder path while leaving
+	// room for destination and collision handling on common filesystems.
+	MaxRelativePathBytes = 4096
+
+	// MaxPathComponentBytes matches the conservative filename limit used
+	// for every component of a folder-relative path.
+	MaxPathComponentBytes = MaxFilenameBytes
+
+	// MaxRelativePathDepth prevents manifests from creating unexpectedly
+	// deep directory trees.
+	MaxRelativePathDepth = 64
 )
 
 // ErrInvalidFilename reports a client-supplied filename that cannot be
 // stored safely.
 var ErrInvalidFilename = errors.New("transfer: invalid filename")
+
+// ErrInvalidRelativePath reports a folder path that is not safe to
+// canonicalize as a relative path. Validation is syntactic only; callers
+// must still enforce destination confinement and filesystem policies.
+var ErrInvalidRelativePath = errors.New("transfer: invalid relative path")
 
 // SanitizeName turns a client-supplied filename into a safe, bare filename
 // for the receive directory.
@@ -72,6 +89,80 @@ func SanitizeName(raw string) (string, error) {
 		}
 	}
 	return name, nil
+}
+
+// SanitizeRelativePath canonicalizes a client-supplied folder path using
+// forward slashes. It never touches the filesystem.
+//
+// The cross-platform policy rejects absolute paths, drive/UNC syntax,
+// traversal components, empty components, control characters, colons, and
+// Windows device names. This intentionally rejects a small set of names
+// that are valid on some Unix filesystems so a later Windows receiver does
+// not receive an unrepresentable manifest.
+func SanitizeRelativePath(raw string) (string, error) {
+	if raw == "" {
+		return "", fmt.Errorf("%w: path is empty", ErrInvalidRelativePath)
+	}
+	if !utf8.ValidString(raw) {
+		return "", fmt.Errorf("%w: path is not valid UTF-8", ErrInvalidRelativePath)
+	}
+	path := strings.ReplaceAll(raw, `\`, "/")
+	if path == "" || strings.HasPrefix(path, "/") || strings.HasSuffix(path, "/") {
+		return "", fmt.Errorf("%w: path must contain non-empty relative components", ErrInvalidRelativePath)
+	}
+	if len(path) > MaxRelativePathBytes {
+		return "", fmt.Errorf("%w: path is %d bytes, want at most %d", ErrInvalidRelativePath, len(path), MaxRelativePathBytes)
+	}
+
+	parts := strings.Split(path, "/")
+	if len(parts) > MaxRelativePathDepth {
+		return "", fmt.Errorf("%w: path has %d components, want at most %d", ErrInvalidRelativePath, len(parts), MaxRelativePathDepth)
+	}
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			return "", fmt.Errorf("%w: path contains an empty or traversal component", ErrInvalidRelativePath)
+		}
+		if len(part) > MaxPathComponentBytes {
+			return "", fmt.Errorf("%w: component is %d bytes, want at most %d", ErrInvalidRelativePath, len(part), MaxPathComponentBytes)
+		}
+		if err := validateRelativePathComponent(part); err != nil {
+			return "", err
+		}
+	}
+	return strings.Join(parts, "/"), nil
+}
+
+func validateRelativePathComponent(component string) error {
+	if strings.ContainsRune(component, ':') {
+		return fmt.Errorf("%w: component contains a colon", ErrInvalidRelativePath)
+	}
+	if strings.HasSuffix(component, " ") || strings.HasSuffix(component, ".") {
+		return fmt.Errorf("%w: component ends with a space or dot", ErrInvalidRelativePath)
+	}
+	for _, r := range component {
+		if r == 0 || unicode.IsControl(r) {
+			return fmt.Errorf("%w: component contains a control character", ErrInvalidRelativePath)
+		}
+	}
+	if isWindowsReservedComponent(component) {
+		return fmt.Errorf("%w: component uses a reserved Windows device name", ErrInvalidRelativePath)
+	}
+	return nil
+}
+
+func isWindowsReservedComponent(component string) bool {
+	base := strings.ToUpper(strings.TrimRight(component, " ."))
+	if dot := strings.IndexByte(base, '.'); dot >= 0 {
+		base = base[:dot]
+	}
+	switch base {
+	case "CON", "PRN", "AUX", "NUL":
+		return true
+	}
+	if len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) {
+		return base[3] >= '1' && base[3] <= '9'
+	}
+	return false
 }
 
 // splitExt splits a filename into stem and extension the way the collision
