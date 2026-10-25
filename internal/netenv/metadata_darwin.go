@@ -2,11 +2,34 @@
 
 package netenv
 
-import "net"
+/*
+#cgo darwin LDFLAGS: -framework CoreWLAN -framework Foundation
+#include <stdlib.h>
+#include <stddef.h>
 
-// CoreWLAN requires an Objective-C bridge and a native macOS build. Keep the
-// common candidate discovery usable until that adapter is built and tested on
-// supported Intel and Apple Silicon runners.
+int flitnix_corewlan_metadata(const char *interface_name, char *ssid, size_t ssid_size);
+*/
+import "C"
+
+import (
+	"net"
+	"strings"
+	"unsafe"
+)
+
 func systemMetadata(iface net.Interface) Metadata {
+	var ssid [256]byte
+	interfaceName := C.CString(iface.Name)
+	defer C.free(unsafe.Pointer(interfaceName))
+	if C.flitnix_corewlan_metadata(
+		interfaceName,
+		(*C.char)(unsafe.Pointer(&ssid[0])),
+		C.size_t(len(ssid)),
+	) != 0 {
+		return Metadata{
+			SSID: strings.TrimSpace(string(ssid[:len(ssid)-1])),
+			Type: "Wi-Fi",
+		}
+	}
 	return Metadata{Type: typeFromInterface(iface)}
 }

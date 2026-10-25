@@ -80,7 +80,8 @@ func wlanSSID(iface net.Interface) (string, string, bool) {
 			continue
 		}
 		description := windows.UTF16ToString(info.Description[:])
-		if description != iface.Name {
+		if !strings.EqualFold(description, iface.Name) &&
+			!strings.EqualFold(info.InterfaceGUID.String(), iface.Name) {
 			continue
 		}
 		connected = info
