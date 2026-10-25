@@ -1,9 +1,9 @@
 # Batch transfer contract
 
-This document defines the Phase 0 and Phase 1 contract for future multi-file
-and folder transfers. Phase 1 adds a tested in-memory coordinator only. It
-does not add HTTP endpoints, folder traversal, UI changes, drag-and-drop, ZIP
-downloads, or live batch file transfers.
+This document defines the batch contract through Phase 3. Phase 3 adds
+phone-to-desktop folder selection and sequential folder uploads. It does not
+add drag-and-drop, desktop-to-phone batch downloads, ZIP downloads,
+persistence, or resumable transfers.
 
 ## Domain model
 
@@ -82,11 +82,20 @@ Photos/readme.txt       -> rootName: Photos, relativePath: readme.txt
 Photos/2026/image.jpg   -> rootName: Photos, relativePath: 2026/image.jpg
 ```
 
-The conceptual receive destination is:
+The receive destination for an accepted folder batch is:
 
 ```text
 ~/Downloads/Flitnix/<collision-safe-root>/<relativePath>
 ```
+
+The server atomically reserves one collision-safe root directory for the
+batch before its item records are created. If `Photos` exists, the batch uses
+the next established collision variant such as `Photos (1)`; all items in
+that batch use the same resolved root. `Mkdir` performs the reservation, so
+concurrent batches cannot accidentally share a root. Existing and newly
+created path components are checked for symlinks before a part file is
+opened. Individual files are then published with the existing atomic,
+no-overwrite hard-link policy.
 
 Later phases must use private staging, destination confinement, symlink
 policy, and no-overwrite publication. A flat file collection retains

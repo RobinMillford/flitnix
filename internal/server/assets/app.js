@@ -39,7 +39,9 @@
   var rescanCard = document.getElementById("rescan");
   var rescanText = document.getElementById("rescan-text");
   var pickBtn = document.getElementById("pick-btn");
+  var pickFolderBtn = document.getElementById("pick-folder-btn");
   var fileInput = document.getElementById("file-input");
+  var folderInput = document.getElementById("folder-input");
   var queueEl = document.getElementById("queue");
   var filesEl = document.getElementById("files");
   var filesEmptyEl = document.getElementById("files-empty");
@@ -215,13 +217,15 @@
     return li;
   }
 
-  function addFiles(fileList) {
+  function addFiles(fileList, folder) {
     Array.prototype.slice.call(fileList).forEach(function (f) {
       var job = {
         file: f, id: null, phase: "queued", uploaded: 0,
         failures: 0, retryable: false, err: null,
         xhr: null, timer: null, removed: false,
-        el: null, refs: null, btnAction: null, batchID: null, itemID: null
+        el: null, refs: null, btnAction: null, batchID: null, itemID: null,
+        relativePath: folder ? f.webkitRelativePath.slice(folder.length + 1) : "",
+        rootName: folder || "", group: folder ? "folder:" + folder : "files"
       };
       queue.push(job);
       queueEl.appendChild(buildItem(job));
@@ -292,7 +296,11 @@
 
   function pump() {
     if (pumpBusy || appState.ended) return;
-    var jobs = queue.filter(function (job) { return job.phase === "queued"; });
+    var first = queue.find(function (job) { return job.phase === "queued"; });
+    if (!first) return;
+    var jobs = queue.filter(function (job) {
+      return job.phase === "queued" && job.group === first.group;
+    });
     if (!jobs.length) return;
     pumpBusy = true;
     jobs.forEach(function (job) { job.phase = "declaring"; paint(job); });
@@ -301,9 +309,13 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         direction: "phone_to_desktop",
-        kind: "files",
+        kind: jobs[0].rootName ? "folder" : "files",
+        rootName: jobs[0].rootName || undefined,
         items: jobs.map(function (job) {
-          return { relativePath: job.file.name, size: job.file.size };
+          return {
+            relativePath: jobs[0].rootName ? job.relativePath : job.file.name,
+            size: job.file.size
+          };
         })
       })
     }).then(function (batch) {
@@ -667,8 +679,32 @@
   // ------------------------------------------------------------------
   function boot() {
     pickBtn.addEventListener("click", function () { fileInput.click(); });
+    if (folderInput && pickFolderBtn &&
+        "webkitdirectory" in HTMLInputElement.prototype) {
+      pickFolderBtn.hidden = false;
+      pickFolderBtn.addEventListener("click", function () { folderInput.click(); });
+      folderInput.addEventListener("change", function () {
+        var files = Array.prototype.slice.call(folderInput.files || []);
+        var roots = files.map(function (f) {
+          var path = f.webkitRelativePath || "";
+          return path.split("/")[0] || "";
+        });
+        var root = roots[0];
+        if (!root || roots.some(function (candidate) { return candidate !== root; }) ||
+            files.some(function (f) {
+              return !f.webkitRelativePath ||
+                f.webkitRelativePath.split("/").length < 2;
+            })) {
+          setStatus("error", "The selected folder could not be read safely. Please try again.");
+          folderInput.value = "";
+          return;
+        }
+        addFiles(files, root);
+        folderInput.value = "";
+      });
+    }
     fileInput.addEventListener("change", function () {
-      addFiles(fileInput.files);
+      addFiles(fileInput.files, "");
       fileInput.value = "";
     });
     refreshBtn.addEventListener("click", refreshFiles);

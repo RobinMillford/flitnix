@@ -114,10 +114,11 @@ func (s *Store) withinDir(path string) bool {
 // Commit on success, Abort on any failure or cancellation. A PartFile is
 // used by exactly one goroutine at a time.
 type PartFile struct {
-	store *Store
-	f     *os.File
-	path  string // absolute path of the part file
-	name  string // sanitized final filename candidate
+	store    *Store
+	f        *os.File
+	path     string // absolute path of the part file
+	name     string // sanitized final filename candidate
+	finalDir string
 
 	mu      sync.Mutex
 	decided bool // commit or abort already decided the fate of the part file
@@ -147,9 +148,108 @@ func (s *Store) OpenPart(name string) (*PartFile, error) {
 			}
 			return nil, fmt.Errorf("transfer: cannot create temporary file in %s: %w", s.dir, err)
 		}
-		return &PartFile{store: s, f: f, path: path, name: name}, nil
+		return &PartFile{store: s, f: f, path: path, name: name, finalDir: s.dir}, nil
 	}
+
 	return nil, errors.New("transfer: could not allocate a unique temporary file after 64 attempts")
+}
+
+// AllocateFolderRoot reserves one collision-safe directory for an incoming
+// folder batch. Mkdir is the atomic reservation, so concurrent batches never
+// share a requested root.
+func (s *Store) AllocateFolderRoot(raw string) (string, error) {
+	root, err := sanitizeRootName(raw)
+	if err != nil {
+		return "", err
+	}
+	if err := s.ensureDir(); err != nil {
+		return "", err
+	}
+	for n := 0; n < commitVariants; n++ {
+		candidate := variantName(root, n)
+		path := filepath.Join(s.dir, candidate)
+		if !s.withinDir(path) {
+			return "", fmt.Errorf("transfer: refusing folder root outside receive directory")
+		}
+		err := os.Mkdir(path, dirPerm)
+		if err == nil {
+			return candidate, nil
+		}
+		if os.IsExist(err) {
+			continue
+		}
+		return "", fmt.Errorf("transfer: creating folder root: %w", err)
+	}
+	return "", fmt.Errorf("transfer: could not allocate a folder root for %q", root)
+}
+
+// OpenPartPath creates a part file beneath a server-resolved folder root and
+// validated relative path. Existing path components must be real directories,
+// never symlinks, before any file is opened.
+func (s *Store) OpenPartPath(root, relativePath string) (*PartFile, error) {
+	root, err := sanitizeRootName(root)
+	if err != nil {
+		return nil, err
+	}
+	relativePath, err = SanitizeRelativePath(relativePath)
+	if err != nil {
+		return nil, err
+	}
+	name := filepath.Base(filepath.FromSlash(relativePath))
+	dirPart := filepath.Dir(filepath.FromSlash(relativePath))
+	base := filepath.Join(s.dir, root)
+	if !s.withinDir(base) {
+		return nil, fmt.Errorf("transfer: refusing folder root outside receive directory")
+	}
+	if err := ensureSafeDirectory(base, dirPerm); err != nil {
+		return nil, err
+	}
+	dir := base
+	if dirPart != "." {
+		parts := strings.Split(filepath.ToSlash(dirPart), "/")
+		for _, part := range parts {
+			dir = filepath.Join(dir, part)
+			if !s.withinDir(dir) {
+				return nil, fmt.Errorf("transfer: refusing path outside receive directory")
+			}
+			if err := ensureSafeDirectory(dir, dirPerm); err != nil {
+				return nil, err
+			}
+		}
+	}
+	for attempt := 0; attempt < 64; attempt++ {
+		suffix, err := randHex(4)
+		if err != nil {
+			return nil, err
+		}
+		path := filepath.Join(dir, name+partSuffixMarker+suffix)
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, filePerm)
+		if err != nil {
+			if os.IsExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("transfer: cannot create temporary folder file: %w", err)
+		}
+		return &PartFile{store: s, f: f, path: path, name: name, finalDir: dir}, nil
+	}
+	return nil, errors.New("transfer: could not allocate a unique temporary folder file")
+}
+
+func ensureSafeDirectory(path string, perm os.FileMode) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := os.Mkdir(path, perm); err != nil && !os.IsExist(err) {
+			return fmt.Errorf("transfer: creating directory: %w", err)
+		}
+		info, err = os.Lstat(path)
+	}
+	if err != nil {
+		return fmt.Errorf("transfer: inspecting directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("transfer: unsafe destination directory %q", path)
+	}
+	return nil
 }
 
 // Name returns the sanitized final filename candidate.
@@ -193,7 +293,7 @@ func (p *PartFile) Commit() (string, error) {
 	}
 
 	for n := 0; n < commitVariants; n++ {
-		final := filepath.Join(p.store.dir, variantName(p.name, n))
+		final := filepath.Join(p.finalDir, variantName(p.name, n))
 		if !p.store.withinDir(final) {
 			// Unreachable while OpenPart keeps enforcing the base-name
 			// contract; kept as defense in depth against future changes.

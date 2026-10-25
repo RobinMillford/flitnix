@@ -369,13 +369,34 @@ func handleBatchCreate(svcs *Services) http.HandlerFunc {
 				manifest.Items[i].RelativePath = ""
 			}
 		}
+		validated, err := transfer.ValidateManifest(manifest)
+		if err != nil {
+			writeBatchError(w, err)
+			return
+		}
+		manifest = validated.BatchManifest
+		var resolvedRoot string
+		if manifest.Kind == transfer.BatchKindFolder {
+			resolvedRoot, err = svcs.Transfers.Store().AllocateFolderRoot(manifest.RootName)
+			if err != nil {
+				writeBatchError(w, err)
+				return
+			}
+		}
 		view, err := svcs.Coordinator.CreateBatch(sess.Key(), manifest)
 		if err != nil {
 			writeBatchError(w, err)
 			return
 		}
 		for _, item := range view.Items {
-			up, declareErr := svcs.Transfers.Declare(sess.Key(), item.DisplayName, item.DeclaredSize)
+			var up transfer.Upload
+			var declareErr error
+			if manifest.Kind == transfer.BatchKindFolder {
+				up, declareErr = svcs.Transfers.DeclarePath(sess.Key(), resolvedRoot,
+					item.RelativePath, item.DisplayName, item.DeclaredSize)
+			} else {
+				up, declareErr = svcs.Transfers.Declare(sess.Key(), item.DisplayName, item.DeclaredSize)
+			}
 			if declareErr != nil {
 				_, _ = svcs.Coordinator.CancelBatch(sess.Key(), view.ID)
 				writeBatchError(w, declareErr)

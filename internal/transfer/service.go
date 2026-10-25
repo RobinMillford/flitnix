@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -105,11 +106,17 @@ func NewService(cfg Config) *Service {
 	if limits.MaxPending <= 0 {
 		limits.MaxPending = defaultMaxPendingUploads
 	}
+
 	if limits.MaxActive <= 0 {
 		limits.MaxActive = defaultMaxActiveUploads
 	}
+
 	return &Service{store: cfg.Store, limits: limits, uploads: make(map[string]*upload)}
 }
+
+// Store exposes the configured storage boundary to the server composition
+// layer for batch-root allocation.
+func (s *Service) Store() *Store { return s.store }
 
 // Upload is a consistent copy of one upload record for callers outside the
 // package (HTTP handlers, the desktop UI).
@@ -144,11 +151,13 @@ type ContentResult struct {
 // field; Uploaded stays atomic so the streaming goroutine's progress
 // callback never blocks the desktop's polling reads.
 type upload struct {
-	id      string
-	name    string
-	session string
-	size    int64
-	created time.Time
+	id           string
+	name         string
+	root         string
+	relativePath string
+	session      string
+	size         int64
+	created      time.Time
 
 	// seq is a monotonically increasing creation counter assigned under
 	// the service lock. It orders even records whose Created timestamps
@@ -226,6 +235,19 @@ var newPartSink = func(store *Store, name string) (contentSink, error) {
 // is validated here, before anything is stored or trusted: the filename is
 // sanitized, the size must be non-negative, and the limits are enforced.
 func (s *Service) Declare(sessionKey, rawName string, size int64) (Upload, error) {
+	return s.declare(sessionKey, rawName, "", "", size)
+}
+
+// DeclarePath records a folder item whose server-selected root and validated
+// relative path determine its eventual publication location.
+func (s *Service) DeclarePath(sessionKey, root, relativePath, rawName string, size int64) (Upload, error) {
+	if root == "" || relativePath == "" {
+		return Upload{}, ErrInvalidUpload
+	}
+	return s.declare(sessionKey, rawName, root, relativePath, size)
+}
+
+func (s *Service) declare(sessionKey, rawName, root, relativePath string, size int64) (Upload, error) {
 	if sessionKey == "" {
 		return Upload{}, ErrWrongSession
 	}
@@ -235,6 +257,17 @@ func (s *Service) Declare(sessionKey, rawName string, size int64) (Upload, error
 	}
 	if size < 0 {
 		return Upload{}, fmt.Errorf("%w: size must not be negative", ErrInvalidUpload)
+	}
+	if root != "" {
+		if _, err := sanitizeRootName(root); err != nil {
+			return Upload{}, err
+		}
+		if relativePath, err = SanitizeRelativePath(relativePath); err != nil {
+			return Upload{}, err
+		}
+		if name != filepath.Base(filepath.FromSlash(relativePath)) {
+			return Upload{}, fmt.Errorf("%w: display name does not match relative path", ErrInvalidUpload)
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -246,13 +279,15 @@ func (s *Service) Declare(sessionKey, rawName string, size int64) (Upload, error
 		return Upload{}, err
 	}
 	u := &upload{
-		id:      id,
-		name:    name,
-		session: sessionKey,
-		size:    size,
-		created: time.Now(),
-		seq:     s.nextSeq,
-		state:   StatePending,
+		id:           id,
+		name:         name,
+		root:         root,
+		relativePath: relativePath,
+		session:      sessionKey,
+		size:         size,
+		created:      time.Now(),
+		seq:          s.nextSeq,
+		state:        StatePending,
 	}
 	s.nextSeq++
 	s.uploads[id] = u
@@ -374,7 +409,13 @@ func (s *Service) SubmitContent(id, sessionKey string, body io.Reader, onProgres
 		return ContentResult{}, fmt.Errorf("%w: state is %q", ErrAlreadyDecided, u.state)
 	}
 	// u.state == StateApproved: claim this submission for the stream.
-	sink, perr := newPartSink(s.store, u.name)
+	var sink contentSink
+	var perr error
+	if u.relativePath != "" {
+		sink, perr = s.store.OpenPartPath(u.root, u.relativePath)
+	} else {
+		sink, perr = newPartSink(s.store, u.name)
+	}
 	if perr != nil {
 		u.makeFailedLocked(perr)
 		u.mu.Unlock()

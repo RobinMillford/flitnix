@@ -276,12 +276,70 @@ func TestStoreEmptyPartCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Commit of empty part: %v", err)
 	}
+
 	info, err := os.Stat(final)
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
 	if info.Size() != 0 {
 		t.Errorf("size = %d, want 0", info.Size())
+	}
+}
+
+func TestStoreFolderPathPreservesHierarchy(t *testing.T) {
+	st, err := NewStore(StoreConfig{Dir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := st.AllocateFolderRoot("Photos")
+	if err != nil {
+		t.Fatal(err)
+	}
+	part, err := st.OpenPartPath(root, "2026/raw/image.dng")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write([]byte("raw")); err != nil {
+		t.Fatal(err)
+	}
+	final, err := part.Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(st.Dir(), root, "2026", "raw", "image.dng")
+	if final != want {
+		t.Fatalf("final path = %q, want %q", final, want)
+	}
+	data, err := os.ReadFile(final)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "raw" {
+		t.Fatalf("content = %q, want raw", data)
+	}
+}
+
+func TestStoreFolderRootsAreCollisionSafe(t *testing.T) {
+	st, err := NewStore(StoreConfig{Dir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := st.AllocateFolderRoot("Photos")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := st.AllocateFolderRoot("Photos")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatalf("folder roots collided: %q", first)
+	}
+	for _, root := range []string{first, second} {
+		info, err := os.Stat(filepath.Join(st.Dir(), root))
+		if err != nil || !info.IsDir() {
+			t.Fatalf("allocated root %q is not a directory: %v", root, err)
+		}
 	}
 }
 
