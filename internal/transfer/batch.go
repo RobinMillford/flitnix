@@ -213,6 +213,7 @@ func ValidateManifestWithLimits(manifest BatchManifest, limits ManifestLimits) (
 				}
 			}
 			item.RelativePath = path
+			item.DisplayName = path[strings.LastIndex(path, "/")+1:]
 		case BatchKindFiles:
 			if item.RelativePath != "" {
 				return ValidatedManifest{}, fmt.Errorf("%w: flat collections must not contain relative paths", ErrInvalidBatch)

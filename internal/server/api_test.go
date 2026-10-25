@@ -157,6 +157,7 @@ func TestBatchManifestApprovalAndSequentialContent(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create batch status=%d body=%s", rec.Code, rec.Body.String())
 	}
+
 	var batch transfer.BatchView
 	if err := json.Unmarshal(rec.Body.Bytes(), &batch); err != nil {
 		t.Fatal(err)
@@ -197,6 +198,72 @@ func TestBatchManifestApprovalAndSequentialContent(t *testing.T) {
 	}
 	if batch.State != transfer.BatchStateCompleted || batch.TransferredBytes != 11 {
 		t.Fatalf("batch did not complete: %+v", batch)
+	}
+}
+
+func TestFolderBatchPublishesRelativePathsUnderOneRoot(t *testing.T) {
+	env := newTestEnv(t)
+	token := env.token()
+	key := env.tokenKey(token)
+	manifest, _ := json.Marshal(transfer.BatchManifest{
+		Direction: transfer.DirectionPhoneToDesktop,
+		Kind:      transfer.BatchKindFolder,
+		RootName:  "Photos",
+		Items: []transfer.ManifestItem{
+			{RelativePath: "cover.jpg", Size: 5},
+			{RelativePath: "2026/raw/image.dng", Size: 3},
+		},
+	})
+	rec := env.do(http.MethodPost, "/api/batches", token, manifest)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create folder batch status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var batch transfer.BatchView
+	if err := json.Unmarshal(rec.Body.Bytes(), &batch); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range batch.Items {
+		contentID, err := env.coord.ItemContentID(key, batch.ID, item.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := env.trans.Decide(contentID, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := env.coord.ApproveBatch(key, batch.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range batch.Items {
+		body := []byte("cover")
+		if item.RelativePath != "cover.jpg" {
+			body = []byte("raw")
+		}
+		target := "/api/batches/" + batch.ID + "/items/" + item.ID + "/content"
+		rec = env.do(http.MethodPut, target, token, body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("upload %q status=%d body=%s", item.RelativePath, rec.Code, rec.Body.String())
+		}
+	}
+	roots, err := os.ReadDir(env.store.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(roots) != 1 || !roots[0].IsDir() {
+		t.Fatalf("unexpected folder roots: %+v", roots)
+	}
+	root := filepath.Join(env.store.Dir(), roots[0].Name())
+	for path, want := range map[string]string{
+		filepath.Join(root, "cover.jpg"):                "cover",
+		filepath.Join(root, "2026", "raw", "image.dng"): "raw",
+	} {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if string(got) != want {
+			t.Errorf("%s = %q, want %q", path, got, want)
+		}
 	}
 }
 

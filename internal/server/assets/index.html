@@ -45,10 +45,14 @@
     <section class="panel">
       <div class="panel__head">
         <h2>Send to desktop</h2>
-        <button type="button" class="btn" id="pick-btn">Pick files</button>
+        <div class="panel__actions">
+          <button type="button" class="btn" id="pick-btn">Pick files</button>
+          <button type="button" class="btn btn--ghost" id="pick-folder-btn" hidden>Pick folder</button>
+        </div>
       </div>
       <p class="muted">Each file starts only after you approve it on the desktop. Transfers run one at a time.</p>
       <input id="file-input" type="file" multiple hidden>
+      <input id="folder-input" type="file" webkitdirectory directory multiple hidden>
       <ul class="queue" id="queue" aria-live="polite"></ul>
     </section>
 
