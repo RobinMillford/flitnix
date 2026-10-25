@@ -186,6 +186,7 @@ export namespace netenv {
 	    type: string;
 	    metadataAvailable: boolean;
 	    connectionName: string;
+	    friendlyNameSource: string;
 	    active: boolean;
 	
 	    static createFrom(source: any = {}) {
@@ -201,6 +202,7 @@ export namespace netenv {
 	        this.type = source["type"];
 	        this.metadataAvailable = source["metadataAvailable"];
 	        this.connectionName = source["connectionName"];
+	        this.friendlyNameSource = source["friendlyNameSource"];
 	        this.active = source["active"];
 	    }
 	}

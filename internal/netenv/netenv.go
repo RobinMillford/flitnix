@@ -60,6 +60,9 @@ type View struct {
 	// ConnectionName is the saved OS connection profile name, when known.
 	// It is intentionally separate from FriendlyName/SSID.
 	ConnectionName string `json:"connectionName"`
+	// FriendlyNameSource identifies whether FriendlyName came from the
+	// verified SSID, the active profile fallback, or a generic type label.
+	FriendlyNameSource string `json:"friendlyNameSource"`
 	// Active is true because this view represents an interface with a
 	// currently usable local address.
 	Active bool `json:"active"`
@@ -141,8 +144,16 @@ func withMetadata(view View, metadata Metadata) View {
 	if view.Type == "" {
 		view.Type = "Network"
 	}
-	view.FriendlyName = strings.TrimSpace(metadata.SSID)
-	if view.FriendlyName == "" {
+	ssid := strings.TrimSpace(metadata.SSID)
+	profile := strings.TrimSpace(metadata.ConnectionName)
+	view.FriendlyName = ssid
+	switch {
+	case ssid != "":
+		view.FriendlyNameSource = "SSID"
+	case profile != "":
+		view.FriendlyName = profile
+		view.FriendlyNameSource = "Connection profile"
+	default:
 		switch view.Type {
 		case "Wi-Fi":
 			view.FriendlyName = "Wi-Fi network · Name unavailable"
@@ -151,10 +162,10 @@ func withMetadata(view View, metadata Metadata) View {
 		default:
 			view.FriendlyName = view.Type + " connection"
 		}
+		view.FriendlyNameSource = "Unavailable"
 	}
-	view.MetadataAvailable = strings.TrimSpace(metadata.SSID) != "" ||
-		strings.TrimSpace(metadata.ConnectionName) != ""
-	view.ConnectionName = strings.TrimSpace(metadata.ConnectionName)
+	view.MetadataAvailable = ssid != "" || profile != ""
+	view.ConnectionName = profile
 	view.Active = true
 	return view
 }

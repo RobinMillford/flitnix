@@ -195,7 +195,7 @@
         {#if currentNetwork}
           <div class="network-identity">
             <span class="network-dot" aria-hidden="true"></span>
-            <div><strong>{currentNetwork.friendlyName || `${currentNetwork.type || 'Network'} · Name unavailable`}</strong><span>{currentNetwork.type || 'Network'} · Connected</span></div>
+            <div><strong>{currentNetwork.friendlyName || `${currentNetwork.type || 'Network'} · Name unavailable`}</strong><span>{currentNetwork.type || 'Network'} · Connected{currentNetwork.friendlyNameSource === 'Connection profile' ? ' · Profile name' : ''}</span></div>
           </div>
           <button class="button ghost change-network" on:click={() => networkChooserOpen = !networkChooserOpen}>
             {networkChooserOpen ? 'Hide networks' : 'Change network'}
@@ -221,7 +221,7 @@
         {#if currentNetwork}
           <details class="network-details">
             <summary>Network details</summary>
-            <dl><div><dt>Interface</dt><dd>{currentNetwork.name || 'Unavailable'}</dd></div><div><dt>IPv4 address</dt><dd>{currentNetwork.ip || 'Unavailable'}</dd></div><div><dt>Connection type</dt><dd>{currentNetwork.type || 'Network'}</dd></div><div><dt>Profile name</dt><dd>{currentNetwork.connectionName || 'Unavailable'}</dd></div><div><dt>Metadata</dt><dd>{currentNetwork.metadataAvailable ? 'Available' : 'Name unavailable'}</dd></div></dl>
+            <dl><div><dt>Interface</dt><dd>{currentNetwork.name || 'Unavailable'}</dd></div><div><dt>IPv4 address</dt><dd>{currentNetwork.ip || 'Unavailable'}</dd></div><div><dt>Connection type</dt><dd>{currentNetwork.type || 'Network'}</dd></div><div><dt>Profile name</dt><dd>{currentNetwork.connectionName || 'Unavailable'}</dd></div><div><dt>Name source</dt><dd>{currentNetwork.friendlyNameSource || 'Unavailable'}</dd></div><div><dt>Metadata</dt><dd>{currentNetwork.metadataAvailable ? 'Available' : 'Name unavailable'}</dd></div></dl>
           </details>
         {/if}
         {#if ifaceError}<p class="error-text">{ifaceError}</p>{/if}
