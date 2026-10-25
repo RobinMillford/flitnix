@@ -237,7 +237,6 @@ func (a *App) endAllSessions() {
 		key := s.Key()
 		a.transfers.CancelSession(key)
 		a.downloads.CancelSession(key)
-		a.downloads.CancelSession(key)
 		for _, sf := range a.registry.ListSession(key) {
 			a.registry.Remove(sf.ID)
 		}

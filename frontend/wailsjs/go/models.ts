@@ -182,6 +182,11 @@ export namespace netenv {
 	    name: string;
 	    ip: string;
 	    cidr: string;
+	    friendlyName: string;
+	    type: string;
+	    metadataAvailable: boolean;
+	    connectionName: string;
+	    active: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new View(source);
@@ -192,6 +197,11 @@ export namespace netenv {
 	        this.name = source["name"];
 	        this.ip = source["ip"];
 	        this.cidr = source["cidr"];
+	        this.friendlyName = source["friendlyName"];
+	        this.type = source["type"];
+	        this.metadataAvailable = source["metadataAvailable"];
+	        this.connectionName = source["connectionName"];
+	        this.active = source["active"];
 	    }
 	}
 

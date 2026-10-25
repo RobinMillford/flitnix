@@ -19,6 +19,10 @@ func fakeSource(ifaces []net.Interface, addrs map[string][]net.Addr) Source {
 	}
 }
 
+func fakeMetadata(values map[string]Metadata) func(net.Interface) Metadata {
+	return func(iface net.Interface) Metadata { return values[iface.Name] }
+}
+
 // ipnetNet returns a /24 net.IPNet-style address for the dotted quad.
 func ipnetNet(a, b, c, d byte) net.Addr {
 	ip := net.IPv4(a, b, c, d)
@@ -64,7 +68,7 @@ func TestEnumerateFiltersUnsuitableAddresses(t *testing.T) {
 	if len(views) != 1 {
 		t.Fatalf("got %d views %+v, want exactly 1", len(views), views)
 	}
-	want := View{Name: "br0", IP: "192.168.4.10", CIDR: "192.168.4.10/24"}
+	want := View{Name: "br0", IP: "192.168.4.10", CIDR: "192.168.4.10/24", FriendlyName: "Network connection", Type: "Network", Active: true}
 	if views[0] != want {
 		t.Fatalf("got %+v, want %+v", views[0], want)
 	}
@@ -109,13 +113,13 @@ func TestEnumerateSkipsIPv6AndKeepsUsable(t *testing.T) {
 	}
 	src := fakeSource(
 		[]net.Interface{upIf("wlo1")},
-		map[string][]net.Addr{"wlo1": {v6, ipnetNet(192, 168, 0, 106)}},
+		map[string][]net.Addr{"wlo1": {v6, ipnetNet(10, 42, 0, 8)}},
 	)
 	views, err := Enumerate(src)
 	if err != nil {
 		t.Fatalf("Enumerate: %v", err)
 	}
-	if len(views) != 1 || views[0].IP != "192.168.0.106" {
+	if len(views) != 1 || views[0].IP != "10.42.0.8" {
 		t.Fatalf("got %+v, want only the IPv4 address", views)
 	}
 }
@@ -174,13 +178,13 @@ func TestPickDefault(t *testing.T) {
 func TestInterfaceForRevalidation(t *testing.T) {
 	src := fakeSource(
 		[]net.Interface{upIf("wlo1")},
-		map[string][]net.Addr{"wlo1": {ipnetNet(192, 168, 0, 106)}},
+		map[string][]net.Addr{"wlo1": {ipnetNet(10, 42, 0, 8)}},
 	)
 
-	if v, err := InterfaceFor(src, "192.168.0.106"); err != nil || v.Name != "wlo1" {
+	if v, err := InterfaceFor(src, "10.42.0.8"); err != nil || v.Name != "wlo1" {
 		t.Fatalf("valid IP: got %+v err %v", v, err)
 	}
-	_, err := InterfaceFor(src, "192.168.0.200")
+	_, err := InterfaceFor(src, "10.42.0.200")
 	if !errors.Is(err, ErrGone) {
 		t.Fatalf("absent IP: got %v, want ErrGone", err)
 	}
@@ -192,17 +196,17 @@ func TestInterfaceForRevalidation(t *testing.T) {
 func TestInterfaceForDetectsChangedAddress(t *testing.T) {
 	src := fakeSource(
 		[]net.Interface{upIf("wlo1")},
-		map[string][]net.Addr{"wlo1": {ipnetNet(192, 168, 0, 42)}},
+		map[string][]net.Addr{"wlo1": {ipnetNet(10, 43, 0, 8)}},
 	)
-	_, err := InterfaceFor(src, "192.168.0.106")
+	_, err := InterfaceFor(src, "10.42.0.8")
 	if !errors.Is(err, ErrGone) {
 		t.Fatalf("stale IP: got %v, want ErrGone (address changed)", err)
 	}
 }
 
 func TestListenAddr(t *testing.T) {
-	got, err := ListenAddr("192.168.0.106", 43821)
-	if err != nil || got != "192.168.0.106:43821" {
+	got, err := ListenAddr("10.42.0.8", 43821)
+	if err != nil || got != "10.42.0.8:43821" {
 		t.Fatalf("got %q err %v", got, err)
 	}
 	for _, bad := range []struct {
@@ -245,17 +249,117 @@ func TestTransferURL(t *testing.T) {
 func TestViewJSONShape(t *testing.T) {
 	// Views cross the Wails bridge as JSON; the field names are part of
 	// that contract, so this decodes and verifies them precisely.
-	data, err := json.Marshal(View{Name: "wlo1", IP: "192.168.0.106", CIDR: "192.168.0.106/24"})
+	data, err := json.Marshal(View{Name: "wlo1", IP: "10.42.0.8", CIDR: "10.42.0.8/24", FriendlyName: "Synthetic hotspot", Type: "Wi-Fi", MetadataAvailable: true, ConnectionName: "saved-profile", Active: true})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	var got map[string]string
+	var got map[string]any
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	for _, key := range []string{"name", "ip", "cidr"} {
-		if got[key] == "" {
+	for _, key := range []string{"name", "ip", "cidr", "friendlyName", "type", "connectionName"} {
+		if got[key] == nil || got[key] == "" {
 			t.Errorf("field %q missing or empty in %s", key, data)
 		}
+	}
+	if available, ok := got["metadataAvailable"].(bool); !ok || !available {
+		t.Errorf("metadataAvailable = %#v, want true", got["metadataAvailable"])
+	}
+	if active, ok := got["active"].(bool); !ok || !active {
+		t.Errorf("active = %#v, want true", got["active"])
+	}
+}
+
+func TestEnumerateFriendlyMetadataAndFallbacks(t *testing.T) {
+	ifaces := []net.Interface{upIf("wlo1"), upIf("eth0"), upIf("mystery0")}
+	src := fakeSource(ifaces, map[string][]net.Addr{
+		"wlo1":     {ipnetNet(192, 168, 0, 106)},
+		"eth0":     {ipnetNet(10, 0, 0, 2)},
+		"mystery0": {ipnetNet(172, 16, 0, 2)},
+	})
+	src.Metadata = fakeMetadata(map[string]Metadata{
+		"wlo1": {SSID: "Synthetic hotspot", ConnectionName: "phone-profile", Type: "Wi-Fi"},
+		"eth0": {Type: "Ethernet"},
+	})
+	views, err := Enumerate(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := make(map[string]View, len(views))
+	for _, view := range views {
+		byName[view.Name] = view
+	}
+	if byName["mystery0"].FriendlyName != "Network connection" || byName["mystery0"].Type != "Network" {
+		t.Fatalf("missing metadata fallback = %+v", byName["mystery0"])
+	}
+	if byName["eth0"].FriendlyName != "Ethernet connection" {
+		t.Fatalf("ethernet fallback = %+v", byName["eth0"])
+	}
+	if byName["mystery0"].MetadataAvailable {
+		t.Fatal("missing metadata reported as available")
+	}
+	if byName["wlo1"].FriendlyName != "Synthetic hotspot" ||
+		byName["wlo1"].ConnectionName != "phone-profile" ||
+		!byName["wlo1"].Active {
+		t.Fatalf("SSID/profile metadata = %+v", byName["wlo1"])
+	}
+}
+
+func TestEnumeratePreservesUniversalConnectionLabels(t *testing.T) {
+	cases := []struct {
+		name string
+		typ  string
+	}{
+		{name: "Samsung test network", typ: "Wi-Fi"},
+		{name: "Pixel test network", typ: "Wi-Fi"},
+		{name: "iPhone test network", typ: "Wi-Fi"},
+		{name: "Generic access point", typ: "Wi-Fi"},
+	}
+	for i, tc := range cases {
+		ifaceName := "wifi" + string(rune('0'+i))
+		src := fakeSource(
+			[]net.Interface{upIf(ifaceName)},
+			map[string][]net.Addr{ifaceName: {ipnetNet(10, byte(i+1), 0, 2)}},
+		)
+		src.Metadata = fakeMetadata(map[string]Metadata{
+			ifaceName: {SSID: tc.name, ConnectionName: "profile-" + ifaceName, Type: tc.typ},
+		})
+		views, err := Enumerate(src)
+		if err != nil || len(views) != 1 {
+			t.Fatalf("%s: views=%+v err=%v", tc.name, views, err)
+		}
+		if views[0].FriendlyName != tc.name || views[0].ConnectionName == views[0].FriendlyName {
+			t.Fatalf("%s: did not preserve separate SSID/profile metadata: %+v", tc.name, views[0])
+		}
+	}
+}
+
+func TestParseNMCLIOutputSeparatesProfileAndSSID(t *testing.T) {
+	metadata := parseNMCLIOutput("802-11-wireless\nHome\\: 5G\n", upIf("wlo1"))
+	if metadata.Type != "Wi-Fi" {
+		t.Fatalf("type = %q, want Wi-Fi", metadata.Type)
+	}
+	if metadata.ConnectionName != "Home: 5G" {
+		t.Fatalf("profile = %q, want escaped profile value", metadata.ConnectionName)
+	}
+	if metadata.SSID != "" {
+		t.Fatalf("SSID = %q, want empty until active AP lookup", metadata.SSID)
+	}
+}
+
+func TestActiveSSIDMatchesInterfaceAndUnescapesFields(t *testing.T) {
+	output := "*:moto\\: hotspot:wlo1\n:other:wlan0\n"
+	if got := activeSSID(output, "wlo1"); got != "moto: hotspot" {
+		t.Fatalf("activeSSID = %q, want moto: hotspot", got)
+	}
+	if got := activeSSID(output, "wlan0"); got != "" {
+		t.Fatalf("inactive interface SSID = %q, want empty", got)
+	}
+}
+
+func TestMissingSSIDUsesExplicitFallback(t *testing.T) {
+	view := withMetadata(View{}, Metadata{Type: "Wi-Fi"})
+	if view.FriendlyName != "Wi-Fi network · Name unavailable" {
+		t.Fatalf("fallback = %q", view.FriendlyName)
 	}
 }
