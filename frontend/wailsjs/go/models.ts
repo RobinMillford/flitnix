@@ -8,6 +8,8 @@ export namespace main {
 	    expiresAt: any;
 	    pinnedTransfers: number;
 	    token?: string;
+	    interfaceName?: string;
+	    address?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new SessionView(source);
@@ -20,6 +22,8 @@ export namespace main {
 	        this.expiresAt = this.convertValues(source["expiresAt"], null);
 	        this.pinnedTransfers = source["pinnedTransfers"];
 	        this.token = source["token"];
+	        this.interfaceName = source["interfaceName"];
+	        this.address = source["address"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -119,6 +123,27 @@ export namespace main {
 		    }
 		    return a;
 		}
+	}
+
+}
+
+export namespace netenv {
+	
+	export class View {
+	    name: string;
+	    ip: string;
+	    cidr: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new View(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.ip = source["ip"];
+	        this.cidr = source["cidr"];
+	    }
 	}
 
 }

@@ -52,6 +52,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -60,9 +61,18 @@ import (
 	"github.com/itsyamin/flitnix/internal/transfer"
 )
 
-// DefaultListenAddr is the loopback-only address the server binds to unless
-// configured otherwise. LAN binding is a later stage.
-const DefaultListenAddr = "127.0.0.1:43821"
+// DefaultPort is the fixed TCP port the phone-facing server uses. It must
+// never change: QR codes opened from earlier sessions would stop working
+// and firewalls whitelisted for the port would drift.
+const DefaultPort = 43821
+
+// DefaultListenAddr is the loopback-only address the server binds to
+// unless configured otherwise. The desktop adapter binds
+// interface-specific LAN addresses by passing an explicit Config.ListenAddr
+// (e.g. "192.168.1.42:DefaultPort"); it never binds 0.0.0.0, so the server
+// stays unreachable from interfaces the user has not chosen. The default
+// remains loopback so a bare New(Config{}) is safe for tests.
+var DefaultListenAddr = "127.0.0.1:" + strconv.Itoa(DefaultPort)
 
 const (
 	defaultShutdownTimeout = 5 * time.Second

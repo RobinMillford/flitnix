@@ -14,6 +14,10 @@ export function EndSession(arg1) {
   return window['go']['main']['App']['EndSession'](arg1);
 }
 
+export function ListNetworkInterfaces() {
+  return window['go']['main']['App']['ListNetworkInterfaces']();
+}
+
 export function ListPendingUploads() {
   return window['go']['main']['App']['ListPendingUploads']();
 }
@@ -46,6 +50,14 @@ export function RevokeSharedFile(arg1) {
   return window['go']['main']['App']['RevokeSharedFile'](arg1);
 }
 
-export function StartSession() {
-  return window['go']['main']['App']['StartSession']();
+export function ServerAddress() {
+  return window['go']['main']['App']['ServerAddress']();
+}
+
+export function SessionQR(arg1) {
+  return window['go']['main']['App']['SessionQR'](arg1);
+}
+
+export function StartSession(arg1) {
+  return window['go']['main']['App']['StartSession'](arg1);
 }

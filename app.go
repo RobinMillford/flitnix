@@ -18,12 +18,15 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/itsyamin/flitnix/internal/netenv"
+	"github.com/itsyamin/flitnix/internal/qr"
 	"github.com/itsyamin/flitnix/internal/server"
 	"github.com/itsyamin/flitnix/internal/session"
 	"github.com/itsyamin/flitnix/internal/transfer"
@@ -40,6 +43,12 @@ type SessionView struct {
 	ExpiresAt       time.Time `json:"expiresAt"`
 	PinnedTransfers int32     `json:"pinnedTransfers"`
 	Token           string    `json:"token,omitempty"`
+
+	// InterfaceName and Address are populated by StartSession: the chosen
+	// network interface and the machine's own IPv4 address used for the
+	// session's URL (never a gateway address). Listings leave both empty.
+	InterfaceName string `json:"interfaceName,omitempty"`
+	Address       string `json:"address,omitempty"`
 }
 
 // UploadView is the UI projection of an incoming upload (pending approval,
@@ -73,6 +82,10 @@ type App struct {
 	transfers *transfer.Service
 	registry  *transfer.Registry
 
+	// source supplies live network-interface state for the session
+	// address decisions; tests inject synthetic interfaces.
+	source netenv.Source
+
 	srvMu       sync.Mutex
 	srv         *server.Server
 	serveCancel context.CancelFunc
@@ -94,6 +107,7 @@ func NewApp() (*App, error) {
 		sessions:  session.NewManager(session.Config{}),
 		transfers: transfer.NewService(transfer.Config{Store: store}),
 		registry:  transfer.NewRegistry(),
+		source:    netenv.DefaultSource(),
 	}, nil
 }
 
@@ -117,18 +131,37 @@ func (a *App) shutdown(ctx context.Context) {
 	a.stopServer()
 }
 
-// ---- HTTP server lifecycle (lazy start, eager stop) ----
+// ---- HTTP server lifecycle (lazy start, address-aware reuse) ----
 
-// ensureServer starts the phone-facing HTTP server and waits (bounded) for
-// the listener to bind, so StartSession never hands out a token before the
-// server is reachable. Safe to call repeatedly.
-func (a *App) ensureServer() error {
+// ensureServer makes the phone-facing server reachable on listen (an
+// explicit ip:port address; never 0.0.0.0). A running server bound to
+// exactly the requested address is reused, so an unchanged network never
+// interrupts live transfers. Any other request — including a different
+// address, which means the user's network changed since the server was
+// bound — ends every active session first (their URLs pointed at the old
+// network's address and can no longer be reached), stops the old server
+// and binds the new one. A busy port fails the call with an actionable
+// error; no random port is ever substituted.
+func (a *App) ensureServer(listen string) error {
 	a.srvMu.Lock()
 	defer a.srvMu.Unlock()
-	if a.serveCancel != nil {
-		return nil // already serving
+
+	if a.srv != nil {
+		if got := a.srv.Addr(); got != nil && got.String() == listen {
+			return nil
+		}
+		a.endAllSessions()
+		a.stopServerLocked()
 	}
+	return a.startServerLocked(listen)
+}
+
+// startServerLocked constructs and serves a new server on listen and
+// waits (bounded) for the listener to bind, so StartSession never hands
+// out a token before the server is reachable. Callers must hold srvMu.
+func (a *App) startServerLocked(listen string) error {
 	srv := server.New(server.Config{
+		ListenAddr: listen,
 		Services: &server.Services{
 			Sessions:  a.sessions,
 			Transfers: a.transfers,
@@ -142,7 +175,7 @@ func (a *App) ensureServer() error {
 	select {
 	case err := <-done:
 		cancel()
-		return fmt.Errorf("flitnix: the local server could not start: %w", err)
+		return fmt.Errorf("flitnix: the local server could not start on %s: %w", listen, err)
 	case <-srv.Ready():
 		a.srv, a.serveCancel, a.serveDone = srv, cancel, done
 		return nil
@@ -158,6 +191,11 @@ func (a *App) ensureServer() error {
 func (a *App) stopServer() {
 	a.srvMu.Lock()
 	defer a.srvMu.Unlock()
+	a.stopServerLocked()
+}
+
+// stopServerLocked is stopServer's body. Callers must hold srvMu.
+func (a *App) stopServerLocked() {
 	if a.serveCancel == nil {
 		return
 	}
@@ -171,16 +209,53 @@ func (a *App) stopServer() {
 	a.srv, a.serveCancel, a.serveDone = nil, nil, nil
 }
 
+// endAllSessions ends every active session, mirroring EndSession for all
+// sessions at once: in-flight or approved-but-unstreamed uploads are
+// canceled, per-session shared files are unlisted and the tokens die.
+// It is used when the network the server was bound to can no longer serve
+// the old sessions, so nothing can reach them anyway. Callers must hold
+// srvMu (it runs between stopServerLocked and startServerLocked).
+func (a *App) endAllSessions() {
+	for _, s := range a.sessions.ActiveSessions() {
+		key := s.Key()
+		a.transfers.CancelSession(key)
+		for _, sf := range a.registry.ListSession(key) {
+			a.registry.Remove(sf.ID)
+		}
+		a.sessions.RevokeSession(s)
+	}
+	if a.sessions.Len() == 0 {
+		a.registry.Clear()
+	}
+}
+
 // ---- Bound methods: sessions ----
 
-// StartSession creates a new pairing session and starts the HTTP server if
-// necessary. The returned view carries the raw token: the desktop holds it
-// for the QR onboarding flow and nothing else ever sees it.
-func (a *App) StartSession() (SessionView, error) {
+// StartSession creates a new pairing session reachable on the requested
+// interface and starts (or reuses) the HTTP server as needed.
+//
+// The ip argument must be the machine's own IPv4 address on the network
+// the phone will connect through (as offered by ListNetworkInterfaces);
+// an empty ip auto-selects when exactly one usable interface exists and
+// fails with a choose-one error when several do. The selection is
+// revalidated against live interface state, so a hotspot disconnect or a
+// DHCP address change stops a stale address from starting a session the
+// phone could never reach. The returned view carries the raw token for
+// the QR flow plus the interface and address the QR encodes; nothing else
+// ever sees the token.
+func (a *App) StartSession(ip string) (SessionView, error) {
 	if a.ctx == nil {
 		return SessionView{}, errors.New("flitnix: the app is still starting")
 	}
-	if err := a.ensureServer(); err != nil {
+	view, err := a.resolveInterface(ip)
+	if err != nil {
+		return SessionView{}, err
+	}
+	listen, err := netenv.ListenAddr(view.IP, server.DefaultPort)
+	if err != nil {
+		return SessionView{}, fmt.Errorf("flitnix: cannot form the session address: %w", err)
+	}
+	if err := a.ensureServer(listen); err != nil {
 		return SessionView{}, err
 	}
 	s, err := a.sessions.Create()
@@ -192,7 +267,97 @@ func (a *App) StartSession() (SessionView, error) {
 		}
 		return SessionView{}, err
 	}
-	return sessionView(s, s.Token()), nil
+	out := sessionView(s, s.Token())
+	out.InterfaceName = view.Name
+	out.Address = view.IP
+	return out, nil
+}
+
+// resolveInterface turns the user's (possibly empty) selection into a
+// revalidated interface view. The call must happen immediately before the
+// server binds: a network change between choosing and starting must fail
+// loudly instead of producing an unreachable QR.
+func (a *App) resolveInterface(ip string) (netenv.View, error) {
+	views, err := netenv.Enumerate(a.source)
+	if err != nil {
+		return netenv.View{}, fmt.Errorf("flitnix: could not read the network interfaces: %w", err)
+	}
+	if ip == "" {
+		view, pickErr := netenv.PickDefault(views)
+		switch {
+		case errors.Is(pickErr, netenv.ErrAmbiguous):
+			return netenv.View{}, fmt.Errorf("flitnix: choose which network interface connects to the phone: %w", pickErr)
+		case pickErr != nil:
+			return netenv.View{}, fmt.Errorf("flitnix: %w", pickErr)
+		}
+		return view, nil
+	}
+	view, pickErr := netenv.InterfaceFor(a.source, ip)
+	switch {
+	case errors.Is(pickErr, netenv.ErrGone):
+		return netenv.View{}, fmt.Errorf("flitnix: the selected network is no longer reachable: %w", pickErr)
+	case pickErr != nil:
+		return netenv.View{}, fmt.Errorf("flitnix: %w", pickErr)
+	}
+	return view, nil
+}
+
+// ListNetworkInterfaces returns the interface addresses a session may
+// bind: real IPv4 on running non-loopback, non-point-to-point interfaces.
+// Read-only: nothing touches firewall configuration or system state.
+func (a *App) ListNetworkInterfaces() ([]netenv.View, error) {
+	views, err := netenv.Enumerate(a.source)
+	if err != nil {
+		return nil, fmt.Errorf("flitnix: could not read the network interfaces: %w", err)
+	}
+	return views, nil
+}
+
+// ServerAddress returns the running server's listening address as
+// "host:port", or an empty string when no server is running. It is the
+// base-URL part (host:port only) the desktop shows next to the QR code;
+// the session token never appears in any view but the QR itself.
+func (a *App) ServerAddress() string {
+	a.srvMu.Lock()
+	defer a.srvMu.Unlock()
+	if a.srv == nil {
+		return ""
+	}
+	return a.srv.Addr().String()
+}
+
+// SessionQR renders the pairing QR code for the active session with the
+// given key, as a PNG data URL for the desktop <img>. The payload is the
+// bound server address plus the session token in its URL fragment; the
+// token appears only inside this method and StartSession and is never
+// logged. It must be called after the server is visibly ready: no QR is
+// ever rendered for a server that cannot accept connections.
+func (a *App) SessionQR(key string) (string, error) {
+	a.srvMu.Lock()
+	srv := a.srv
+	a.srvMu.Unlock()
+	if srv == nil {
+		return "", errors.New("flitnix: no session is running; start one first")
+	}
+	var token string
+	for _, s := range a.sessions.ActiveSessions() {
+		if s.Key() == key {
+			token = s.Token()
+			break
+		}
+	}
+	if token == "" {
+		return "", errors.New("flitnix: no active session matches that identifier")
+	}
+	payload, err := qr.Payload(srv.URL(), token)
+	if err != nil {
+		return "", fmt.Errorf("flitnix: %w", err)
+	}
+	png, err := qr.PNG(payload, qr.DefaultSize)
+	if err != nil {
+		return "", fmt.Errorf("flitnix: rendering the session QR: %w", err)
+	}
+	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(png), nil
 }
 
 // EndSession revokes the session identified by its non-secret key: its

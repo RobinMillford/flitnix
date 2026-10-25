@@ -35,7 +35,7 @@ func TestHomePage(t *testing.T) {
 		t.Errorf("GET / returned Content-Type %q, want text/html", ct)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"Flitnix", "/static/styles.css", "/static/app.js", "later stage"} {
+	for _, want := range []string{"Flitnix", "/static/styles.css", "/static/app.js", "phone-transfer"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("GET / body does not contain %q", want)
 		}
