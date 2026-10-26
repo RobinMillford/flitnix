@@ -19,10 +19,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -586,4 +588,232 @@ func TestAbortedUploadCannotPublishAndKeepsSession(t *testing.T) {
 	}
 	stop()
 	awaitServeReturn(t, errc)
+}
+
+// ---- manifests that declare gigabyte-scale sizes are metadata-only and
+// therefore accepted; malformed or inconsistent metadata never is ----
+
+// TestGigabyteScaleManifestsAreAcceptedMetadataOnly uploads nothing: it
+// guards the acceptance of manifest *metadata* at the sizes the phone
+// actually produces (a ~7 GiB folder of episodes), and the rejection of
+// malformed size declarations, all through the real route.
+func TestGigabyteScaleManifestsAreAcceptedMetadataOnly(t *testing.T) {
+	env := newTestEnv(t)
+	token := env.token()
+
+	// One folder batch of 24 ~300 MiB episodes: the canonical ~7 GiB
+	// phone shape.
+	episode := int64(300 << 20)
+	items := make([]string, 0, 24)
+	var declared int64
+	for i := 0; i < 24; i++ {
+		items = append(items, fmt.Sprintf(
+			`{"relativePath":"ep%02d.mkv","size":%d}`, i+1, episode))
+		declared += episode
+	}
+	mounted := fmt.Sprintf(`{"direction":"phone_to_desktop","kind":"folder",`+
+		`"rootName":"Season 24","items":[%s]}`, strings.Join(items, ","))
+	rec := env.do(http.MethodPost, "/api/batches", token, []byte(mounted))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("24-episode manifest status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var batch transfer.BatchView
+	if err := json.Unmarshal(rec.Body.Bytes(), &batch); err != nil {
+		t.Fatal(err)
+	}
+	if len(batch.Items) != 24 {
+		t.Fatalf("batch holds %d items, want 24", len(batch.Items))
+	}
+	if batch.DeclaredTotalBytes != declared {
+		t.Fatalf("declaredTotalBytes = %d, want the exact item sum %d", batch.DeclaredTotalBytes, declared)
+	}
+	if batch.State != transfer.BatchStatePending {
+		t.Fatalf("batch state = %q, want pending (metadata-only: nothing uploaded, awaiting approval)", batch.State)
+	}
+
+	// One single file at seven gibibytes flat.
+	single := `{"direction":"phone_to_desktop","kind":"files",` +
+		`"items":[{"displayName":"episode.mkv","size":7516192768}]}`
+	rec = env.do(http.MethodPost, "/api/batches", token, []byte(single))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("single 7 GiB manifest status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &batch); err != nil {
+		t.Fatal(err)
+	}
+	if batch.DeclaredTotalBytes != 7<<30 {
+		t.Fatalf("single-file declaredTotalBytes = %d, want %d", batch.DeclaredTotalBytes, 7<<30)
+	}
+
+	// Acceptance publishes nothing: the receive directory may hold only
+	// the folder batch's allocated root directory; the flat batch, the
+	// only stream target in play, put no file and no part file anywhere.
+	entries, err := os.ReadDir(env.store.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("metadata-only run left %d receive entries (%v), want only the folder root", len(entries), receiveDirNames(t, env.store))
+	}
+	if !entries[0].IsDir() || strings.HasPrefix(entries[0].Name(), "episode") {
+		t.Fatalf("entry = %q, want the allocated folder root only", entries[0].Name())
+	}
+
+	// Malformed sizes are rejected before they can reach the machine:
+	// a string, a JSON number beyond int64, a negative count, and an
+	// aggregate that overflows int64.
+	for name, tc := range map[string]struct {
+		body string
+		want string
+	}{
+		"string size":       {`{"kind":"files","items":[{"displayName":"a.bin","size":"seven"}]}`, "invalid batch manifest JSON"},
+		"int64 overflow":    {`{"kind":"files","items":[{"displayName":"a.bin","size":9223372036854775808}]}`, "invalid batch manifest JSON"},
+		"negative size":     {`{"kind":"files","items":[{"displayName":"a.bin","size":-5}]}`, "invalid batch manifest"},
+		"overflowing total": {`{"kind":"files","items":[{"displayName":"a.bin","size":9223372036854775807},{"displayName":"b.bin","size":1}]}`, "invalid batch manifest"},
+	} {
+		rec := env.do(http.MethodPost, "/api/batches", token, []byte(tc.body))
+		code, message, _ := decodeCode(t, rec)
+		if code != http.StatusBadRequest || message != tc.want {
+			t.Errorf("%s: got %d error=%q, want 400 %q", name, code, message, tc.want)
+		}
+	}
+}
+
+// ---- a completed item must survive a later item's failure ----
+
+// TestCompletedItemSurvivesALaterItemFailure uploads the first item to
+// completion, then aborts mid-stream on the second. The finished first file
+// must remain published with accounted bytes; the failed second item and
+// everyone after it must not publish anything; the queue must still work.
+func TestCompletedItemSurvivesALaterItemFailure(t *testing.T) {
+	env := newTestEnv(t)
+	ts := httptest.NewServer(env.srv.Handler())
+	defer ts.Close()
+	token := env.token()
+	key := env.tokenKey(token)
+	batch := env.filesBatch(token, 8, 8)
+	env.approveBatch(key, batch)
+	ids := env.contentIDs(key, batch)
+
+	rec := env.do(http.MethodPut,
+		"/api/batches/"+batch.ID+"/items/"+batch.Items[0].ID+"/content",
+		token, syntheticBytes(8, 0x21))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first item upload status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Second item: declare 8 bytes, send 4, then die like a phone abort.
+	pw, res := startPut(contentURL(ts.URL, batch, 1), token, 8)
+	if _, err := pw.Write([]byte("1234")); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "second stream to start", func() bool {
+		u, _ := env.trans.Get(ids[1])
+		return u.State == transfer.StateUploading
+	})
+	pw.CloseWithError(errors.New("phone aborted"))
+	if r := awaitPut(t, res); r.err == nil && r.code == http.StatusOK {
+		t.Fatalf("aborted second item reported success: %+v", r)
+	}
+
+	waitFor(t, "second item settles as failed", func() bool {
+		u, _ := env.trans.Get(ids[1])
+		return u.State == transfer.StateFailed
+	})
+	if u, _ := env.trans.Get(ids[0]); u.State != transfer.StateCompleted {
+		t.Fatalf("first record = %q, want completed; finished work must keep its state", u.State)
+	}
+
+	view, err := env.coord.GetBatch(key, batch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []transfer.ItemState{transfer.ItemStateCompleted, transfer.ItemStateFailed}
+	for i := range want {
+		if view.Items[i].State != want[i] {
+			t.Fatalf("items = %v, want %v", itemStates(view), want)
+		}
+	}
+	if view.State != transfer.BatchStateFailed {
+		t.Fatalf("batch = %q, want failed", view.State)
+	}
+	// The completed item's bytes are the batch's accounted total; the
+	// failed stream's partial bytes contribute nothing.
+	if view.TransferredBytes != 8 {
+		t.Fatalf("batch bytes = %d, want exactly the completed item's 8", view.TransferredBytes)
+	}
+
+	names := receiveDirNames(t, env.store)
+	if len(names) != 1 || names[0] != "file-0.bin" {
+		t.Fatalf("receive directory = %v, want exactly one published file: file-0.bin", names)
+	}
+	if info, err := os.Stat(filepath.Join(env.store.Dir(), "file-0.bin")); err != nil || info.Size() != 8 {
+		t.Fatalf("surviving file = %v, %v (want 8 bytes)", info, err)
+	}
+	if left := partFiles(t, env.store.Dir()); len(left) != 0 {
+		t.Fatalf("temporary files left behind: %v", left)
+	}
+}
+
+// ---- a sender may not push more bytes than it declared ----
+
+// TestOversizedBatchItemUploadIsRefusedAndPublishesNothing declares 8 bytes
+// and pushes 9: the stream must refuse the surplus, no partial data may be
+// published anywhere, and the failure reason must be attributable to the
+// sender rather than to the server.
+func TestOversizedBatchItemUploadIsRefusedAndPublishesNothing(t *testing.T) {
+	env := newTestEnv(t)
+	token := env.token()
+	key := env.tokenKey(token)
+	batch := env.filesBatch(token, 8, 8)
+	env.approveBatch(key, batch)
+	ids := env.contentIDs(key, batch)
+
+	rec := env.do(http.MethodPut,
+		"/api/batches/"+batch.ID+"/items/"+batch.Items[0].ID+"/content",
+		token, syntheticBytes(9, 0x44))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("oversized upload got %d body=%s, want 400", rec.Code, rec.Body.String())
+	}
+	var reply struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &reply); err != nil {
+		t.Fatal(err)
+	}
+	if reply.Error != "body exceeds the approved size" {
+		t.Fatalf("oversize error = %q, want the exact oversized-body verdict", reply.Error)
+	}
+
+	// One failed item's stream verdict ends the whole batch: every other
+	// item canceling is the documented sequential-queue contract.
+	waitFor(t, "batch settles failed", func() bool {
+		v, _ := env.coord.GetBatch(key, batch.ID)
+		return v.State == transfer.BatchStateFailed
+	})
+	view, _ := env.coord.GetBatch(key, batch.ID)
+	want := []transfer.ItemState{transfer.ItemStateFailed, transfer.ItemStateCanceled}
+	for i := range want {
+		if view.Items[i].State != want[i] {
+			t.Fatalf("items = %v, want %v", itemStates(view), want)
+		}
+	}
+	if view.TransferredBytes != 0 {
+		t.Fatalf("batch bytes = %d, want 0: overrun bytes must not be accounted", view.TransferredBytes)
+	}
+	for i, wantState := range []transfer.State{transfer.StateFailed, transfer.StateCanceled} {
+		if u, _ := env.trans.Get(ids[i]); u.State != wantState {
+			t.Fatalf("upload record %d = %q, want %q", i, u.State, wantState)
+		}
+	}
+
+	if names := receiveDirNames(t, env.store); len(names) != 0 {
+		t.Errorf("oversized upload published %v", names)
+	}
+	if left := partFiles(t, env.store.Dir()); len(left) != 0 {
+		t.Errorf("temporary files left behind: %v", left)
+	}
+	if got := strings.Count(env.diagText(), "reason=size_exceeded"); got != 1 {
+		t.Errorf("size_exceeded diagnosed %d times, want 1: %s", got, env.diagText())
+	}
 }

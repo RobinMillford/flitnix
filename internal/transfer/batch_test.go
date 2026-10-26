@@ -2,6 +2,7 @@ package transfer
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -124,6 +125,100 @@ func TestValidateManifestRejectsTotalOverflowAndAssignedOrder(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("out-of-order assigned items were accepted")
+	}
+}
+
+// ---- size acceptance: manifest metadata alone must not cap transfers ----
+
+// TestValidateManifestAcceptsGigabyteScaleSizes guards the property the
+// phone→desktop protocol relies on: a manifest is metadata, so declaring ~7
+// GiB (24 episodes in one folder, or one huge file at all) must be accepted
+// exactly, with the total derived from the items and never approximated or
+// capped.
+func TestValidateManifestAcceptsGigabyteScaleSizes(t *testing.T) {
+	episode := int64(300 << 20) // 300 MiB: a plausible 24-episode season
+	items := make([]ManifestItem, 24)
+	for i := range items {
+		items[i] = ManifestItem{RelativePath: fmt.Sprintf("ep%02d.mkv", i+1), Size: episode}
+	}
+	validated, err := ValidateManifest(BatchManifest{
+		Direction: DirectionPhoneToDesktop,
+		Kind:      BatchKindFolder,
+		RootName:  "Season",
+		Items:     items,
+	})
+	if err != nil {
+		t.Fatalf("a ~7 GiB folder manifest was rejected: %v", err)
+	}
+	if got := validated.TotalBytes; got != 24*episode {
+		t.Fatalf("total bytes = %d, want the exact item sum %d", got, 24*episode)
+	}
+	if validated.TotalItemCount != 24 {
+		t.Fatalf("item count = %d, want 24", validated.TotalItemCount)
+	}
+
+	// A single file as large as the machine can describe is accepted too:
+	// no arbitrary ceiling exists on one file, only the int64 overflow
+	// guard itself.
+	const biggest = math.MaxInt64
+	validated, err = ValidateManifest(BatchManifest{
+		Direction: DirectionPhoneToDesktop,
+		Kind:      BatchKindFiles,
+		Items:     []ManifestItem{{DisplayName: "disk.img", Size: biggest}},
+	})
+	if err != nil {
+		t.Fatalf("a single math.MaxInt64-sized file was rejected: %v", err)
+	}
+	if got := validated.TotalBytes; got != biggest {
+		t.Fatalf("total bytes = %d, want %d", got, biggest)
+	}
+}
+
+// TestValidateManifestEnforcesLimitsExplicitly pins the two layered limit
+// behaviors apart: the fixed metadata limits (item count, path shape) are
+// always enforced, while any total-byte limit exists only as an int64
+// overflow guard by default — a lowered limit must still be honored when a
+// deployment sets one on purpose.
+func TestValidateManifestEnforcesLimitsExplicitly(t *testing.T) {
+	if DefaultManifestLimits.MaxTotalBytes != math.MaxInt64 {
+		t.Fatalf("default MaxTotalBytes = %d, want math.MaxInt64: the default is an overflow guard, not a size cap", DefaultManifestLimits.MaxTotalBytes)
+	}
+
+	limits := DefaultManifestLimits
+	limits.MaxItems = 3
+	items := make([]ManifestItem, 4)
+	for i := range items {
+		items[i] = ManifestItem{DisplayName: fmt.Sprintf("f%d.bin", i)}
+	}
+	if _, err := ValidateManifestWithLimits(BatchManifest{
+		Direction: DirectionPhoneToDesktop, Kind: BatchKindFiles, Items: items,
+	}, limits); err == nil {
+		t.Fatal("item-count limit was ignored")
+	}
+
+	byteLimits := DefaultManifestLimits
+	byteLimits.MaxTotalBytes = 16
+	if _, err := ValidateManifestWithLimits(BatchManifest{
+		Direction: DirectionPhoneToDesktop,
+		Kind:      BatchKindFiles,
+		Items:     []ManifestItem{{DisplayName: "big.bin", Size: 17}},
+	}, byteLimits); err == nil {
+		t.Fatal("an explicitly configured total-byte limit was ignored")
+	}
+
+	// Path-shape limits hold at the manifest level, not only in the
+	// sanitizer's standalone tests.
+	overlong := ManifestItem{RelativePath: strings.Repeat("a", MaxPathComponentBytes+1), Size: 1}
+	if _, err := ValidateManifest(BatchManifest{
+		Direction: DirectionPhoneToDesktop, Kind: BatchKindFolder, RootName: "R", Items: []ManifestItem{overlong},
+	}); err == nil {
+		t.Fatal("overlong relative-path component was accepted")
+	}
+	overdeep := ManifestItem{RelativePath: strings.Repeat("a/", MaxRelativePathDepth) + "file", Size: 1}
+	if _, err := ValidateManifest(BatchManifest{
+		Direction: DirectionPhoneToDesktop, Kind: BatchKindFolder, RootName: "R", Items: []ManifestItem{overdeep},
+	}); err == nil {
+		t.Fatal("overdeep relative path was accepted")
 	}
 }
 
