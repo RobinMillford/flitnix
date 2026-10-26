@@ -64,11 +64,16 @@
         ListSessions(), ListPendingUploads(), RecentUploads(), RecentDownloads(),
         ListSharedFiles(), ListSharedSources(), ReceiveDirectory(), ServerAddress(), ListPendingBatches(), ListBatches()
       ])
-      sessions = s; pending = p; uploads = u; downloads = d; files = f; sources = sourceList; pendingBatches = b
-      batches = allBatches
+      // Bound methods marshal empty (nil) Go slices as null. Treating them as
+      // empty lists is required: a single null here would make the template
+      // expressions below throw and abort the render flush, freezing the
+      // panel numbers for the rest of the session.
+      sessions = s ?? []; pending = p ?? []; uploads = u ?? []; downloads = d ?? []
+      files = f ?? []; sources = sourceList ?? []; pendingBatches = b ?? []
+      batches = allBatches ?? []
       receiveDir = dir; serverAddress = addr ?? ''
-      if (!s.length) { qrKey = ''; qrUrl = ''; qrError = '' }
-      else if (!s.some((x) => x.key === qrKey)) fetchQR(s[0].key)
+      if (!sessions.length) { qrKey = ''; qrUrl = ''; qrError = '' }
+      else if (!sessions.some((x) => x.key === qrKey)) fetchQR(sessions[0].key)
     } catch (err) { errorText = stringOfError(err) }
   }
   async function fetchQR(key: string): Promise<void> {
@@ -88,7 +93,7 @@
     try {
       const next = await ListNetworkInterfaces()
       if (generation !== networkRefreshGeneration) return
-      interfaces = next
+      interfaces = next ?? []
       if (next.length === 1) {
         selectedIp = next[0].ip
         networkChooserOpen = false

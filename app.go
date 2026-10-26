@@ -761,7 +761,11 @@ func (a *App) CancelBatch(id string) error {
 // closed: findBatchSession walks active sessions only, so a decision can
 // never attach to a batch whose session has ended.
 func (a *App) listBatches(filter func(transfer.BatchView) bool) []BatchView {
-	var out []BatchView
+	// The slice is never nil: the bound methods marshal an empty slice to JS
+	// as [], while a nil one becomes null and the UI dereferences .length and
+	// .filter on it, which would abort every Svelte render flush and freeze
+	// the desktop panel numbers mid-transfer.
+	out := make([]BatchView, 0)
 	seen := make(map[string]struct{})
 	for _, key := range a.coordinator.SessionKeys() {
 		items, err := a.coordinator.ListBatches(key)
