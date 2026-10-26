@@ -140,7 +140,49 @@ func (c *Coordinator) CreateBatch(sessionKey string, manifest BatchManifest) (Ba
 	}
 	c.batches[batchID] = &coordinatorBatch{batch: batch}
 	session.batches = append(session.batches, batchID)
+	c.pruneTerminalLocked(session)
 	return batch.View(), nil
+}
+
+// terminalBatchHistory bounds how many finished batches a session retains for
+// the desktop's history view.
+const terminalBatchHistory = 64
+
+// pruneTerminalLocked forgets the oldest finished batches beyond the history
+// bound so a long-lived session cannot accumulate unbounded batch records.
+// A failed batch that still pauses the queue is not finished and is kept.
+func (c *Coordinator) pruneTerminalLocked(session *coordinatorSession) {
+	finished := 0
+	for _, id := range session.batches {
+		if b := c.batches[id]; b != nil && batchFinished(b.batch.State, session.paused) {
+			finished++
+		}
+	}
+	if finished <= terminalBatchHistory {
+		return
+	}
+	drop := finished - terminalBatchHistory
+	kept := session.batches[:0]
+	for _, id := range session.batches {
+		b := c.batches[id]
+		if b != nil && drop > 0 && batchFinished(b.batch.State, session.paused) {
+			delete(c.batches, id)
+			drop--
+			continue
+		}
+		kept = append(kept, id)
+	}
+	session.batches = kept
+}
+
+func batchFinished(state BatchState, queuePaused bool) bool {
+	switch state {
+	case BatchStateCompleted, BatchStateCanceled, BatchStateRejected:
+		return true
+	case BatchStateFailed:
+		return !queuePaused
+	}
+	return false
 }
 
 // ApproveBatch moves a pending incoming batch into its session queue.
@@ -250,6 +292,37 @@ func (c *Coordinator) ClaimNext(sessionKey string) (TransferLease, error) {
 	if err != nil {
 		return TransferLease{}, err
 	}
+	return c.claimLocked(session, item, batch)
+}
+
+// ClaimItem leases one specific item, but only if it is exactly the item
+// ClaimNext would hand out. A request naming any other item is refused
+// without side effects, so a stray or out-of-order content request can never
+// leave an unrelated item leased (and the session queue stuck behind it).
+func (c *Coordinator) ClaimItem(sessionKey, batchID, itemID string) (TransferLease, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	session, err := c.sessionForOperationLocked(sessionKey)
+	if err != nil {
+		return TransferLease{}, err
+	}
+	if session.active != nil {
+		return TransferLease{}, ErrNoEligibleItem
+	}
+	if session.paused {
+		return TransferLease{}, ErrQueuePaused
+	}
+	item, batch, err := c.nextItemLocked(session)
+	if err != nil {
+		return TransferLease{}, err
+	}
+	if batch.batch.ID != batchID || item.ID != itemID {
+		return TransferLease{}, ErrNoEligibleItem
+	}
+	return c.claimLocked(session, item, batch)
+}
+
+func (c *Coordinator) claimLocked(session *coordinatorSession, item *TransferItem, batch *coordinatorBatch) (TransferLease, error) {
 	leaseID, err := NewOpaqueID()
 	if err != nil {
 		return TransferLease{}, err
@@ -363,6 +436,52 @@ func (c *Coordinator) FailItem(sessionKey string, lease TransferLease, transferE
 	session.paused = true
 	batch.batch.State = BatchStateFailed
 	batch.batch.Error = item.Error
+	return batch.batch.View(), nil
+}
+
+// FailBatch ends a batch whose active item failed. The failed item keeps its
+// error, every other unfinished item is canceled (the partial bytes of the
+// failed attempt were already discarded, so none are reported) and the batch
+// becomes failed. Unlike FailItem the session queue is not paused: a phone
+// recovers by declaring a fresh batch, and an abandoned batch must not block
+// it. A repeated or stale call fails with ErrLeaseInvalid and changes nothing.
+func (c *Coordinator) FailBatch(sessionKey string, lease TransferLease, transferErr error) (BatchView, error) {
+	if transferErr == nil {
+		transferErr = errors.New("transfer: item failed")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	session, err := c.sessionForOperationLocked(sessionKey)
+	if err != nil {
+		return BatchView{}, err
+	}
+	if !sameLease(session.active, lease) {
+		return BatchView{}, ErrLeaseInvalid
+	}
+	failed, batch, err := c.itemForLeaseLocked(lease)
+	if err != nil {
+		return BatchView{}, err
+	}
+	for i := range batch.batch.Items {
+		item := &batch.batch.Items[i]
+		if item.State == ItemStateCompleted {
+			continue
+		}
+		if item.Transferred > 0 {
+			batch.batch.TransferredBytes -= item.Transferred
+			item.Transferred = 0
+		}
+		if item == failed {
+			item.State = ItemStateFailed
+			item.Error = transferErr.Error()
+		} else {
+			item.State = ItemStateCanceled
+			item.Error = "batch stopped after a failed item"
+		}
+	}
+	session.active = nil
+	batch.batch.State = BatchStateFailed
+	batch.batch.Error = failed.Error
 	return batch.batch.View(), nil
 }
 
@@ -668,6 +787,10 @@ func (c *Coordinator) nextItemLocked(session *coordinatorSession) (*TransferItem
 			continue
 		}
 		if batch.batch.State == BatchStatePending || batch.batch.State == BatchStateRejected || batch.batch.State == BatchStateCanceled || batch.batch.State == BatchStateCompleted {
+			continue
+		}
+		if batch.batch.State == BatchStateFailed && !session.paused {
+			// Ended by FailBatch: terminal, and it must not block later batches.
 			continue
 		}
 		for i := range batch.batch.Items {

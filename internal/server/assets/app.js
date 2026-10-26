@@ -11,7 +11,10 @@
 
   var TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
   var POLL_MS = 1200;           // approval polling cadence
-  var MAX_POLL_FAILURES = 12;   // stop a spinner that has lost its peer
+  var POLL_BACKOFF_MAX_MS = 5000; // ceiling for retry delay after a failed poll
+  var PROGRESS_POLL_MS = 500;   // download progress cadence while it is live
+  var MAX_PROGRESS_FAILURES = 20; // consecutive failed progress polls before giving up
+  var PAINT_MIN_MS = 200;       // upload progress repaint throttle
 
   // ------------------------------------------------------------------
   // Token: read once, then scrub the fragment.
@@ -92,9 +95,53 @@
     }
   }
 
-  function endUnauthorized() {
+  // A 401 from a token the desktop once issued means the session really ended
+  // (idle expiry or revoked on the desktop). Anything else — a dropped network,
+  // a 5xx, a timeout — is NOT a session ending and never reaches this path.
+  function endUnauthorized(code) {
+    if (code === "session_expired") {
+      endSession("Session expired",
+        "This session expired after sitting idle. Scan the QR code shown on the Flitnix desktop to start a new one.");
+      return;
+    }
     endSession("Session ended",
       "The desktop ended this transfer session. Scan the QR code shown on the Flitnix desktop again to start a fresh one.");
+  }
+
+  // The desktop is unreachable right now. This is transient: the established
+  // session is kept, transfers stay as they are, and polling retries.
+  var reconnecting = false;
+  function setReconnecting(on) {
+    if (appState.ended || on === reconnecting) return;
+    reconnecting = on;
+    if (on) setStatus("reconnecting", "Lost contact with the desktop — retrying…");
+    else setStatus("ready", "Connected — pick files to send or download the shared ones");
+  }
+
+  // Delay before retry number n (1-based): grows from POLL_MS, bounded.
+  function backoffMs(failures) {
+    return Math.min(POLL_BACKOFF_MAX_MS, POLL_MS * Math.pow(1.6, Math.max(0, failures - 1)));
+  }
+
+  // Wake any waiting poll as soon as the network returns.
+  var wakeups = [];
+  window.addEventListener("online", function () {
+    var fns = wakeups; wakeups = [];
+    fns.forEach(function (fn) { fn(); });
+  });
+  function waitThen(holder, ms, fn) {
+    var done = false;
+    function run() {
+      if (done) return;
+      done = true;
+      clearTimeout(holder.timer);
+      holder.timer = null;
+      var i = wakeups.indexOf(run);
+      if (i >= 0) wakeups.splice(i, 1);
+      fn();
+    }
+    holder.timer = setTimeout(run, ms);
+    wakeups.push(run);
   }
 
   // ------------------------------------------------------------------
@@ -124,7 +171,7 @@
       cache: "no-store"
     }).then(function (res) {
       return readBody(res).then(function (body) {
-        if (res.status === 401) { endUnauthorized(); }
+        if (res.status === 401) { endUnauthorized(body && body.code); }
         if (res.status >= 200 && res.status < 300) return body;
         var msg = body && body.error ? body.error
           : "Request failed (" + res.status + ")";
@@ -358,6 +405,7 @@
     api("/api/batches/" + encodeURIComponent(activeBatch.id)).then(function (batch) {
       if (!activeBatch || appState.ended) return;
       activeBatch.failures = 0;
+      setReconnecting(false);
       batch.items.forEach(function (item) {
         var job = activeBatch.jobs[item.sequence];
         if (!job) return;
@@ -395,14 +443,21 @@
       watchBatch();
     }).catch(function (err) {
       if (!activeBatch || appState.ended || (err && err.silent)) return;
-      activeBatch.failures += 1;
-      if (activeBatch.failures >= MAX_POLL_FAILURES) {
+      if (err && err.status === 404) {
+        // The desktop genuinely no longer knows this batch.
         activeBatch.jobs.forEach(function (job) {
-          if (job.phase !== "done") { job.phase = "failed"; job.err = "Lost contact with the desktop. Rescan or retry."; job.retryable = true; paint(job); }
+          if (job.phase !== "done") { job.phase = "failed"; job.err = "The desktop no longer has this transfer. Retry to send it again."; job.retryable = true; paint(job); }
         });
-        activeBatch = null; pumpBusy = false; return;
+        activeBatch = null; pumpBusy = false;
+        return;
       }
-      watchBatch();
+      // Anything else (network drop, timeout, 5xx) is transient. Keep the
+      // session and the queue, show that we are reconnecting, and retry with
+      // a bounded backoff. A real session end arrives as a 401 above.
+      activeBatch.failures += 1;
+      setReconnecting(true);
+      var batch = activeBatch;
+      waitThen(batch, backoffMs(batch.failures), pollBatch);
     });
   }
 
@@ -423,6 +478,10 @@
     });
   }
 
+  function errorCode(xhr) {
+    try { var parsed = JSON.parse(xhr.responseText); return parsed && parsed.code; } catch (e) { return undefined; }
+  }
+
   function putBatchContent(job) {
     return new Promise(function (resolve, reject) {
       var xhr = new XMLHttpRequest();
@@ -434,112 +493,21 @@
       xhr.onload = function () {
         job.xhr = null;
         if (job.removed || appState.ended) { reject({ aborted: true }); return; }
-        if (xhr.status === 401) { endUnauthorized(); reject({ aborted: true }); return; }
+        if (xhr.status === 401) { endUnauthorized(errorCode(xhr)); reject({ aborted: true }); return; }
         if (xhr.status >= 200 && xhr.status < 300) { resolve(); return; }
         var msg = "Upload failed (" + xhr.status + ")";
         try { var parsed = JSON.parse(xhr.responseText); if (parsed && parsed.error) msg = parsed.error; } catch (e) {}
         reject(new Error(msg));
       };
-      xhr.upload.onprogress = function (ev) {
-        if (!ev.lengthComputable) return;
-        job.uploaded = ev.loaded; paint(job);
-      };
-      xhr.onerror = function () { job.xhr = null; reject(new Error("Network error while uploading.")); };
-      xhr.onabort = function () { job.xhr = null; reject({ aborted: true }); };
-      xhr.send(job.file);
-    });
-  }
-
-  function watch(job) {
-    if (job.removed || appState.ended) return;
-    job.timer = setTimeout(function () { pollOnce(job); }, POLL_MS);
-  }
-
-  function pollOnce(job) {
-    if (job.removed || appState.ended) return;
-    api("/api/uploads/" + encodeURIComponent(job.id))
-      .then(function (up) {
-        if (job.removed || appState.ended) return;
-        if (!up || !up.state) throw new Error("The desktop gave an unexpected reply");
-        var s = up.state;
-        if (s === "approved") {
-          job.failures = 0;
-          job.phase = "sending";
-          job.uploaded = 0;
-          paint(job);
-          send(job);
-          return;
-        }
-        if (s === "rejected") { failJob(job, up.reason || "The desktop declined this file.", false); return; }
-        if (s === "canceled") { cancelJob(job, "This transfer was canceled on the desktop."); return; }
-        if (s === "failed") { failJob(job, up.reason || "Transfer failed on the desktop.", false); return; }
-        if (s === "completed") { doneJob(job); return; }
-        // pending (or uploading from an outside party): keep waiting.
-        job.failures = 0;
-        watch(job);
-      })
-      .catch(function (err) {
-        if (job.removed || appState.ended) return;
-        if (err && err.silent) return;
-        job.failures += 1;
-        if (job.failures >= MAX_POLL_FAILURES) {
-          failJob(job, "Lost contact with the desktop. Rescan or retry.", true);
-          return;
-        }
-        watch(job);
-      });
-  }
-
-  function send(job) {
-    putContent(job).then(function () {
-      doneJob(job);
-    }).catch(function (e) {
-      if (job.removed || appState.ended) { pumpBusy = false; return; }
-      if (e && e.aborted) { cancelJob(job, "Upload canceled."); return; }
-      failJob(job, (e && e.message) || "Transfer failed.", true);
-    });
-  }
-
-  function putContent(job) {
-    return new Promise(function (resolve, reject) {
-      var xhr = new XMLHttpRequest();
-      job.xhr = xhr;
-      xhr.open("PUT", "/api/uploads/" + encodeURIComponent(job.id) + "/content");
-      xhr.setRequestHeader("Authorization", "Bearer " + token);
-      xhr.setRequestHeader("Content-Type", "application/octet-stream");
-      xhr.onload = function () {
-        job.xhr = null;
-        if (job.removed || appState.ended) { reject({ aborted: true }); return; }
-        if (xhr.status === 401) { endUnauthorized(); reject({ aborted: true }); return; }
-        if (xhr.status >= 200 && xhr.status < 300) {
-          var body = null;
-          try { body = JSON.parse(xhr.responseText); } catch (e) { body = null; }
-          resolve(body);
-          return;
-        }
-        var msg = "Upload failed (" + xhr.status + ")";
-        try {
-          var parsed = JSON.parse(xhr.responseText);
-          if (parsed && parsed.error) msg = parsed.error;
-        } catch (e2) { /* plain body */ }
-        reject(new Error(msg));
-      };
+      var lastPaint = 0;
       xhr.upload.onprogress = function (ev) {
         if (!ev.lengthComputable) return;
         job.uploaded = ev.loaded;
-        if (job.file.size > 0 && job.file.size > 1) {
-          job.refs.bar.value = Math.min(ev.loaded, job.file.size);
-        }
-        if (!job.removed && !appState.ended) paint(job);
+        var now = Date.now();
+        if (now - lastPaint >= PAINT_MIN_MS || ev.loaded === ev.total) { lastPaint = now; paint(job); }
       };
-      xhr.onerror = function () {
-        job.xhr = null;
-        reject(new Error("Network error while uploading. Check the Wi-Fi connection and retry."));
-      };
-      xhr.onabort = function () {
-        job.xhr = null;
-        reject({ aborted: true });
-      };
+      xhr.onerror = function () { job.xhr = null; reject(new Error("Network error while uploading. The desktop may have received part of this file; retry to send it again.")); };
+      xhr.onabort = function () { job.xhr = null; reject({ aborted: true }); };
       xhr.send(job.file);
     });
   }
@@ -612,8 +580,10 @@
       cache: "no-store"
     }).then(function (res) {
       if (res.status === 401) {
-        endUnauthorized();
-        throw new Error("silent");
+        return res.json().catch(function () { return null; }).then(function (body) {
+          endUnauthorized(body && body.code);
+          throw new Error("silent");
+        });
       }
       if (!res.ok) {
         return res.text().then(function (t) {
@@ -627,7 +597,7 @@
       }
       return res.json().then(function (grant) {
         if (!grant || !grant.downloadUrl) throw new Error("The desktop returned an invalid download grant.");
-        window.location.href = grant.downloadUrl;
+        startNativeDownload(grant.downloadUrl, grant.progressId);
         if (grant.progressId) watchDownloadProgress(grant.progressId);
       });
     }).catch(function (err) {
@@ -643,21 +613,64 @@
     });
   }
 
+  // The browser's own download manager fetches the grant URL. It is loaded in
+  // a hidden frame, never by navigating this page: if the server answers with
+  // an error instead of an attachment, a top-level navigation would replace
+  // this page and discard the session token held only in memory (the pairing
+  // link is single-use), which looks like "Session ended". A frame can fail
+  // without costing the session; the progress watcher reports the outcome.
+  var downloadFrames = {};
+  function startNativeDownload(url, progressId) {
+    var frame = document.createElement("iframe");
+    frame.hidden = true;
+    frame.setAttribute("aria-hidden", "true");
+    frame.tabIndex = -1;
+    frame.src = url;
+    document.body.appendChild(frame);
+    var key = progressId || url;
+    downloadFrames[key] = frame;
+    // Safety net only; normally the watcher removes it at the terminal state.
+    setTimeout(function () { removeDownloadFrame(key); }, 30 * 60 * 1000);
+  }
+  function removeDownloadFrame(key) {
+    var frame = downloadFrames[key];
+    if (!frame) return;
+    delete downloadFrames[key];
+    if (frame.parentNode) frame.parentNode.removeChild(frame);
+  }
+
   function updateDownloadSelection() {
     var selected = filesEl.querySelectorAll(".source-check:checked");
     downloadSelectedBtn.disabled = selected.length === 0;
   }
 
+  // Follows one archive/file download. It polls only while the download is
+  // live and stops at the first terminal answer; a transient failure retries
+  // with a bounded backoff instead of abandoning the watch.
   function watchDownloadProgress(id) {
-    var timer = setInterval(function () {
-      if (appState.ended) { clearInterval(timer); return; }
+    var failures = 0;
+    function tick() {
+      if (appState.ended) return;
       api("/api/download-progress/" + encodeURIComponent(id)).then(function (p) {
-        if (p.state === "completed" || p.state === "failed") {
-          clearInterval(timer);
-          if (p.state === "failed") filesEmptyEl.textContent = "Download failed: " + (p.error || "source unavailable");
+        failures = 0;
+        setReconnecting(false);
+        if (p.state === "failed" || p.state === "expired") {
+          removeDownloadFrame(id);
+          filesEmptyEl.hidden = false;
+          filesEmptyEl.textContent = "Download failed: " + (p.error || "source unavailable");
+          return;
         }
-      }).catch(function () { clearInterval(timer); });
-    }, 500);
+        if (p.state === "completed") { removeDownloadFrame(id); return; }
+        setTimeout(tick, PROGRESS_POLL_MS);
+      }).catch(function (err) {
+        if (appState.ended || (err && err.silent)) return;
+        if (err && err.status === 404) return; // record already cleaned up
+        failures += 1;
+        if (failures >= MAX_PROGRESS_FAILURES) return;
+        setTimeout(tick, backoffMs(failures));
+      });
+    }
+    setTimeout(tick, PROGRESS_POLL_MS);
   }
 
   function showDownloadError(f, msg) {

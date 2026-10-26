@@ -310,3 +310,146 @@ func TestSessionKeyIsStableAndNotTheToken(t *testing.T) {
 		t.Fatal("key appears to embed the raw token material")
 	}
 }
+
+func TestEndRestartsIdleWindowAfterLongTransfer(t *testing.T) {
+	// The reported bug: a transfer that outlasts the idle window used to
+	// leave the session expired the instant it was unpinned, killing the very
+	// next request (the following batch item or status poll).
+	clock := newFakeClock(t)
+	m := NewManager(Config{IdleTimeout: 10 * time.Minute, Now: clock.Now})
+	s := mustCreate(t, m)
+	token := s.Token()
+
+	s.Begin()
+	clock.advance(25 * time.Minute) // far beyond the idle window, no other traffic
+	s.End()
+
+	if _, err := m.Validate(token); err != nil {
+		t.Fatalf("session died the moment a long transfer finished: %v", err)
+	}
+	// Ordinary idle expiry still applies afterwards.
+	clock.advance(10*time.Minute + time.Second)
+	if _, err := m.Validate(token); !errors.Is(err, ErrExpired) {
+		t.Fatalf("idle session err = %v, want ErrExpired", err)
+	}
+}
+
+func TestBeginRefreshesIdleWindow(t *testing.T) {
+	clock := newFakeClock(t)
+	m := NewManager(Config{IdleTimeout: time.Minute, Now: clock.Now})
+	s := mustCreate(t, m)
+	clock.advance(50 * time.Second)
+	s.Begin()
+	s.End()
+	clock.advance(50 * time.Second) // 100s after creation, 50s after the transfer
+	if _, err := m.Validate(s.Token()); err != nil {
+		t.Fatalf("recent transfer did not count as activity: %v", err)
+	}
+}
+
+func TestOnExpireFiresOnlyForIdleUnpinnedSessions(t *testing.T) {
+	clock := newFakeClock(t)
+	var mu sync.Mutex
+	var expired []string
+	m := NewManager(Config{IdleTimeout: time.Minute, Now: clock.Now, OnExpire: func(key string) {
+		mu.Lock()
+		expired = append(expired, key)
+		mu.Unlock()
+	}})
+	idle := mustCreate(t, m)
+	busy := mustCreate(t, m)
+	revoked := mustCreate(t, m)
+	m.RevokeSession(revoked)
+	busy.Begin() // a live transfer stream pins its session
+
+	clock.advance(5 * time.Minute)
+	if got := m.Len(); got != 1 {
+		t.Fatalf("Len = %d, want only the pinned session", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(expired) != 1 || expired[0] != idle.Key() {
+		t.Fatalf("expired = %v, want exactly the idle session %s", expired, idle.Key())
+	}
+	if busy.Status() != StatusActive {
+		t.Fatal("pinned session must stay active")
+	}
+}
+
+func TestOnExpireCallbackMayReenterManager(t *testing.T) {
+	clock := newFakeClock(t)
+	var m *Manager
+	called := make(chan struct{}, 4)
+	m = NewManager(Config{IdleTimeout: time.Minute, Now: clock.Now, OnExpire: func(string) {
+		_ = m.Len() // would deadlock if the hook ran under the Manager lock
+		called <- struct{}{}
+	}})
+	mustCreate(t, m)
+	clock.advance(2 * time.Minute)
+	m.ActiveSessions()
+	select {
+	case <-called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnExpire was not delivered (or deadlocked)")
+	}
+}
+
+func TestPruneExpiresEveryStaleSessionAndKeepsTheLive(t *testing.T) {
+	// Several stale sessions around a live one: none may be skipped, lost or
+	// recorded twice.
+	clock := newFakeClock(t)
+	m := NewManager(Config{IdleTimeout: time.Minute, Now: clock.Now})
+	a := mustCreate(t, m)
+	b := mustCreate(t, m)
+	c := mustCreate(t, m)
+	d := mustCreate(t, m)
+	clock.advance(30 * time.Second)
+	if _, err := m.Validate(b.Token()); err != nil { // keep b alive
+		t.Fatal(err)
+	}
+	clock.advance(45 * time.Second) // a, c, d stale; b alive
+	if got := m.Len(); got != 1 {
+		t.Fatalf("Len = %d, want 1", got)
+	}
+	if _, err := m.Validate(b.Token()); err != nil {
+		t.Fatalf("live session was dropped by pruning: %v", err)
+	}
+	for _, s := range []*Session{a, c, d} {
+		if _, err := m.Validate(s.Token()); !errors.Is(err, ErrExpired) {
+			t.Fatalf("stale session err = %v, want ErrExpired", err)
+		}
+	}
+}
+
+func TestCloseMarksSessionsRevoked(t *testing.T) {
+	m := NewManager(Config{})
+	s := mustCreate(t, m)
+	m.Close()
+	if got := s.Status(); got != StatusRevoked {
+		t.Fatalf("Status after Close = %q, want revoked (streams watch it)", got)
+	}
+}
+
+func TestEndNeverExposesAnUnpinnedSessionWithAStaleDeadline(t *testing.T) {
+	// A prune running concurrently with End must see either "still pinned" or
+	// "fresh deadline", never "unpinned + deadline from the transfer's start".
+	clock := newFakeClock(t)
+	m := NewManager(Config{IdleTimeout: time.Minute, Now: clock.Now})
+	s := mustCreate(t, m)
+	for i := 0; i < 300; i++ {
+		s.Begin()
+		clock.advance(time.Hour) // the transfer outlasts the idle window
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for j := 0; j < 50; j++ {
+				_ = m.Len()
+			}
+		}()
+		s.End()
+		<-done
+		if m.Len() != 1 {
+			t.Fatalf("iteration %d: session expired at the end of a long transfer", i)
+		}
+	}
+}
