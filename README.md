@@ -65,3 +65,24 @@ infers a phone model from a network name. Native Windows and macOS runtime
 verification must be performed on their respective operating systems.
 
 A build without the tag fails with `Package webkit2gtk-4.0 not found`.
+
+## Testing
+
+Go tests follow the standard package-local layout:
+
+- Unit and package integration tests stay beside the package they test, using `*_test.go`
+  files under the corresponding package directory.
+- Tests that need unexported package implementation details remain in that package.
+- Cross-package integration and end-to-end tests may be added under `tests/integration/` or
+  `tests/e2e/` when they do not belong to one package.
+- Reusable test fixtures belong under `tests/fixtures/`.
+
+Do not move package tests into a centralized directory or expose production internals solely to
+make them testable. This keeps `go test ./...`, package ownership, and standard Go tooling working
+without special configuration.
+
+Run the complete Go test suite with:
+
+```bash
+go test ./...
+```
