@@ -107,6 +107,43 @@ type Config struct {
 	// any more. Pinned sessions never expire, so the hook can never fire for
 	// a session with a live transfer stream. It must not block for long.
 	OnExpire func(key string)
+
+	// OnEnd, when set, is invoked (without any Manager lock held) with one
+	// EndEvent for every session that leaves the active set: idle expiry,
+	// revocation and manager close. It is the diagnostic counterpart of
+	// OnExpire: when a phone reports an unexpected "session ended", the
+	// desktop can name the concrete reason from its own log. Events carry
+	// only a non-secret key and a reason category. It must not block for
+	// long, and it may call back into the Manager.
+	OnEnd func(EndEvent)
+}
+
+// EndReason categorizes why a session ended. Values are stable identifiers
+// suitable for logs and error reports; they never carry any secret.
+type EndReason string
+
+const (
+	// EndIdleExpiry: the session sat idle (unpinned) past its window and
+	// expired lazily on the next pass.
+	EndIdleExpiry EndReason = "idle_expiry"
+
+	// EndRevoked: the session was ended explicitly — by the desktop's own
+	// EndSession flow, by a Revoke call, or by RevokeSession.
+	EndRevoked EndReason = "revoked"
+
+	// EndShutdown: the Manager itself closed, terminating every session it
+	// still held (desktop shutdown or server replacement).
+	EndShutdown EndReason = "shutdown"
+)
+
+// EndEvent is one notification that a session left the active set.
+type EndEvent struct {
+	// Key is the session's non-secret identifier (hex SHA-256 of its
+	// token). It is safe to log; the token itself never is.
+	Key string
+
+	// Reason is why the session ended.
+	Reason EndReason
 }
 
 // Status describes why a session ended.
@@ -146,6 +183,9 @@ type Manager struct {
 
 	onExpire func(key string)
 	expired  []string // keys of freshly expired sessions awaiting OnExpire
+
+	onEnd func(EndEvent)
+	ended []EndEvent // end events awaiting OnEnd, in end order
 }
 
 type histItem struct {
@@ -168,7 +208,7 @@ func NewManager(cfg Config) *Manager {
 	if now == nil {
 		now = time.Now
 	}
-	return &Manager{idle: cfg.IdleTimeout, max: cfg.MaxSessions, now: now, onExpire: cfg.OnExpire}
+	return &Manager{idle: cfg.IdleTimeout, max: cfg.MaxSessions, now: now, onExpire: cfg.OnExpire, onEnd: cfg.OnEnd}
 }
 
 // generateToken returns a fresh URL-safe 256-bit token.
@@ -276,6 +316,9 @@ func (m *Manager) pruneLocked(now time.Time) {
 		if m.onExpire != nil {
 			m.expired = append(m.expired, s.Key())
 		}
+		if m.onEnd != nil {
+			m.ended = append(m.ended, EndEvent{Key: s.Key(), Reason: EndIdleExpiry})
+		}
 	}
 	for len(m.hist) > maxHistory {
 		m.hist = m.hist[len(m.hist)-maxHistory:]
@@ -305,12 +348,16 @@ func (m *Manager) Revoke(token string) error {
 		return ErrInvalid
 	}
 	d := digestToken(token)
+	defer m.notifyExpired()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, s := range m.active {
 		if subtle.ConstantTimeCompare(d[:], s.digest[:]) == 1 {
 			s.revokedN.Store(time.Now().UnixNano())
 			m.endSessionLocked(s, StatusRevoked)
+			if m.onEnd != nil {
+				m.ended = append(m.ended, EndEvent{Key: s.Key(), Reason: EndRevoked})
+			}
 			return nil
 		}
 	}
@@ -323,9 +370,13 @@ func (m *Manager) RevokeSession(s *Session) {
 	if s == nil {
 		return
 	}
+	defer m.notifyExpired()
 	m.mu.Lock()
 	s.revokedN.Store(time.Now().UnixNano())
 	m.endSessionLocked(s, StatusRevoked)
+	if m.onEnd != nil {
+		m.ended = append(m.ended, EndEvent{Key: s.Key(), Reason: EndRevoked})
+	}
 	m.mu.Unlock()
 }
 
@@ -333,6 +384,7 @@ func (m *Manager) RevokeSession(s *Session) {
 // afterwards fails for every previously active token, and Create fails with
 // ErrClosed.
 func (m *Manager) Close() {
+	defer m.notifyExpired()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
@@ -340,8 +392,12 @@ func (m *Manager) Close() {
 	}
 	m.closed = true
 	for len(m.active) > 0 {
-		m.active[0].revokedN.Store(time.Now().UnixNano())
-		m.endSessionLocked(m.active[0], StatusRevoked)
+		s := m.active[0]
+		s.revokedN.Store(time.Now().UnixNano())
+		m.endSessionLocked(s, StatusRevoked)
+		if m.onEnd != nil {
+			m.ended = append(m.ended, EndEvent{Key: s.Key(), Reason: EndShutdown})
+		}
 	}
 }
 
@@ -367,18 +423,31 @@ func (m *Manager) Len() int {
 	return len(m.active)
 }
 
-// notifyExpired delivers pending OnExpire callbacks after the Manager lock is
-// released, so a callback may freely call back into the Manager.
+// notifyExpired delivers pending end callbacks after the Manager lock is
+// released, so a callback may freely call back into the Manager. It drains
+// both queues: OnExpire (idle-expired keys only, transfer release) and OnEnd
+// (every ending, diagnostics). Queues hold work only between an ending and
+// the next drain — every method that can end a session drains on its way
+// out — so memory stays bounded even if a callback never returns.
 func (m *Manager) notifyExpired() {
-	if m.onExpire == nil {
+	if m.onExpire == nil && m.onEnd == nil {
 		return
 	}
 	m.mu.Lock()
-	keys := m.expired
+	expired := m.expired
 	m.expired = nil
+	ended := m.ended
+	m.ended = nil
 	m.mu.Unlock()
-	for _, key := range keys {
-		m.onExpire(key)
+	for _, key := range expired {
+		if m.onExpire != nil {
+			m.onExpire(key)
+		}
+	}
+	for _, event := range ended {
+		if m.onEnd != nil {
+			m.onEnd(event)
+		}
 	}
 }
 

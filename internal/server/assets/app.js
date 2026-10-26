@@ -104,8 +104,16 @@
         "This session expired after sitting idle. Scan the QR code shown on the Flitnix desktop to start a new one.");
       return;
     }
-    endSession("Session ended",
-      "The desktop ended this transfer session. Scan the QR code shown on the Flitnix desktop again to start a fresh one.");
+    if (code === "session_revoked") {
+      endSession("Session ended",
+        "The desktop ended this transfer session. Scan the QR code shown on the Flitnix desktop again to start a fresh one.");
+      return;
+    }
+    // The desktop rejected the token outright: this page is presenting a
+    // token it never issued (stale reload, pair-of-sessions confusion). It
+    // did NOT end any session, so the wording must not claim it did.
+    endSession("Transfer stopped",
+      "The desktop did not recognize this session. Open this page again from the QR code shown on the Flitnix desktop.");
   }
 
   // The desktop is unreachable right now. This is transient: the established
