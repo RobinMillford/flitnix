@@ -140,3 +140,124 @@ func TestPausedFailedBatchIsNotPruned(t *testing.T) {
 		t.Fatalf("a failed batch that still pauses the queue was pruned: %v", err)
 	}
 }
+
+func TestSessionHistorySurvivesCloseSessionAndReadsReadOnly(t *testing.T) {
+	c := NewCoordinator(CoordinatorConfig{})
+
+	// One session carrying every terminal shape: completed, failed,
+	// canceled, rejected, plus one still-pending batch.
+	created := approvedBatch(t, c, "s", "done.txt") // phone->desktop, approved
+	lease := claim(t, c, "s")
+	complete(t, c, "s", lease)
+
+	failed := approvedBatch(t, c, "s", "bad.txt")
+	flease := claim(t, c, "s")
+	if _, err := c.FailItem("s", flease, errors.New("disk error")); err != nil {
+		t.Fatal(err)
+	}
+
+	canceled := approvedBatch(t, c, "s", "gone.txt")
+	if _, err := c.CancelBatch("s", canceled.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	rejected := createCoordinatorBatch(t, c, "s", DirectionPhoneToDesktop, "no.txt")
+	if _, err := c.RejectBatch("s", rejected.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	pending := createCoordinatorBatch(t, c, "s", DirectionPhoneToDesktop, "waiting.txt")
+
+	// Registration order as delivered to a live session.
+	live, err := c.ListBatches("s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(live) != 5 || live[0].ID != created.ID || live[1].ID != failed.ID ||
+		live[2].ID != canceled.ID || live[3].ID != rejected.ID || live[4].ID != pending.ID {
+		t.Fatalf("live listing = %v, want 5 batches in registration order", live)
+	}
+	// The failed batch is still failed while the session lives.
+	for i, want := range []BatchState{BatchStateCompleted, BatchStateFailed, BatchStateCanceled, BatchStateRejected, BatchStatePending} {
+		if live[i].State != want {
+			t.Fatalf("live batch %d state = %q, want %q", i, live[i].State, want)
+		}
+	}
+
+	if err := c.CloseSession("s"); err != nil {
+		t.Fatal(err)
+	}
+
+	// After the ending: ListBatches fails closed for everyone, history
+	// survives for projections.
+	if _, err := c.ListBatches("s"); !errors.Is(err, ErrSessionClosed) {
+		t.Fatalf("closed-session ListBatches = %v, want ErrSessionClosed", err)
+	}
+	history, ok := c.SessionHistory("s")
+	if !ok {
+		t.Fatal("SessionHistory lost a session it once tracked")
+	}
+	if len(history) != len(live) {
+		t.Fatalf("history = %d batches, live listing had %d", len(history), len(live))
+	}
+	for i := range live {
+		if history[i].ID != live[i].ID {
+			t.Fatalf("history[%d] = %s, want %s (registration order changed after close)", i, history[i].ID, live[i].ID)
+		}
+	}
+	// CloseSession's contract: completed and rejected keep their state;
+	// every other batch shows canceled ("session closed"), and approval
+	// states are untouched. History must faithfully report exactly that.
+	states := map[string]BatchState{
+		created.ID:  BatchStateCompleted,
+		failed.ID:   BatchStateCanceled,
+		canceled.ID: BatchStateCanceled,
+		rejected.ID: BatchStateRejected,
+		pending.ID:  BatchStateCanceled,
+	}
+	approval := map[string]ApprovalState{
+		created.ID:  ApprovalApproved,
+		failed.ID:   ApprovalApproved,
+		canceled.ID: ApprovalApproved,
+		rejected.ID: ApprovalRejected,
+		pending.ID:  ApprovalPending,
+	}
+	for id, want := range states {
+		for _, h := range history {
+			if h.ID == id && h.State != want {
+				t.Fatalf("batch %s state = %q, want %q", id, h.State, want)
+			}
+			if h.ID == id && h.ApprovalState != approval[id] {
+				t.Fatalf("batch %s approval = %q, want %q", id, h.ApprovalState, approval[id])
+			}
+		}
+	}
+
+	keys := c.SessionKeys()
+	if len(keys) != 1 || keys[0] != "s" {
+		t.Fatalf("SessionKeys = %v, want [s]", keys)
+	}
+	if _, ok := c.SessionHistory("unknown"); ok {
+		t.Fatal("SessionHistory invented history for an unknown key")
+	}
+	if _, ok := c.SessionHistory(""); ok {
+		t.Fatal("SessionHistory invented history for an empty key")
+	}
+
+	// Closed sessions are read-only: no decision reattaches through history.
+	if _, err := c.ApproveBatch("s", created.ID); !errors.Is(err, ErrSessionClosed) {
+		t.Fatalf("approve on closed session = %v, want ErrSessionClosed", err)
+	}
+	if _, err := c.GetBatch("s", created.ID); !errors.Is(err, ErrSessionClosed) {
+		t.Fatalf("GetBatch on closed session = %v, want ErrSessionClosed", err)
+	}
+
+	// Closing the whole coordinator keeps nothing readable; keys empty out.
+	c.Close()
+	if _, ok := c.SessionHistory("s"); ok {
+		t.Fatal("SessionHistory served records after the coordinator itself closed")
+	}
+	if got := c.SessionKeys(); got != nil {
+		t.Fatalf("SessionKeys after close = %v, want empty", got)
+	}
+}

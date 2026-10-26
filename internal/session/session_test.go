@@ -453,3 +453,159 @@ func TestEndNeverExposesAnUnpinnedSessionWithAStaleDeadline(t *testing.T) {
 		}
 	}
 }
+
+// ---- OnEnd end-reason diagnostics ----
+
+// endRecorder collects OnEnd events for assertions.
+type endRecorder struct {
+	mu     sync.Mutex
+	events []EndEvent
+}
+
+func (r *endRecorder) callback(ev EndEvent) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, ev)
+}
+
+func (r *endRecorder) snapshot() []EndEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]EndEvent(nil), r.events...)
+}
+
+func TestOnEndFiresOncePerSessionWithTheRightReason(t *testing.T) {
+	// One manager, three endings, every category distinct and exactly once:
+	// idle expiry, revocation, manager close. Each session is created while
+	// the clock still has headroom for its own ending.
+	clock := newFakeClock(t)
+	rec := &endRecorder{}
+	m := NewManager(Config{IdleTimeout: time.Minute, Now: clock.Now, OnEnd: rec.callback})
+	idle := mustCreate(t, m)
+
+	clock.advance(2 * time.Minute) // idle expires lazily
+	if _, err := m.Validate(idle.Token()); !errors.Is(err, ErrExpired) {
+		t.Fatalf("idle token err = %v, want ErrExpired", err)
+	}
+
+	revoked := mustCreate(t, m)
+	m.RevokeSession(revoked)
+
+	last := mustCreate(t, m)
+	m.Close()
+
+	want := []struct {
+		key    string
+		reason EndReason
+	}{
+		{idle.Key(), EndIdleExpiry},
+		{revoked.Key(), EndRevoked},
+		{last.Key(), EndShutdown},
+	}
+	got := rec.snapshot()
+	if len(got) != len(want) {
+		t.Fatalf("OnEnd events = %v, want %d events", got, len(want))
+	}
+	for i, w := range want {
+		if got[i].Key != w.key || got[i].Reason != w.reason {
+			t.Fatalf("event %d = {%.8s %s}, want {%.8s %s}", i, got[i].Key, got[i].Reason, w.key, w.reason)
+		}
+	}
+	// Keys are non-secret digests, never raw tokens.
+	for _, ev := range got {
+		if ev.Key == idle.Token() || ev.Key == revoked.Token() || ev.Key == last.Token() {
+			t.Fatalf("OnEnd leaked a raw token in %q", ev.Key)
+		}
+	}
+}
+
+func TestOnEndDoesNotRepeatForRevalidateAndPrune(t *testing.T) {
+	// A session ends exactly once: the expired error is served from
+	// bounded history, and revalidating that token must never emit a
+	// further OnEnd event, no matter how many passes run.
+	clock := newFakeClock(t)
+	rec := &endRecorder{}
+	m := NewManager(Config{IdleTimeout: time.Minute, Now: clock.Now, OnEnd: rec.callback})
+	s := mustCreate(t, m)
+	key := s.Key()
+
+	clock.advance(2 * time.Minute)
+	if _, err := m.Validate(s.Token()); !errors.Is(err, ErrExpired) {
+		t.Fatalf("dead token err = %v, want ErrExpired", err)
+	}
+	live := mustCreate(t, m)
+	for i := 0; i < 3; i++ {
+		_, _ = m.Validate(s.Token()) // served from history: no event
+		if _, err := m.Validate(live.Token()); err != nil {
+			t.Fatal(err) // keep the live session alive through every prune pass
+		}
+	}
+	events := rec.snapshot()
+	if len(events) != 1 || events[0].Key != key || events[0].Reason != EndIdleExpiry {
+		t.Fatalf("OnEnd events = %v, want exactly one idle_expiry for %s", events, key)
+	}
+}
+
+func TestOnEndCallbackMayReenterManager(t *testing.T) {
+	// Same reentrancy contract as OnExpire: no Manager lock while delivering.
+	clock := newFakeClock(t)
+	var m *Manager
+	called := make(chan struct{}, 4)
+	m = NewManager(Config{IdleTimeout: time.Minute, Now: clock.Now, OnEnd: func(EndEvent) {
+		_ = m.Len()            // would deadlock if the hook ran under the lock
+		_ = m.ActiveSessions() // same
+		called <- struct{}{}
+	}})
+	mustCreate(t, m)
+	clock.advance(2 * time.Minute)
+	m.Len()
+	select {
+	case <-called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnEnd was not delivered (or deadlocked)")
+	}
+}
+
+func TestOnEndQueueStaysBoundedWithoutAConsumerAndOnExpireStillFires(t *testing.T) {
+	// Without OnEnd configured, endings must not queue events at all; the
+	// OnExpire release path must keep working unchanged next to it.
+	clock := newFakeClock(t)
+	var expired []string
+	m := NewManager(Config{
+		IdleTimeout: time.Minute, Now: clock.Now,
+		OnExpire: func(key string) { expired = append(expired, key) },
+	})
+	s := mustCreate(t, m)
+	clock.advance(2 * time.Minute)
+	m.Len()
+	if len(m.ended) != 0 {
+		t.Fatalf("ended queue = %v without OnEnd, want empty (events must not pile up)", m.ended)
+	}
+	if _, err := m.Validate(s.Token()); !errors.Is(err, ErrExpired) {
+		t.Fatalf("token err = %v, want ErrExpired", err)
+	}
+	if len(expired) != 1 || expired[0] != s.Key() {
+		t.Fatalf("OnExpire = %v, want exactly %s", expired, s.Key())
+	}
+}
+
+func TestRevokeEmitsRevokedEndEvent(t *testing.T) {
+	// Revoke by token (the phone-facing or explicit path) reports the same
+	// revoked category as RevokeSession, delivered before Revoke returns.
+	rec := &endRecorder{}
+	m := NewManager(Config{OnEnd: rec.callback})
+	s := mustCreate(t, m)
+	if err := m.Revoke(s.Token()); err != nil {
+		t.Fatal(err)
+	}
+	events := rec.snapshot()
+	if len(events) != 1 || events[0].Key != s.Key() || events[0].Reason != EndRevoked {
+		t.Fatalf("OnEnd events = %v, want one revoked for %s", events, s.Key())
+	}
+	if err := m.Revoke(s.Token()); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("second revoke = %v, want ErrInvalid (session already gone)", err)
+	}
+	if got := len(rec.snapshot()); got != 1 {
+		t.Fatalf("revoking a dead token emitted %d extra events", got-1)
+	}
+}

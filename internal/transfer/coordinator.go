@@ -586,6 +586,62 @@ func (c *Coordinator) ListBatches(sessionKey string) ([]BatchView, error) {
 	return out, nil
 }
 
+// SessionHistory returns immutable batch snapshots for one session in
+// registration order, tolerating sessions that CloseSession already ended:
+// terminal history must outlive the session that owned it so the desktop
+// can keep projecting completed, failed and canceled batches after "the
+// session ended" and so the phone's own view of its history stays
+// answerable for the same key.
+//
+// This is a read-only accessor for projections. Decisions keep failing
+// closed: ClosedSession's batches can no longer be approved, progressed or
+// canceled, because every decision path resolves through
+// sessionForOperationLocked.
+//
+// ok reports whether the key is known to this coordinator and the
+// coordinator is not itself closed; a nil-list result is a real absence,
+// never a partial read.
+func (c *Coordinator) SessionHistory(sessionKey string) ([]BatchView, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil, false
+	}
+	session, ok := c.sessions[sessionKey]
+	if !ok {
+		return nil, false
+	}
+	out := make([]BatchView, 0, len(session.batches))
+	for _, id := range session.batches {
+		if batch, ok := c.batches[id]; ok {
+			out = append(out, batch.batch.View())
+		}
+	}
+	return out, true
+}
+
+// SessionKeys lists the non-secret keys of every session this coordinator
+// has ever tracked, including sessions already ended by CloseSession, so a
+// projection can enumerate batch history that outlives its session.
+//
+// Map iteration order is unspecified by design: the caller orders the
+// merged output via batch timestamps, and per-session records are always
+// delivered in registration order by both ListBatches and SessionHistory.
+// This is read-only: a closed session's records can be projected but never
+// re-decided.
+func (c *Coordinator) SessionKeys() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
+	out := make([]string, 0, len(c.sessions))
+	for key := range c.sessions {
+		out = append(out, key)
+	}
+	return out
+}
+
 // QueueStatus returns queue state and immutable batch snapshots.
 func (c *Coordinator) QueueStatus(sessionKey string) (QueueSnapshot, error) {
 	c.mu.Lock()

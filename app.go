@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -175,7 +176,7 @@ func NewApp() (*App, error) {
 		downloads:   transfer.NewDownloadRegistry(),
 		source:      netenv.DefaultSource(),
 	}
-	a.sessions = session.NewManager(session.Config{OnExpire: a.releaseSession})
+	a.sessions = session.NewManager(session.Config{OnExpire: a.releaseSession, OnEnd: a.logSessionEnd})
 	return a, nil
 }
 
@@ -207,12 +208,34 @@ func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 }
 
+// shortKey returns a bounded prefix of a session's non-secret key for log
+// lines. Full keys are 64 hex characters; eight identify which session a
+// line is about without resembling any secret (tokens are unrelated
+// values), and nothing longer than the prefix is ever logged.
+func shortKey(key string) string {
+	if len(key) > 8 {
+		return key[:8]
+	}
+	return key
+}
+
+// logSessionEnd records why a pairing session ended — idle expiry, revocation
+// or shutdown — using the manager's OnEnd diagnostics. Unknown end reasons
+// used to be reported only as "Session ended" on the phone; this line is the
+// desktop-side counterpart that names the cause. Log contents stay within
+// the privacy rules: a non-secret key prefix and a reason category, never
+// tokens, pairing URLs, cookies or paths.
+func (a *App) logSessionEnd(ev session.EndEvent) {
+	fmt.Fprintf(os.Stderr, "flitnix: session %s ended: %s\n", shortKey(ev.Key), ev.Reason)
+}
+
 // shutdown tears everything down in a safe order: cancel each session's
 // in-flight or approved-but-unstreamed uploads, revoke every session,
 // forget shared files and stop the HTTP server. Any upload streamed at that
 // moment ends canceled (never half-published), matching the core's
 // shutdown contract.
 func (a *App) shutdown(ctx context.Context) {
+	fmt.Fprintf(os.Stderr, "flitnix: the desktop is shutting down; ending every session: shutdown\n")
 	for _, s := range a.sessions.ActiveSessions() {
 		a.transfers.CancelSession(s.Key())
 		_ = a.coordinator.CloseSession(s.Key())
@@ -242,6 +265,7 @@ func (a *App) ensureServer(listen string) error {
 		if got := a.srv.Addr(); got != nil && got.String() == listen {
 			return nil
 		}
+		fmt.Fprintf(os.Stderr, "flitnix: the listen address changed; the existing sessions cannot stay reachable: pairing_replacement\n")
 		a.endAllSessions()
 		a.stopServerLocked()
 	}
@@ -474,6 +498,7 @@ func (a *App) EndSession(key string) error {
 	if target == nil {
 		return errors.New("flitnix: no active session matches that identifier")
 	}
+	fmt.Fprintf(os.Stderr, "flitnix: session %s ending at the user's request: explicit_stop\n", shortKey(key))
 	a.transfers.CancelSession(key)
 	_ = a.coordinator.CloseSession(key)
 	for _, sf := range a.registry.ListSession(key) {
@@ -712,20 +737,56 @@ func (a *App) CancelBatch(id string) error {
 	return nil
 }
 
+// listBatches merges the coordinator's batch records over every session
+// the coordinator has ever tracked — including sessions that already
+// ended — and projects the ones passing filter. A session ending used to
+// hide its completed, failed and canceled batches from the desktop; their
+// terminal history now stays visible through SessionHistory's closed-session
+// fallback, and the merged list is ordered oldest-first (with ID breaking
+// equal timestamps) once across all sessions.
+//
+// Closed sessions are read-only for projections. Decisions keep failing
+// closed: findBatchSession walks active sessions only, so a decision can
+// never attach to a batch whose session has ended.
 func (a *App) listBatches(filter func(transfer.BatchView) bool) []BatchView {
 	var out []BatchView
-	for _, sess := range a.sessions.ActiveSessions() {
-		items, err := a.coordinator.ListBatches(sess.Key())
-		if err != nil {
+	seen := make(map[string]struct{})
+	for _, key := range a.coordinator.SessionKeys() {
+		items, err := a.coordinator.ListBatches(key)
+		switch {
+		case err == nil:
+		case errors.Is(err, transfer.ErrSessionClosed):
+			history, ok := a.coordinator.SessionHistory(key)
+			if !ok {
+				continue
+			}
+			items = history
+		default:
 			continue
 		}
 		for _, item := range items {
+			if _, dup := seen[item.ID]; dup {
+				continue
+			}
+			seen[item.ID] = struct{}{}
 			if filter(item) {
 				out = append(out, batchView(item))
 			}
 		}
 	}
+	sortBatchViews(out)
 	return out
+}
+
+// sortBatchViews orders batch views oldest-first, breaking equal timestamps
+// by ID so repeatably-ordered projection never depends on map iteration.
+func sortBatchViews(views []BatchView) {
+	sort.Slice(views, func(i, j int) bool {
+		if !views[i].CreatedAt.Equal(views[j].CreatedAt) {
+			return views[i].CreatedAt.Before(views[j].CreatedAt)
+		}
+		return views[i].ID < views[j].ID
+	})
 }
 
 func (a *App) findBatchSession(id string) (string, error) {

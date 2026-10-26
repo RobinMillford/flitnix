@@ -616,6 +616,88 @@ func TestIdleSessionExpiryReleasesItsBatchesAndUploads(t *testing.T) {
 	}
 }
 
+func TestClosedSessionBatchHistoryStaysVisibleToTheDesktop(t *testing.T) {
+	a := newTestApp(t)
+	a.store = mustStore(t)
+	a.transfers = transfer.NewService(transfer.Config{Store: a.store})
+	var mu sync.Mutex
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	a.sessions = session.NewManager(session.Config{
+		IdleTimeout: time.Minute, Now: clock,
+		OnExpire: a.releaseSession, OnEnd: a.logSessionEnd,
+	})
+	srv := server.New(server.Config{Services: &server.Services{
+		Sessions: a.sessions, Transfers: a.transfers, Coordinator: a.coordinator,
+		Registry: a.registry, Downloads: a.downloads,
+	}})
+	s, err := a.sessions.Create()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &batchHarness{t: t, a: a, handler: srv.Handler(), sess: s, token: s.Token(), ids: map[string][]string{}}
+	done := h.createBatch("done1.txt", "done2.txt")
+	if _, err := a.ApproveBatch(done.ID); err != nil {
+		t.Fatal(err)
+	}
+	for i, item := range done.Items {
+		if rec := h.put(done.ID, item.ID, []byte(fmt.Sprintf("d%03d", i))); rec.Code != http.StatusOK {
+			t.Fatalf("item %d upload = %d", i, rec.Code)
+		}
+	}
+	pending := h.createBatch("waiting.txt")
+
+	// Idle expiry: the session ends, its cleanup runs, but its batch
+	// history must stay visible to the desktop.
+	mu.Lock()
+	now = now.Add(2 * time.Minute)
+	mu.Unlock()
+	if n := a.sessions.Len(); n != 0 {
+		t.Fatalf("expired session still listed: %d", n)
+	}
+
+	views := a.ListBatches()
+	byID := map[string]BatchView{}
+	counts := map[string]int{}
+	for _, v := range views {
+		byID[v.ID] = v
+		counts[v.ID]++
+	}
+	if len(counts) != 2 || counts[done.ID] != 1 || counts[pending.ID] != 1 {
+		t.Fatalf("merged listing must show each closed-session batch exactly once: %v", counts)
+	}
+	if byID[done.ID].State != "completed" || byID[done.ID].ApprovalState != "approved" {
+		t.Fatalf("completed batch after expiry = %+v", byID[done.ID])
+	}
+	if v := byID[pending.ID]; v.State != "canceled" || v.ApprovalState != "pending" {
+		t.Fatalf("never-approved batch after expiry = %+v (canceled state, real approval state)", v)
+	}
+	if got := a.ListPendingBatches(); len(got) != 0 {
+		t.Fatalf("closed session's history leaked into the pending inbox: %+v", got)
+	}
+
+	// The ordering must be deterministic across consecutive desktop polls.
+	first, second := a.ListBatches(), a.ListBatches()
+	if len(first) != 2 {
+		t.Fatalf("listing = %d batches, want 2", len(first))
+	}
+	for i := range first {
+		if first[i].ID != second[i].ID {
+			t.Fatalf("consecutive desktop polls disagreed on order: [%s,%s] then [%s,%s]",
+				first[0].ID, first[1].ID, second[0].ID, second[1].ID)
+		}
+	}
+
+	// Decisions still fail closed on a session nobody can reach: neither
+	// the finished batch nor the canceled one can be re-approved.
+	if _, err := a.ApproveBatch(done.ID); err == nil {
+		t.Fatal("ApproveBatch succeeded for a batch of an ended session")
+	}
+	if _, err := a.ApproveBatch(pending.ID); err == nil {
+		t.Fatal("ApproveBatch succeeded for a batch of an ended session")
+	}
+}
+
 func TestCompletedWorkIsNotFailedByLaterSessionCleanup(t *testing.T) {
 	h := newBatchHarness(t)
 	b := h.createBatch("a.txt", "b.txt")
