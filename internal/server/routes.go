@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -139,6 +140,74 @@ func requireSession(m *session.Manager, next http.HandlerFunc) http.Handler {
 func sessionFrom(r *http.Request) *session.Session {
 	s, _ := r.Context().Value(sessCtxKey{}).(*session.Session)
 	return s
+}
+
+// ---- transfer diagnostics ----
+
+// diagnose is the nil-safe sink for transfer-lifecycle diagnostics. Call
+// sites pass opaque short identifiers only; when no hook is configured the
+// diagnostic is dropped.
+func diagnose(svcs *Services, format string, args ...any) {
+	if svcs == nil || svcs.Diagnose == nil {
+		return
+	}
+	svcs.Diagnose(format, args...)
+}
+
+// shortKey bounds a session key to its leading prefix: keys are internal
+// values, and they reach a log only in shortened form.
+func shortKey(key string) string {
+	if len(key) <= 8 {
+		return key
+	}
+	return key[:8]
+}
+
+// shortID bounds an opaque record identifier for diagnostics output.
+func shortID(id string) string {
+	if len(id) <= 12 {
+		return id
+	}
+	return id[:12]
+}
+
+// diagMilestoneMinBytes is the declared size above which quarter-mark
+// progress lines are written. Smaller items are described by their
+// claim/done lines alone, so a batch of many small files stays quiet.
+const diagMilestoneMinBytes = 1024 * 1024
+
+// classifyStreamFailure names the cause of a failed content stream for
+// diagnostics. It deliberately never returns the raw error, which embeds
+// the file's display name. A client disconnect surfaces through the
+// request context once the server has observed the dropped connection;
+// otherwise the body's own verdict (short, oversized, canceled) or a
+// connection read-deadline firing names the cause.
+func classifyStreamFailure(r *http.Request, err error) string {
+	if r.Context().Err() != nil {
+		return "client_disconnect"
+	}
+	switch {
+	case errors.Is(err, transfer.ErrSizeExceeded):
+		return "size_exceeded"
+	case errors.Is(err, transfer.ErrTruncated):
+		return "truncated"
+	case errors.Is(err, transfer.ErrCanceled):
+		return "canceled"
+	case isReadTimeout(err):
+		return "stall"
+	default:
+		return "server_error"
+	}
+}
+
+// isReadTimeout reports whether err is a connection read deadline firing —
+// the stall watchdog's cut, not an ordinary read fault.
+func isReadTimeout(err error) bool {
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
+	return errors.Is(err, os.ErrDeadlineExceeded)
 }
 
 // ---- transfer-stall deadlines ----
@@ -459,6 +528,8 @@ func handleBatchContent(svcs *Services, stall time.Duration) http.HandlerFunc {
 			writeBatchError(w, err)
 			return
 		}
+		diagnose(svcs, "batch item claim session=%s batch=%s item=%s bytes=%d",
+			shortKey(sess.Key()), shortID(batchID), shortID(itemID), lease.DeclaredSize)
 		contentID, err := svcs.Coordinator.ItemContentID(sess.Key(), batchID, itemID)
 		if err != nil {
 			failBatch(svcs, sess.Key(), lease, err)
@@ -467,14 +538,34 @@ func handleBatchContent(svcs *Services, stall time.Duration) http.HandlerFunc {
 		}
 		_ = svcs.Coordinator.RegisterCancellation(sess.Key(), lease, func() { _ = svcs.Transfers.Cancel(contentID) })
 		body := &stallBodyReader{ReadCloser: r.Body, rc: http.NewResponseController(w), stall: stall}
+		start := time.Now()
+		// Quarter marks of large streams are the only mid-stream
+		// diagnostics lines; small streams are described by their
+		// claim/done lines alone. Both counters live in this handler's
+		// closure, so nothing about the protocol changes.
+		milestoneBytes := int64(0)
+		if svcs.Diagnose != nil && lease.DeclaredSize >= diagMilestoneMinBytes {
+			milestoneBytes = lease.DeclaredSize / 4
+		}
+		lastMilestone := int64(0)
 		res, streamErr := svcs.Transfers.SubmitContent(contentID, sess.Key(), body, func(up transfer.Upload) {
 			_ = svcs.Coordinator.UpdateItemProgress(sess.Key(), lease, up.Uploaded)
+			for lastMilestone < 3 && milestoneBytes > 0 && up.Uploaded >= (lastMilestone+1)*milestoneBytes {
+				lastMilestone++
+				diagnose(svcs, "batch item progress session=%s item=%s at=%d%%",
+					shortKey(sess.Key()), shortID(itemID), lastMilestone*25)
+			}
 		})
 		if streamErr != nil {
 			failBatch(svcs, sess.Key(), lease, streamErr)
+			diagnose(svcs, "batch item failed session=%s item=%s bytes=%d reason=%s elapsed=%s",
+				shortKey(sess.Key()), shortID(itemID), res.Written,
+				classifyStreamFailure(r, streamErr), time.Since(start))
 			writeUploadStreamError(w, streamErr)
 			return
 		}
+		diagnose(svcs, "batch item done session=%s item=%s bytes=%d elapsed=%s",
+			shortKey(sess.Key()), shortID(itemID), res.Written, time.Since(start))
 		view, completeErr := svcs.Coordinator.CompleteItem(sess.Key(), lease, res.SHA256)
 		if completeErr != nil {
 			writeBatchError(w, completeErr)
