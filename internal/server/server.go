@@ -190,7 +190,11 @@ type Server struct {
 // behaviour (all /api/ paths 404).
 func New(cfg Config) *Server {
 	cfg.normalize()
-	grants := newGrantStore()
+	var downloads *transfer.DownloadRegistry
+	if cfg.Services != nil {
+		downloads = cfg.Services.Downloads
+	}
+	grants := newGrantStore(downloads)
 	handler := newRouter(cfg.Services, cfg.TransferStall, cfg.DownloadStall, grants)
 	return &Server{
 		cfg: cfg,

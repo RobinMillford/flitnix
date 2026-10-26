@@ -469,14 +469,22 @@ func (g *guardedReader) flush() {
 func updateProgress(p *archiveProgress, n int64) {
 	p.mu.Lock()
 	p.Processed += n
+	processed := p.Processed
 	p.Updated = p.now()
 	p.mu.Unlock()
+	if p.downloads != nil {
+		p.downloads.Progress(p.downloadID, processed)
+	}
 }
 
 func setProgressFailed(p *archiveProgress, reason string) {
 	p.mu.Lock()
+	processed := p.Processed
 	p.State, p.Error, p.Updated = progressFailed, reason, p.now()
 	p.mu.Unlock()
+	if p.downloads != nil {
+		p.downloads.Fail(p.downloadID, reason, processed)
+	}
 }
 
 // finishProgress records the terminal state. A nil err is "completed" and is
@@ -484,13 +492,23 @@ func setProgressFailed(p *archiveProgress, reason string) {
 // was written and flushed to the connection.
 func finishProgress(p *archiveProgress, err error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.Updated = p.now()
 	if err == nil {
 		p.State, p.Error = progressCompleted, ""
+		processed := p.Processed
+		p.mu.Unlock()
+		if p.downloads != nil {
+			p.downloads.Finish(p.downloadID, processed)
+		}
 		return
 	}
 	p.State, p.Error = progressFailed, publicDownloadError(err)
+	processed := p.Processed
+	reason := p.Error
+	p.mu.Unlock()
+	if p.downloads != nil {
+		p.downloads.Fail(p.downloadID, reason, processed)
+	}
 }
 
 // flushResponse pushes buffered bytes to the connection so a write failure in
@@ -525,6 +543,9 @@ func writeArchive(ctx context.Context, out io.Writer, grant downloadGrant, progr
 		if err := writeArchiveFile(ctx, zw, header, entry, grant.Sess, progress, buf); err != nil {
 			return err
 		}
+	}
+	if progress.downloads != nil {
+		progress.downloads.Finalize(progress.downloadID)
 	}
 	return zw.Close()
 }
@@ -603,6 +624,9 @@ func serveArchiveDownload(svcs *Services, grants *DownloadGrantStore, stall time
 
 		started := true
 		if !grant.Archive {
+			if svcs.Downloads != nil {
+				svcs.Downloads.Begin(grant.DownloadID)
+			}
 			started, err = streamSingleFile(r.Context(), w, out, grant, progress)
 		} else {
 			h.Set("Content-Type", "application/zip")

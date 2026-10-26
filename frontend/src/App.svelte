@@ -193,7 +193,7 @@
   function activeUpload(u: main.UploadView): boolean {
     return ['pending', 'approved', 'uploading'].includes(u.state)
   }
-  function activeDownload(d: main.DownloadView): boolean { return d.state === 'transferring' }
+  function activeDownload(d: main.DownloadView): boolean { return ['starting', 'transferring', 'finalizing'].includes(d.state) }
   // A batch is active only once it is approved and still has work to do.
   // Pending, rejected, canceled and completed batches are never "active".
   function activeBatch(b: main.BatchView): boolean {
@@ -303,7 +303,7 @@
       <div class="button-row"><button class="button secondary" on:click={pickFiles} disabled={picking || pickingFolder}>{picking ? 'Opening picker…' : '+ Choose files'}</button><button class="button ghost" on:click={pickFolder} disabled={picking || pickingFolder}>{pickingFolder ? 'Reading folder…' : '+ Choose folder'}</button></div>
       <div class="drop-hint">Drop files or folders here. Folders are prepared privately for a future archive download.</div>
       {#each sources.filter((source) => source.kind === 'folder') as source (source.id)}
-        <div class="file-row source-row"><div class="file-icon">▣</div><div class="grow"><strong>{source.rootName || source.name}</strong><span>Folder · {source.itemCount} files · {formatBytes(source.totalBytes)} · archive download not yet available</span></div><button class="button danger small" on:click={() => revokeSource(source.id)} disabled={isBusy(`revoke-source:${source.id}`)}>Remove</button></div>
+        <div class="file-row source-row"><div class="file-icon">▣</div><div class="grow"><strong>{source.rootName || source.name}</strong><span>Folder · {source.itemCount} files · {formatBytes(source.totalBytes)} · streamed ZIP available from the phone</span></div><button class="button danger small" on:click={() => revokeSource(source.id)} disabled={isBusy(`revoke-source:${source.id}`)}>Remove</button></div>
       {/each}
     </section>
 
@@ -329,7 +329,7 @@
       <div class="transfer"><div class="transfer-head"><div><strong>↙ Batch · {batchName(b)}</strong><span>Phone → computer · {doneItems(b)} of {b.totalItemCount} files · {formatBytes(b.transferredBytes)} of {formatBytes(b.declaredTotalBytes)}</span></div><b>{percent(b.transferredBytes, b.declaredTotalBytes)}%</b></div><div class="bar"><i style={`width:${percent(b.transferredBytes, b.declaredTotalBytes)}%`}></i></div><div class="transfer-foot"><span>{currentItem(b) ? `Receiving ${currentItem(b)?.relativePath || currentItem(b)?.displayName}` : 'Approved — waiting for the phone to send the next file'}</span><button class="text-button" on:click={() => cancelBatch(b)} disabled={isBusy(`cancel-batch:${b.id}`)}>Cancel</button></div></div>
     {/each}
     {#each downloads.filter(activeDownload) as d (d.id)}
-      <div class="transfer"><div class="transfer-head"><div><strong>↗ {d.name}</strong><span>Computer → phone · {formatBytes(d.written)} of {formatBytes(d.size)} · {speed(d.speed)}</span></div><b>{percent(d.written, d.size)}%</b></div><div class="bar"><i style={`width:${percent(d.written, d.size)}%`}></i></div><div class="transfer-foot"><span>Sending to the phone browser</span><span>Download completion is confirmed by the browser.</span></div></div>
+      <div class="transfer"><div class="transfer-head"><div><strong>↗ {d.name}</strong><span>Computer → phone · {d.kind === 'archive' ? 'ZIP archive' : 'Individual file'} · {formatBytes(d.written)} of {formatBytes(d.size)} · {speed(d.speed)}</span></div><b>{d.state === 'starting' || d.state === 'finalizing' ? d.state : `${percent(d.written, d.size)}%`}</b></div><div class="bar"><i style={`width:${percent(d.written, d.size)}%`}></i></div><div class="transfer-foot"><span>{d.state === 'starting' ? 'Preparing server-side transfer' : d.state === 'finalizing' ? 'Finalizing server-side transfer' : 'Sending to the phone browser'}</span><span>Browser save completion is not confirmed by the desktop.</span></div></div>
     {/each}
     {#if !uploads.some(activeUpload) && !downloads.some(activeDownload) && !batches.some(activeBatch)}<div class="empty">No active transfers. Start a download or approve an incoming file to see live progress.</div>{/if}
   </section>
@@ -340,7 +340,7 @@
       <div class="history-row"><span class="history-icon">↙</span><div class="grow"><strong>Batch · {batchName(b)}</strong><span>{doneItems(b)} of {b.totalItemCount} files · {formatBytes(b.transferredBytes)} of {formatBytes(b.declaredTotalBytes)} · {fmtTime(b.createdAt)}</span></div><span class="badge {b.state}">{b.state}</span></div>
     {/each}
     {#each [...uploads.filter((u) => !activeUpload(u)), ...downloads.filter((d) => !activeDownload(d))].slice(-12).reverse() as item (item.id)}
-      <div class="history-row"><span class="history-icon">{'fileId' in item ? '↗' : '↙'}</span><div class="grow"><strong>{item.name}</strong><span>{formatBytes('fileId' in item ? item.written : item.uploaded)} of {formatBytes(item.size)} · {fmtTime(item.created)}</span></div><span class="badge {item.state}">{item.state === 'sent' ? 'sent to browser' : item.state}</span></div>
+      <div class="history-row"><span class="history-icon">{'fileId' in item ? '↗' : '↙'}</span><div class="grow"><strong>{item.name}</strong><span>{'fileId' in item ? `${item.kind === 'archive' ? 'ZIP archive' : 'Individual file'} · ` : ''}{formatBytes('fileId' in item ? item.written : item.uploaded)} of {formatBytes(item.size)} · {fmtTime(item.created)}</span></div><span class="badge {item.state}">{item.state === 'sent' ? 'sent to browser' : item.state}</span></div>
     {/each}
     {#if !batches.some(finishedBatch) && !uploads.some((u) => !activeUpload(u)) && !downloads.some((d) => !activeDownload(d))}<div class="empty">No completed transfers in this session.</div>{/if}
   </section>

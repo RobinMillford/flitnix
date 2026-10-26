@@ -10,7 +10,9 @@ import (
 type DownloadState string
 
 const (
+	DownloadStarting     DownloadState = "starting"
 	DownloadTransferring DownloadState = "transferring"
+	DownloadFinalizing   DownloadState = "finalizing"
 	DownloadSent         DownloadState = "sent"
 	DownloadFailed       DownloadState = "failed"
 	DownloadCanceled     DownloadState = "canceled"
@@ -22,6 +24,7 @@ type Download struct {
 	ID       string
 	FileID   string
 	Name     string
+	Kind     string
 	Size     int64
 	Session  string
 	Created  time.Time
@@ -55,14 +58,20 @@ func NewDownloadRegistry() *DownloadRegistry {
 }
 
 func (r *DownloadRegistry) Start(fileID, name, session string, size int64) (Download, error) {
+	return r.StartKind(fileID, name, session, size, "file")
+}
+
+// StartKind records an outbound file or archive without coupling the registry
+// to the browser implementation that requested it.
+func (r *DownloadRegistry) StartKind(fileID, name, session string, size int64, kind string) (Download, error) {
 	id, err := newID()
 	if err != nil {
 		return Download{}, err
 	}
 	now := time.Now()
 	d := &downloadRecord{Download: Download{
-		ID: id, FileID: fileID, Name: name, Size: size, Session: session,
-		Created: now, Started: now, State: DownloadTransferring,
+		ID: id, FileID: fileID, Name: name, Kind: kind, Size: size, Session: session,
+		Created: now, State: DownloadStarting,
 	}, lastAt: now}
 	r.mu.Lock()
 	r.records[id] = d
@@ -81,7 +90,7 @@ func (r *DownloadRegistry) pruneLocked() {
 			continue
 		}
 		d.mu.Lock()
-		terminal := d.State != DownloadTransferring
+		terminal := d.State == DownloadSent || d.State == DownloadFailed || d.State == DownloadCanceled
 		d.mu.Unlock()
 		if !terminal {
 			break
@@ -100,11 +109,17 @@ func (r *DownloadRegistry) Progress(id string, written int64) {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.State != DownloadTransferring {
+	if d.State != DownloadStarting && d.State != DownloadTransferring && d.State != DownloadFinalizing {
 		return
+	}
+	if written < 0 {
+		written = 0
 	}
 	if written < d.Written {
 		written = d.Written
+	}
+	if written < 0 {
+		written = 0
 	}
 	if written > d.Size {
 		written = d.Size
@@ -123,6 +138,14 @@ func (r *DownloadRegistry) Finish(id string, written int64) {
 	r.finish(id, DownloadSent, "", written)
 }
 
+func (r *DownloadRegistry) Begin(id string) {
+	r.setState(id, DownloadTransferring, "")
+}
+
+func (r *DownloadRegistry) Finalize(id string) {
+	r.setState(id, DownloadFinalizing, "")
+}
+
 func (r *DownloadRegistry) Fail(id string, reason string, written int64) {
 	r.finish(id, DownloadFailed, reason, written)
 }
@@ -138,7 +161,7 @@ func (r *DownloadRegistry) CancelSession(session string) {
 	r.mu.Unlock()
 	for _, d := range records {
 		d.mu.Lock()
-		if d.State == DownloadTransferring {
+		if d.State != DownloadSent && d.State != DownloadFailed && d.State != DownloadCanceled {
 			d.State = DownloadCanceled
 			d.Finished = time.Now()
 			d.Reason = "session ended"
@@ -168,9 +191,10 @@ func (r *DownloadRegistry) finish(id string, state DownloadState, reason string,
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.State != DownloadTransferring {
+	if d.State != DownloadStarting && d.State != DownloadTransferring && d.State != DownloadFinalizing {
 		return
 	}
+
 	if written > d.Size {
 		written = d.Size
 	}
@@ -183,6 +207,24 @@ func (r *DownloadRegistry) finish(id string, state DownloadState, reason string,
 	d.State = state
 	d.Reason = reason
 	d.Finished = now
+}
+
+func (r *DownloadRegistry) setState(id string, state DownloadState, reason string) {
+	r.mu.Lock()
+	d := r.records[id]
+	r.mu.Unlock()
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.State == DownloadSent || d.State == DownloadFailed || d.State == DownloadCanceled {
+		return
+	}
+	if state == DownloadTransferring && d.Started.IsZero() {
+		d.Started = time.Now()
+	}
+	d.State, d.Reason = state, reason
 }
 
 func (d *downloadRecord) snapshot() Download {
