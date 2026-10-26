@@ -62,6 +62,12 @@ type testEnv struct {
 	store *transfer.Store
 	clock *fakeClock
 	srv   *Server
+
+	// diag captures the server's transfer diagnostics (the Services
+	// Diagnose hook below) for tests that assert line volume, reasons
+	// and that no token or path ever leaks.
+	diagMu sync.Mutex
+	diag   bytes.Buffer
 }
 
 // newTestEnv builds a complete environment. The idle timeout uses the
@@ -88,8 +94,23 @@ func newTestEnv(t *testing.T) *testEnv {
 		Transfers:   env.trans,
 		Coordinator: env.coord,
 		Registry:    env.reg,
+		Diagnose:    env.diagSink,
 	}})
 	return env
+}
+
+// diagSink stores one diagnostics line.
+func (e *testEnv) diagSink(format string, args ...any) {
+	e.diagMu.Lock()
+	defer e.diagMu.Unlock()
+	fmt.Fprintf(&e.diag, format+"\n", args...)
+}
+
+// diagText returns a snapshot of the captured diagnostics lines.
+func (e *testEnv) diagText() string {
+	e.diagMu.Lock()
+	defer e.diagMu.Unlock()
+	return e.diag.String()
 }
 
 // token creates a fresh session and returns its raw token. The token only

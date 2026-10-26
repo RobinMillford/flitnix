@@ -229,6 +229,14 @@ func (a *App) logSessionEnd(ev session.EndEvent) {
 	fmt.Fprintf(os.Stderr, "flitnix: session %s ended: %s\n", shortKey(ev.Key), ev.Reason)
 }
 
+// logTransferDiagnostics is the server's Diagnose sink: the low-volume
+// transfer-lifecycle lines (item claim, quarter marks, stream ending with
+// its classified reason) go to stderr. The server guarantees opaque short
+// identifiers; the format here only adds the stderr prefix.
+func (a *App) logTransferDiagnostics(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "flitnix: "+format+"\n", args...)
+}
+
 // shutdown tears everything down in a safe order: cancel each session's
 // in-flight or approved-but-unstreamed uploads, revoke every session,
 // forget shared files and stop the HTTP server. Any upload streamed at that
@@ -284,6 +292,7 @@ func (a *App) startServerLocked(listen string) error {
 			Coordinator: a.coordinator,
 			Registry:    a.registry,
 			Downloads:   a.downloads,
+			Diagnose:    a.logTransferDiagnostics,
 		},
 	})
 	serveCtx, cancel := context.WithCancel(context.Background())

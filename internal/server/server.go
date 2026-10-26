@@ -137,6 +137,15 @@ type Services struct {
 	Coordinator *transfer.Coordinator
 	Registry    *transfer.Registry
 	Downloads   *transfer.DownloadRegistry
+
+	// Diagnose, when non-nil, receives low-volume transfer diagnostics at
+	// meaningful transitions: one line when an item is claimed, milestones
+	// at quarter marks of large streams, and one line per stream ending
+	// (success or classified failure). It is never called per data chunk,
+	// and its arguments carry opaque short identifiers only — no tokens,
+	// no session keys beyond a bounded prefix, no paths or file names.
+	// A nil hook disables diagnostics (page-only and test servers).
+	Diagnose func(format string, args ...any)
 }
 
 // normalize fills in zero-value defaults.

@@ -80,12 +80,17 @@
     if (statusText) statusText.textContent = text;
   }
 
-  function endSession(title, why) {
+  // statusLabel: the one-line status word. The default names a genuine
+  // authority-side ending; callers whose cause is not an authority ending
+  // (a reload without a pairing token, an unrecognized token) must pass
+  // their own so the status never claims a session the server never
+  // declared dead.
+  function endSession(title, why, statusLabel) {
     if (appState.ended) return;
     appState.ended = true;
     teardownJobs();
     if (statusEl) statusEl.dataset.state = "ended";
-    if (statusText) statusText.textContent = "Session ended";
+    if (statusText) statusText.textContent = statusLabel || "Session ended";
     if (flowEl) flowEl.hidden = true;
     if (rescanCard) {
       var h = rescanCard.querySelector("h2");
@@ -113,7 +118,8 @@
     // token it never issued (stale reload, pair-of-sessions confusion). It
     // did NOT end any session, so the wording must not claim it did.
     endSession("Transfer stopped",
-      "The desktop did not recognize this session. Open this page again from the QR code shown on the Flitnix desktop.");
+      "The desktop did not recognize this session. Open this page again from the QR code shown on the Flitnix desktop.",
+      "Pairing required");
   }
 
   // The desktop is unreachable right now. This is transient: the established
@@ -219,12 +225,21 @@
     var text = phaseText(job);
     r.bar.hidden = !(job.phase === "sending" || job.phase === "done");
     if (job.phase === "done") { r.bar.value = r.bar.max; }
-    if (job.phase === "sending" && job.uploaded > 0 && job.file.size > 0) {
-      text += " " + Math.min(100, Math.round((job.uploaded / job.file.size) * 100)) + "%";
+    if (job.phase === "sending" && job.uploaded > 0 && job.size > 0) {
+      text += " " + Math.min(100, Math.round((job.uploaded / job.size) * 100)) + "%";
     }
     r.state.textContent = text;
     r.err.hidden = !job.err;
     if (job.err) r.err.textContent = job.err;
+    // Terminal jobs release their File object: on phones the browser's
+    // blob backing is the largest store a finished job would still pin.
+    // A failed-but-retryable job deliberately keeps the file — Retry
+    // reuploads the same object. paint is idempotent-safe here because
+    // the conditions depend only on the terminal phase, never progress.
+    if (job.file && (job.phase === "done" || job.phase === "canceled" ||
+                     (job.phase === "failed" && !job.retryable))) {
+      job.file = null;
+    }
     // Button is state-dependent.
     var label, action;
     if (job.phase === "sending") {
@@ -249,12 +264,12 @@
   function buildItem(job) {
     var li = el("li", "queue-item");
     var top = el("div", "queue-item__top");
-    top.appendChild(el("span", "queue-item__name", job.file.name));
-    top.appendChild(el("span", "queue-item__size", fmtBytes(job.file.size)));
+    top.appendChild(el("span", "queue-item__name", job.name));
+    top.appendChild(el("span", "queue-item__size", fmtBytes(job.size)));
     var row = el("div", "queue-item__row");
     var state = el("span", "queue-item__state");
     var bar = el("progress", "queue-item__bar");
-    bar.max = job.file.size > 0 ? job.file.size : 1;
+    bar.max = job.size > 0 ? job.size : 1;
     bar.value = job.uploaded;
     bar.hidden = true;
     var btn = el("button", "queue-item__btn");
@@ -276,7 +291,11 @@
   function addFiles(fileList, folder) {
     Array.prototype.slice.call(fileList).forEach(function (f) {
       var job = {
-        file: f, id: null, phase: "queued", uploaded: 0,
+        // name/size are cached here: paint, buildItem and the manifest
+        // read the cache, so a job never has to dereference its File
+        // object again. File objects are the only large references a
+        // job holds and can then be released at the terminal phase.
+        file: f, name: f.name, size: f.size, id: null, phase: "queued", uploaded: 0,
         failures: 0, retryable: false, err: null,
         xhr: null, timer: null, removed: false,
         el: null, refs: null, btnAction: null, batchID: null, itemID: null,
@@ -369,8 +388,8 @@
         rootName: jobs[0].rootName || undefined,
         items: jobs.map(function (job) {
           return {
-            relativePath: jobs[0].rootName ? job.relativePath : job.file.name,
-            size: job.file.size
+            relativePath: jobs[0].rootName ? job.relativePath : job.name,
+            size: job.size
           };
         })
       })
@@ -417,6 +436,13 @@
       batch.items.forEach(function (item) {
         var job = activeBatch.jobs[item.sequence];
         if (!job) return;
+        // A terminal item whose row already shows the same terminal
+        // phase is done being drawn: skip it. Late in a large batch this
+        // is the common case — every poll used to rebuild all done
+        // rows, which multiplied DOM work for dense folder queues.
+        if ((item.state === "completed" && job.phase === "done") ||
+            (item.state === "canceled" && job.phase === "canceled") ||
+            (item.state === "failed" && job.phase === "failed")) return;
         job.uploaded = item.transferred || 0;
         if (item.state === "completed") job.phase = "done";
         else if (item.state === "failed") {
@@ -768,8 +794,11 @@
     });
 
     if (!token) {
+      // No pairing token in this load. No session was ever opened here,
+      // so nothing "ended": the status line names the real next step.
       endSession("Scan the QR code",
-        "Open this page by scanning the QR code shown on the Flitnix desktop. If you reloaded an old tab, the old link was single-use — rescan to reconnect.");
+        "Open this page by scanning the QR code shown on the Flitnix desktop. If you reloaded an old tab, the old link was single-use — rescan to reconnect.",
+        "Pairing required");
       return;
     }
 
