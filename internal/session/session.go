@@ -18,8 +18,12 @@
 //     with ErrExpired.
 //   - A session in use by an ongoing transfer is pinned (Begin/End) and is
 //     never expired while pinned, so a large streamed file is not aborted
-//     by the idle timer. Once unpinned and staled, the next validation pass
-//     prunes it.
+//     by the idle timer. Both Begin and End refresh the idle deadline, so
+//     the idle window is measured from the END of the last transfer, not
+//     from the start of its request: a transfer that outlasts the idle
+//     window must not leave the session already expired the moment it
+//     finishes (that would kill the very next batch item or status poll).
+//     Once unpinned and idle for a full window, the next pass prunes it.
 //   - Revocation and explicit expiry terminate a session immediately; the
 //     Managing Manager remembers recent endings (bounded) so callers get a
 //     precise expired/revoked/invalid distinction after the fact.
@@ -96,6 +100,13 @@ type Config struct {
 	// Now supplies the clock; tests use it to move time around. nil uses
 	// time.Now.
 	Now func() time.Time
+
+	// OnExpire, when set, is invoked (without any Manager lock held) with the
+	// non-secret key of every session that ended by idle expiry. The desktop
+	// uses it to release transfer state owned by a session nobody can reach
+	// any more. Pinned sessions never expire, so the hook can never fire for
+	// a session with a live transfer stream. It must not block for long.
+	OnExpire func(key string)
 }
 
 // Status describes why a session ended.
@@ -132,6 +143,9 @@ type Manager struct {
 	active []*Session // creation-ordered active sessions
 	hist   []histItem // bounded memory of ended sessions for error accuracy
 	closed bool
+
+	onExpire func(key string)
+	expired  []string // keys of freshly expired sessions awaiting OnExpire
 }
 
 type histItem struct {
@@ -154,7 +168,7 @@ func NewManager(cfg Config) *Manager {
 	if now == nil {
 		now = time.Now
 	}
-	return &Manager{idle: cfg.IdleTimeout, max: cfg.MaxSessions, now: now}
+	return &Manager{idle: cfg.IdleTimeout, max: cfg.MaxSessions, now: now, onExpire: cfg.OnExpire}
 }
 
 // generateToken returns a fresh URL-safe 256-bit token.
@@ -175,6 +189,7 @@ func (m *Manager) Create() (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer m.notifyExpired()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
@@ -212,6 +227,7 @@ func (m *Manager) Validate(token string) (*Session, error) {
 	}
 	d := digestToken(token)
 
+	defer m.notifyExpired()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.pruneLocked(m.now())
@@ -246,17 +262,21 @@ func (m *Manager) histStatus(d [sha256.Size]byte) error {
 // pruneLocked expires idle unpinned sessions and trims the bounded history.
 // Callers must hold m.mu.
 func (m *Manager) pruneLocked(now time.Time) {
-	kept := m.active[:0]
+	// Collect first: endSessionLocked rewrites m.active, so it must never run
+	// while ranging over it. Pinned sessions survive the idle deadline; they
+	// are never dropped here because that would abort an active transfer.
+	var stale []*Session
 	for _, s := range m.active {
 		if s.staleUnpinned(now) {
-			m.endSessionLocked(s, StatusExpired)
-		} else {
-			// Pinned sessions survive the idle deadline; they are never
-			// dropped here because that would abort an active transfer.
-			kept = append(kept, s)
+			stale = append(stale, s)
 		}
 	}
-	m.active = kept
+	for _, s := range stale {
+		m.endSessionLocked(s, StatusExpired)
+		if m.onExpire != nil {
+			m.expired = append(m.expired, s.Key())
+		}
+	}
 	for len(m.hist) > maxHistory {
 		m.hist = m.hist[len(m.hist)-maxHistory:]
 	}
@@ -320,6 +340,7 @@ func (m *Manager) Close() {
 	}
 	m.closed = true
 	for len(m.active) > 0 {
+		m.active[0].revokedN.Store(time.Now().UnixNano())
 		m.endSessionLocked(m.active[0], StatusRevoked)
 	}
 }
@@ -328,8 +349,10 @@ func (m *Manager) Close() {
 // The sessions share state with the manager; use the documented methods to
 // read or end them.
 func (m *Manager) ActiveSessions() []*Session {
+	defer m.notifyExpired()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.pruneLocked(m.now())
 	out := make([]*Session, len(m.active))
 	copy(out, m.active)
 	return out
@@ -337,9 +360,26 @@ func (m *Manager) ActiveSessions() []*Session {
 
 // Len returns the number of active sessions.
 func (m *Manager) Len() int {
+	defer m.notifyExpired()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.pruneLocked(m.now())
 	return len(m.active)
+}
+
+// notifyExpired delivers pending OnExpire callbacks after the Manager lock is
+// released, so a callback may freely call back into the Manager.
+func (m *Manager) notifyExpired() {
+	if m.onExpire == nil {
+		return
+	}
+	m.mu.Lock()
+	keys := m.expired
+	m.expired = nil
+	m.mu.Unlock()
+	for _, key := range keys {
+		m.onExpire(key)
+	}
 }
 
 // ---- session predicates shared by manager and session ----
@@ -354,11 +394,26 @@ func (s *Session) staleUnpinned(now time.Time) bool {
 // session survives its idle deadline, so an in-flight large transfer is
 // never aborted by the idle timer. Every Begin must be paired with an End
 // (defer End).
-func (s *Session) Begin() { s.pinned.Add(1) }
+func (s *Session) Begin() {
+	s.pinned.Add(1)
+	s.touch()
+}
+
+// touch restarts the idle window from now.
+func (s *Session) touch() {
+	s.expiresN.Store(s.nowFactory().Add(s.idle).UnixNano())
+}
 
 // End releases one pin acquired by Begin. The pin count never goes below
 // zero even if a handler pair Begin/End is buggy.
 func (s *Session) End() {
+	// The idle window restarts when the transfer ends. Without this the
+	// deadline would still be the one set when the transfer's request began,
+	// so any transfer longer than the idle window would leave the session
+	// expired the instant it was unpinned. The deadline is refreshed BEFORE
+	// the pin is released: a concurrent prune must never observe "unpinned"
+	// together with the stale deadline.
+	s.touch()
 	if s.pinned.Add(-1) < 0 {
 		s.pinned.Store(0)
 	}

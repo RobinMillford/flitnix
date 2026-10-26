@@ -35,6 +35,12 @@
 //     is cut after the stall window. The sessions' own idle-expiry never
 //     aborts an in-flight transfer because the handlers pin the session
 //     for the duration of streaming.
+//   - Browser downloads (archive and grant-based file streams) use the longer
+//     Config.DownloadStall (default 5 minutes) for the same rolling write
+//     deadline: a phone browser legitimately stops reading while it shows a
+//     save dialog or sits in the background, and the 30-second upload
+//     window would fail such a healthy download. The session is pinned for
+//     the whole stream, and its idle window restarts when the stream ends.
 //   - No absolute cap exists on transfer duration or file size by design.
 //   - Shutdown: Serve's graceful drain uses Config.ShutdownTimeout; when
 //     the drain window elapses the remaining connections are force-closed,
@@ -82,6 +88,10 @@ const (
 	// defaultTransferStall is the default inactivity window for /api/*
 	// request bodies and response writes.
 	defaultTransferStall = 30 * time.Second
+
+	// defaultDownloadStall is the default write-inactivity window for
+	// browser downloads; see Config.DownloadStall.
+	defaultDownloadStall = 5 * time.Minute
 )
 
 // Config controls server startup. Zero values are valid: ListenAddr
@@ -102,6 +112,15 @@ type Config struct {
 	// window. 0 selects the default (30s); a negative value disables the
 	// per-request deadlines entirely.
 	TransferStall time.Duration
+
+	// DownloadStall is the write-inactivity window for browser downloads
+	// (archive and grant-based single-file streams). It is deliberately much
+	// longer than TransferStall: a phone browser legitimately stops reading
+	// while it shows a save dialog, is backgrounded or the user edits the
+	// filename, and cutting it after 30 s would fail a healthy download. It
+	// still bounds a stream whose receiver has gone silent. 0 selects the
+	// default (5 minutes); a negative value disables the deadline.
+	DownloadStall time.Duration
 
 	// Services wires the session manager and transfer layer behind the
 	// /api/ endpoints. A nil Services keeps the server page-only: every
@@ -131,6 +150,9 @@ func (c *Config) normalize() {
 	if c.TransferStall == 0 {
 		c.TransferStall = defaultTransferStall
 	}
+	if c.DownloadStall == 0 {
+		c.DownloadStall = defaultDownloadStall
+	}
 	// A negative TransferStall is kept: it disables per-request deadlines.
 }
 
@@ -143,6 +165,7 @@ type Server struct {
 	cfg     Config
 	http    *http.Server
 	handler http.Handler
+	grants  *DownloadGrantStore
 
 	once  sync.Once
 	ready chan struct{}
@@ -159,7 +182,7 @@ type Server struct {
 func New(cfg Config) *Server {
 	cfg.normalize()
 	grants := newGrantStore()
-	handler := newRouter(cfg.Services, cfg.TransferStall, grants)
+	handler := newRouter(cfg.Services, cfg.TransferStall, cfg.DownloadStall, grants)
 	return &Server{
 		cfg: cfg,
 		http: &http.Server{
@@ -174,6 +197,7 @@ func New(cfg Config) *Server {
 			IdleTimeout: idleTimeout,
 		},
 		handler: handler,
+		grants:  grants,
 		ready:   make(chan struct{}),
 	}
 }

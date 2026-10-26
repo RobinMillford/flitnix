@@ -185,3 +185,32 @@ selections always receive distinct opaque identities, even when their display
 names match. Removing a source only unlists it and never modifies the
 original files. Wails drop listeners are registered once on component mount
 and removed on unmount.
+
+## Approval authority and failure handling (stabilization)
+
+- A phone-to-desktop batch is approved only as a batch. Its per-item upload
+  records are marked batch-linked: they never appear as standalone approval
+  requests or recent uploads, and the legacy single-upload approve, reject and
+  cancel calls refuse them. All of a batch's records are decided together and
+  atomically (`Service.DecideBatchItems`); the coordinator then releases the
+  batch. Approving an already approved batch is an idempotent success;
+  approving a rejected or canceled batch is a conflict.
+- The pending-approval projection lists only batches whose approval is pending
+  and whose state is pending. Approved, completed, rejected and canceled
+  batches leave it.
+- A content stream that fails or is interrupted ends its batch as failed
+  (the failed item keeps its error, unstarted items are canceled, no partial
+  bytes are counted) without pausing the session queue; the phone recovers by
+  declaring a new batch. A desktop cancel stays canceled.
+- Sessions are pinned for the life of an upload or download stream, and the
+  idle window restarts when the stream ends. Idle expiry still applies to a
+  session with no live stream and releases its pending and approved records.
+- Download filenames come from server-side source metadata: one file keeps its
+  name, one folder becomes `<folder>.zip`, any other selection is
+  `Flitnix-download.zip`. `Content-Disposition` carries an ASCII fallback plus
+  an RFC 5987 `filename*`. A grant is redeemed by GET only, exactly once.
+- If an archive stream fails after headers are sent, the connection is aborted
+  (no central directory is written, no JSON is appended) so the browser
+  reports a failed download instead of saving a truncated ZIP.
+  Browser downloads use a longer write-stall window than uploads because a
+  phone browser can legitimately stop reading while it shows a save dialog.

@@ -146,6 +146,11 @@ type App struct {
 	// address decisions; tests inject synthetic interfaces.
 	source netenv.Provider
 
+	// batchMu serializes batch decisions (approve, reject, cancel) so the
+	// coordinator and the upload service always move together and a repeated
+	// or concurrent decision observes a settled state.
+	batchMu sync.Mutex
+
 	srvMu       sync.Mutex
 	srv         *server.Server
 	serveCancel context.CancelFunc
@@ -162,15 +167,38 @@ func NewApp() (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &App{
+	a := &App{
 		store:       store,
-		sessions:    session.NewManager(session.Config{}),
 		transfers:   transfer.NewService(transfer.Config{Store: store}),
 		coordinator: transfer.NewCoordinator(transfer.CoordinatorConfig{}),
 		registry:    transfer.NewRegistry(),
 		downloads:   transfer.NewDownloadRegistry(),
 		source:      netenv.DefaultSource(),
-	}, nil
+	}
+	a.sessions = session.NewManager(session.Config{OnExpire: a.releaseSession})
+	return a, nil
+}
+
+// releaseSession frees everything a session owned once it can no longer be
+// used. EndSession does the same for explicit endings; this covers idle
+// expiry, which previously left the session's pending and approved uploads
+// and its batches behind. A session with a live transfer stream is pinned and
+// never expires, so this can never fail a transfer that is making progress.
+//
+// It deliberately does not take batchMu: it runs from inside session-manager
+// calls that batch decisions themselves make (finding a batch's session), and
+// every step here is idempotent and safe against a concurrent decision, which
+// fails closed and withdraws its own approvals.
+func (a *App) releaseSession(key string) {
+	a.transfers.CancelSession(key)
+	_ = a.coordinator.CloseSession(key)
+	a.downloads.CancelSession(key)
+	for _, sf := range a.registry.ListSession(key) {
+		a.registry.Remove(sf.ID)
+	}
+	for _, source := range a.registry.ListSourceSession(key) {
+		a.registry.RemoveSource(source.ID)
+	}
 }
 
 // startup records the Wails runtime context so bound methods can call the
@@ -480,10 +508,20 @@ func (a *App) ListPendingUploads() []UploadView {
 	return uploadViews(a.transfers.ListPending())
 }
 
-// RecentUploads returns every live and recently finished upload, oldest
-// first. The UI polls this to follow transfer progress.
+// RecentUploads returns every live and recently finished standalone upload,
+// oldest first. The UI polls this to follow transfer progress. Batch items
+// are intentionally absent: the batch coordinator is their only authority and
+// they are shown through ListBatches, so no record is displayed twice with
+// possibly diverging state.
 func (a *App) RecentUploads() []UploadView {
-	return uploadViews(a.transfers.List())
+	all := a.transfers.List()
+	own := all[:0:0]
+	for _, u := range all {
+		if !u.BatchLinked {
+			own = append(own, u)
+		}
+	}
+	return uploadViews(own)
 }
 
 func (a *App) RecentDownloads() []DownloadView {
@@ -493,6 +531,9 @@ func (a *App) RecentDownloads() []DownloadView {
 // ApproveUpload accepts the pending upload with the given ID. The phone
 // may then stream exactly its approved content.
 func (a *App) ApproveUpload(id string) (UploadView, error) {
+	if err := a.requireStandalone(id); err != nil {
+		return UploadView{}, err
+	}
 	up, err := a.transfers.Decide(id, true)
 	if err != nil {
 		return UploadView{}, err
@@ -502,6 +543,9 @@ func (a *App) ApproveUpload(id string) (UploadView, error) {
 
 // RejectUpload refuses the pending upload with the given ID.
 func (a *App) RejectUpload(id string) (UploadView, error) {
+	if err := a.requireStandalone(id); err != nil {
+		return UploadView{}, err
+	}
 	up, err := a.transfers.Decide(id, false)
 	if err != nil {
 		return UploadView{}, err
@@ -512,12 +556,30 @@ func (a *App) RejectUpload(id string) (UploadView, error) {
 // CancelUpload aborts a pending, approved or streaming upload. A streaming
 // receive file is closed immediately and the record ends canceled.
 func (a *App) CancelUpload(id string) error {
+	if err := a.requireStandalone(id); err != nil {
+		return err
+	}
 	return a.transfers.Cancel(id)
 }
 
+// errBatchLinked refuses an individual decision on a batch item.
+var errBatchLinked = errors.New("flitnix: this file belongs to a batch; decide on the batch instead")
+
+// requireStandalone refuses the legacy single-upload surface for a record the
+// batch coordinator owns, so one record never has two approval authorities.
+func (a *App) requireStandalone(id string) error {
+	if u, ok := a.transfers.Get(id); ok && u.BatchLinked {
+		return errBatchLinked
+	}
+	return nil
+}
+
+// ListPendingBatches returns only batches still awaiting the desktop's
+// decision. A batch leaves this list the moment it is approved, rejected,
+// canceled or ended with its session.
 func (a *App) ListPendingBatches() []BatchView {
 	return a.listBatches(func(v transfer.BatchView) bool {
-		return v.ApprovalState == transfer.ApprovalPending
+		return v.ApprovalState == transfer.ApprovalPending && v.State == transfer.BatchStatePending
 	})
 }
 
@@ -534,7 +596,36 @@ func (a *App) GetBatch(id string) (BatchView, error) {
 	return batchView(v), err
 }
 
+// batchContentIDs returns the upload-service record of every item.
+func (a *App) batchContentIDs(key string, v transfer.BatchView) ([]string, error) {
+	ids := make([]string, 0, len(v.Items))
+	for _, item := range v.Items {
+		id, err := a.coordinator.ItemContentID(key, v.ID, item.ID)
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+// cancelContent cancels the upload records of a batch whose fate was decided
+// elsewhere. Canceling a record that already finished is a no-op.
+func (a *App) cancelContent(ids []string) {
+	for _, id := range ids {
+		_ = a.transfers.Cancel(id)
+	}
+}
+
+// ApproveBatch approves a pending batch exactly once. The batch is the only
+// approval authority for its items: their upload records are decided together,
+// atomically, and only then does the coordinator release the batch to the
+// phone's queue. Repeating the call for a batch that is already approved is a
+// no-op that returns the current state; approving a rejected or canceled
+// batch is refused.
 func (a *App) ApproveBatch(id string) (BatchView, error) {
+	a.batchMu.Lock()
+	defer a.batchMu.Unlock()
 	key, err := a.findBatchSession(id)
 	if err != nil {
 		return BatchView{}, err
@@ -543,47 +634,70 @@ func (a *App) ApproveBatch(id string) (BatchView, error) {
 	if err != nil {
 		return BatchView{}, err
 	}
-	for _, item := range v.Items {
-		contentID, contentErr := a.coordinator.ItemContentID(key, id, item.ID)
-		if contentErr != nil {
-			return BatchView{}, contentErr
-		}
-		if _, decideErr := a.transfers.Decide(contentID, true); decideErr != nil {
-			for _, cleanup := range v.Items {
-				if cleanupID, cleanupErr := a.coordinator.ItemContentID(key, id, cleanup.ID); cleanupErr == nil {
-					_ = a.transfers.Cancel(cleanupID)
-				}
-			}
-			_, _ = a.coordinator.RejectBatch(key, id)
-			return BatchView{}, decideErr
-		}
+	switch {
+	case v.ApprovalState == transfer.ApprovalApproved &&
+		v.State != transfer.BatchStateCanceled && v.State != transfer.BatchStateRejected:
+		return batchView(v), nil
+	case v.ApprovalState != transfer.ApprovalPending || v.State != transfer.BatchStatePending:
+		return BatchView{}, fmt.Errorf("%w: the batch is %s and can no longer be approved",
+			transfer.ErrInvalidTransition, v.State)
 	}
-	v, err = a.coordinator.ApproveBatch(key, id)
+	ids, err := a.batchContentIDs(key, v)
 	if err != nil {
+		return BatchView{}, err
+	}
+	if err := a.transfers.DecideBatchItems(ids, true); err != nil {
+		// Some record was not pending (for example, it was canceled with its
+		// session). Nothing was approved, and a batch that cannot be released
+		// whole must not stay pending, so close it out in both subsystems.
+		a.cancelContent(ids)
+		_, _ = a.coordinator.CancelBatch(key, id)
+		return BatchView{}, err
+	}
+	if _, err := a.coordinator.ApproveBatch(key, id); err != nil {
+		// The coordinator refused (its state moved on, e.g. the session
+		// closed); withdraw the upload-service approvals to match.
+		a.cancelContent(ids)
 		return BatchView{}, err
 	}
 	v, err = a.coordinator.GetBatch(key, id)
 	return batchView(v), err
 }
 
+// RejectBatch declines a batch. Rejecting an already rejected batch returns
+// its state; a completed or canceled batch cannot be rejected.
 func (a *App) RejectBatch(id string) (BatchView, error) {
+	a.batchMu.Lock()
+	defer a.batchMu.Unlock()
 	key, err := a.findBatchSession(id)
 	if err != nil {
 		return BatchView{}, err
 	}
+	before, err := a.coordinator.GetBatch(key, id)
+	if err != nil {
+		return BatchView{}, err
+	}
+	if before.State == transfer.BatchStateRejected {
+		return batchView(before), nil
+	}
+	ids, idErr := a.batchContentIDs(key, before)
 	v, err := a.coordinator.RejectBatch(key, id)
 	if err != nil {
 		return BatchView{}, err
 	}
-	for _, item := range v.Items {
-		if contentID, contentErr := a.coordinator.ItemContentID(key, id, item.ID); contentErr == nil {
-			_ = a.transfers.Cancel(contentID)
-		}
+	if idErr == nil {
+		// Pending records take the rejected state; anything already decided
+		// or streaming is canceled below.
+		_ = a.transfers.DecideBatchItems(ids, false)
+		a.cancelContent(ids)
 	}
 	return batchView(v), nil
 }
 
+// CancelBatch cancels every unfinished item of a batch in both subsystems.
 func (a *App) CancelBatch(id string) error {
+	a.batchMu.Lock()
+	defer a.batchMu.Unlock()
 	key, err := a.findBatchSession(id)
 	if err != nil {
 		return err
@@ -592,10 +706,8 @@ func (a *App) CancelBatch(id string) error {
 	if err != nil {
 		return err
 	}
-	for _, item := range v.Items {
-		if contentID, contentErr := a.coordinator.ItemContentID(key, id, item.ID); contentErr == nil {
-			_ = a.transfers.Cancel(contentID)
-		}
+	if ids, idErr := a.batchContentIDs(key, v); idErr == nil {
+		a.cancelContent(ids)
 	}
 	return nil
 }

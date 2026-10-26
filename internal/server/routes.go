@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"mime"
 	"net/http"
 	"os"
 	"strconv"
@@ -41,7 +40,7 @@ import (
 // a GET registration also serves HEAD (the body is stripped by net/http).
 // Everything below /api/ that is unknown yields 404 within the API router.
 // With a nil Services every /api/ path answers 404 (page-only server).
-func newRouter(services *Services, stall time.Duration, grants *DownloadGrantStore) http.Handler {
+func newRouter(services *Services, stall, downloadStall time.Duration, grants *DownloadGrantStore) http.Handler {
 	index, err := pageAssets.ReadFile("assets/index.html")
 	if err != nil {
 		panic("server: embedded assets missing: " + err.Error())
@@ -68,7 +67,7 @@ func newRouter(services *Services, stall time.Duration, grants *DownloadGrantSto
 		// endpoint set without a live session either way.
 		api := newAPIMux(services, stall, grants)
 		mux.Handle("/api/", requireSession(services.Sessions, api.ServeHTTP))
-		mux.HandleFunc("GET /api/downloads/{id}/content", serveArchiveDownload(services, grants, stall))
+		mux.HandleFunc("GET /api/downloads/{id}/content", serveArchiveDownload(services, grants, downloadStall))
 	}
 	return mux
 }
@@ -123,9 +122,12 @@ func requireSession(m *session.Manager, next http.HandlerFunc) http.Handler {
 		}
 		sess, err := m.Validate(token)
 		if err != nil {
-			// Missing vs expired vs revoked all collapse here; nothing
-			// session-specific is recorded or reported.
-			writeError(w, http.StatusUnauthorized, "unauthorized")
+			// The message stays generic. The machine-readable code lets the
+			// phone page tell a session that really ended (expired or
+			// revoked) from a token it never had; it exposes nothing about
+			// the token itself and is only produced for a token that was
+			// once valid.
+			writeUnauthorized(w, err)
 			return
 		}
 		next(w, r.WithContext(context.WithValue(r.Context(), sessCtxKey{}, sess)))
@@ -392,24 +394,31 @@ func handleBatchCreate(svcs *Services) http.HandlerFunc {
 			writeBatchError(w, err)
 			return
 		}
-		for _, item := range view.Items {
-			var up transfer.Upload
-			var declareErr error
-			if manifest.Kind == transfer.BatchKindFolder {
-				up, declareErr = svcs.Transfers.DeclarePath(sess.Key(), resolvedRoot,
-					item.RelativePath, item.DisplayName, item.DeclaredSize)
-			} else {
-				up, declareErr = svcs.Transfers.Declare(sess.Key(), item.DisplayName, item.DeclaredSize)
+		// Every item gets a batch-linked upload record. They are owned by the
+		// batch decision, so they never show up as standalone approval
+		// requests. A failure part-way must leave nothing behind: cancel the
+		// records already declared as well as the batch itself.
+		declared := make([]string, 0, len(view.Items))
+		abort := func(cause error) {
+			for _, id := range declared {
+				_ = svcs.Transfers.Cancel(id)
 			}
+			_, _ = svcs.Coordinator.CancelBatch(sess.Key(), view.ID)
+			writeBatchError(w, cause)
+		}
+		for _, item := range view.Items {
+			var root, relative string
+			if manifest.Kind == transfer.BatchKindFolder {
+				root, relative = resolvedRoot, item.RelativePath
+			}
+			up, declareErr := svcs.Transfers.DeclareBatchItem(sess.Key(), root, relative, item.DisplayName, item.DeclaredSize)
 			if declareErr != nil {
-				_, _ = svcs.Coordinator.CancelBatch(sess.Key(), view.ID)
-				writeBatchError(w, declareErr)
+				abort(declareErr)
 				return
 			}
+			declared = append(declared, up.ID)
 			if mapErr := svcs.Coordinator.SetItemContentID(sess.Key(), view.ID, item.ID, up.ID); mapErr != nil {
-				_ = svcs.Transfers.Cancel(up.ID)
-				_, _ = svcs.Coordinator.CancelBatch(sess.Key(), view.ID)
-				writeBatchError(w, mapErr)
+				abort(mapErr)
 				return
 			}
 		}
@@ -443,17 +452,16 @@ func handleBatchContent(svcs *Services, stall time.Duration) http.HandlerFunc {
 		batchID, itemID := r.PathValue("batchID"), r.PathValue("itemID")
 		sess.Begin()
 		defer sess.End()
-		lease, err := svcs.Coordinator.ClaimNext(sess.Key())
+		// Claim exactly the named item, and only if it is the queue's next
+		// one. A stray request therefore never leaves another item leased.
+		lease, err := svcs.Coordinator.ClaimItem(sess.Key(), batchID, itemID)
 		if err != nil {
 			writeBatchError(w, err)
 			return
 		}
-		if lease.BatchID != batchID || lease.ItemID != itemID {
-			writeBatchError(w, transfer.ErrNoEligibleItem)
-			return
-		}
 		contentID, err := svcs.Coordinator.ItemContentID(sess.Key(), batchID, itemID)
 		if err != nil {
+			failBatch(svcs, sess.Key(), lease, err)
 			writeBatchError(w, err)
 			return
 		}
@@ -463,7 +471,7 @@ func handleBatchContent(svcs *Services, stall time.Duration) http.HandlerFunc {
 			_ = svcs.Coordinator.UpdateItemProgress(sess.Key(), lease, up.Uploaded)
 		})
 		if streamErr != nil {
-			_, _ = svcs.Coordinator.FailItem(sess.Key(), lease, streamErr)
+			failBatch(svcs, sess.Key(), lease, streamErr)
 			writeUploadStreamError(w, streamErr)
 			return
 		}
@@ -477,6 +485,26 @@ func handleBatchContent(svcs *Services, stall time.Duration) http.HandlerFunc {
 			SHA256  string             `json:"sha256"`
 			Batch   transfer.BatchView `json:"batch"`
 		}{res.Written, res.SHA256, view})
+	}
+}
+
+// failBatch ends a batch whose content stream failed or was interrupted. The
+// item that failed keeps its error, the unstarted items are canceled in both
+// the coordinator and the upload service (so no approved record lingers), and
+// the session queue stays usable for a fresh batch. If the desktop already
+// canceled the batch the lease is gone and nothing further is changed.
+func failBatch(svcs *Services, sessionKey string, lease transfer.TransferLease, cause error) {
+	view, err := svcs.Coordinator.FailBatch(sessionKey, lease, cause)
+	if err != nil {
+		return
+	}
+	for _, item := range view.Items {
+		if item.State != transfer.ItemStateCanceled {
+			continue
+		}
+		if contentID, idErr := svcs.Coordinator.ItemContentID(sessionKey, view.ID, item.ID); idErr == nil {
+			_ = svcs.Transfers.Cancel(contentID)
+		}
 	}
 }
 
@@ -602,8 +630,7 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 		w.Header().Set("Accept-Ranges", "none")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("Content-Disposition", mime.FormatMediaType(
-			"attachment", map[string]string{"filename": sf.Name}))
+		w.Header().Set("Content-Disposition", contentDisposition(sf.Name))
 		w.WriteHeader(http.StatusOK)
 
 		// Pin for the streaming duration, then stream. Writes carry a
@@ -738,6 +765,21 @@ func writeJSON(w http.ResponseWriter, code int, body any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// writeUnauthorized answers 401 with a stable code for the session outcome.
+func writeUnauthorized(w http.ResponseWriter, err error) {
+	code := "invalid_token"
+	switch {
+	case errors.Is(err, session.ErrExpired):
+		code = "session_expired"
+	case errors.Is(err, session.ErrRevoked):
+		code = "session_revoked"
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusUnauthorized)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized", "code": code})
 }
 
 // writeError writes a JSON error response akin to http.Error, with nosniff

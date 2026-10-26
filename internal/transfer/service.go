@@ -63,6 +63,12 @@ const (
 	// no such size cap exists by design.
 	defaultMaxActiveUploads = 8
 
+	// defaultMaxPendingBatchItems bounds batch-linked uploads awaiting a
+	// batch decision. Batch items are governed by their batch's single
+	// decision rather than by one desktop click each, so they are bounded
+	// separately from standalone uploads: two maximum-size manifests.
+	defaultMaxPendingBatchItems = 2 * 5000
+
 	// defaultTerminalHistory bounds how many finished records are kept
 	// for the desktop status view.
 	defaultTerminalHistory = 64
@@ -131,6 +137,11 @@ type Upload struct {
 	Uploaded  int64   // bytes actually received so far (live)
 	Speed     float64 // measured bytes per second while receiving
 	Published string  // absolute final path; populated exactly in the completed state
+
+	// BatchLinked is true for a record that belongs to a transfer batch. The
+	// batch coordinator is its only approval authority: such a record is
+	// never offered as an independent approval request.
+	BatchLinked bool
 }
 
 // ContentResult describes a successfully received upload body.
@@ -158,6 +169,10 @@ type upload struct {
 	session      string
 	size         int64
 	created      time.Time
+
+	// managed marks a batch item whose approval is owned by the batch
+	// coordinator. It is fixed at declaration and never changes.
+	managed bool
 
 	// seq is a monotonically increasing creation counter assigned under
 	// the service lock. It orders even records whose Created timestamps
@@ -189,6 +204,8 @@ func (u *upload) snapshotLocked() Upload {
 		Uploaded:  u.uploaded.Load(),
 		Speed:     u.speed,
 		Published: u.published,
+
+		BatchLinked: u.managed,
 	}
 }
 
@@ -235,7 +252,19 @@ var newPartSink = func(store *Store, name string) (contentSink, error) {
 // is validated here, before anything is stored or trusted: the filename is
 // sanitized, the size must be non-negative, and the limits are enforced.
 func (s *Service) Declare(sessionKey, rawName string, size int64) (Upload, error) {
-	return s.declare(sessionKey, rawName, "", "", size)
+	return s.declare(sessionKey, rawName, "", "", size, false)
+}
+
+// DeclareBatchItem records a pending upload that belongs to a transfer batch.
+// root and relativePath are empty for a flat file batch and both set for a
+// folder batch (see DeclarePath). The record is excluded from the standalone
+// approval list and cannot be decided one by one through the legacy approval
+// surface; it is decided together with its batch by DecideBatchItems.
+func (s *Service) DeclareBatchItem(sessionKey, root, relativePath, rawName string, size int64) (Upload, error) {
+	if (root == "") != (relativePath == "") {
+		return Upload{}, ErrInvalidUpload
+	}
+	return s.declare(sessionKey, rawName, root, relativePath, size, true)
 }
 
 // DeclarePath records a folder item whose server-selected root and validated
@@ -244,10 +273,10 @@ func (s *Service) DeclarePath(sessionKey, root, relativePath, rawName string, si
 	if root == "" || relativePath == "" {
 		return Upload{}, ErrInvalidUpload
 	}
-	return s.declare(sessionKey, rawName, root, relativePath, size)
+	return s.declare(sessionKey, rawName, root, relativePath, size, false)
 }
 
-func (s *Service) declare(sessionKey, rawName, root, relativePath string, size int64) (Upload, error) {
+func (s *Service) declare(sessionKey, rawName, root, relativePath string, size int64, managed bool) (Upload, error) {
 	if sessionKey == "" {
 		return Upload{}, ErrWrongSession
 	}
@@ -271,7 +300,7 @@ func (s *Service) declare(sessionKey, rawName, root, relativePath string, size i
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.capacityLocked(); err != nil {
+	if err := s.capacityLocked(managed); err != nil {
 		return Upload{}, err
 	}
 	id, err := newID()
@@ -286,6 +315,7 @@ func (s *Service) declare(sessionKey, rawName, root, relativePath string, size i
 		session:      sessionKey,
 		size:         size,
 		created:      time.Now(),
+		managed:      managed,
 		seq:          s.nextSeq,
 		state:        StatePending,
 	}
@@ -295,16 +325,31 @@ func (s *Service) declare(sessionKey, rawName, root, relativePath string, size i
 	return u.snapshot(), nil
 }
 
-// capacityLocked enforces the limits. Callers must hold s.mu.
-func (s *Service) capacityLocked() error {
-	var pending, active int
+// capacityLocked enforces the limits. Callers must hold s.mu. Standalone
+// uploads are bounded by MaxPending/MaxActive; batch items only by the
+// batch-item cap, because one batch decision governs all of them and they
+// stream strictly one at a time per session.
+func (s *Service) capacityLocked(managed bool) error {
+	var pending, active, pendingBatchItems int
 	for _, u := range s.uploads {
 		switch stateOf(u) {
 		case StatePending:
-			pending++
+			if u.managed {
+				pendingBatchItems++
+			} else {
+				pending++
+			}
 		case StateUploading:
-			active++
+			if !u.managed {
+				active++
+			}
 		}
+	}
+	if managed {
+		if pendingBatchItems >= defaultMaxPendingBatchItems {
+			return fmt.Errorf("%w: too many batch items are pending approval", ErrNoCapacity)
+		}
+		return nil
 	}
 	if pending >= s.limits.MaxPending {
 		return fmt.Errorf("%w: too many uploads are pending approval", ErrNoCapacity)
@@ -370,6 +415,57 @@ func (s *Service) Decide(id string, approve bool) (Upload, error) {
 		u.state = StateRejected
 	}
 	return u.snapshotLocked(), nil
+}
+
+// DecideBatchItems records one decision for every listed batch-linked upload
+// atomically: either every record is pending and all of them take the
+// decision, or none is touched and an error describes the first conflict.
+// This is the only decision path for batch items; there is no state in which
+// part of a batch is approved and the rest is not.
+func (s *Service) DecideBatchItems(ids []string, approve bool) error {
+	if len(ids) == 0 {
+		return ErrInvalidUpload
+	}
+	seen := make(map[string]bool, len(ids))
+	records := make([]*upload, 0, len(ids))
+	for _, id := range ids {
+		if seen[id] {
+			return fmt.Errorf("%w: duplicate upload in decision", ErrInvalidUpload)
+		}
+		seen[id] = true
+		u, err := s.lookup(id, "")
+		if err != nil {
+			return err
+		}
+		if !u.managed {
+			return fmt.Errorf("%w: upload is not part of a batch", ErrInvalidUpload)
+		}
+		records = append(records, u)
+	}
+	// A fixed lock order makes concurrent decisions over overlapping sets
+	// deadlock-free. No other path holds two record locks at once.
+	sort.Slice(records, func(i, j int) bool { return records[i].id < records[j].id })
+	for _, u := range records {
+		u.mu.Lock()
+	}
+	defer func() {
+		for _, u := range records {
+			u.mu.Unlock()
+		}
+	}()
+	for _, u := range records {
+		if u.state != StatePending {
+			return fmt.Errorf("%w: current state is %q", ErrAlreadyDecided, u.state)
+		}
+	}
+	next := StateRejected
+	if approve {
+		next = StateApproved
+	}
+	for _, u := range records {
+		u.state = next
+	}
+	return nil
 }
 
 // SubmitContent streams the body of an approved upload into the receive
@@ -573,8 +669,10 @@ func (s *Service) List() []Upload {
 	return out
 }
 
-// ListPending returns the uploads currently awaiting a decision, oldest
-// first (in creation order). The desktop approval view is the caller.
+// ListPending returns the standalone uploads currently awaiting a decision,
+// oldest first (in creation order). Batch-linked items are deliberately not
+// listed: their batch is the unit of approval. The desktop approval view is
+// the caller.
 func (s *Service) ListPending() []Upload {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -584,7 +682,7 @@ func (s *Service) ListPending() []Upload {
 	}
 	var entries []entry
 	for _, u := range s.uploads {
-		if stateOf(u) == StatePending {
+		if !u.managed && stateOf(u) == StatePending {
 			entries = append(entries, entry{snap: u.snapshot(), seq: u.seq})
 		}
 	}
@@ -610,7 +708,9 @@ func (s *Service) Counts() Counts {
 	for _, u := range s.uploads {
 		switch stateOf(u) {
 		case StatePending:
-			c.Pending++
+			if !u.managed {
+				c.Pending++
+			}
 		case StateUploading:
 			c.Uploading++
 		}
