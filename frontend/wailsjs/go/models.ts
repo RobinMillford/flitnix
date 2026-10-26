@@ -93,9 +93,14 @@ export namespace main {
 	    id: string;
 	    fileId: string;
 	    name: string;
+	    kind: string;
 	    size: number;
 	    // Go type: time
 	    created: any;
+	    // Go type: time
+	    started: any;
+	    // Go type: time
+	    finished?: any;
 	    state: string;
 	    written: number;
 	    speed: number;
@@ -110,8 +115,11 @@ export namespace main {
 	        this.id = source["id"];
 	        this.fileId = source["fileId"];
 	        this.name = source["name"];
+	        this.kind = source["kind"];
 	        this.size = source["size"];
 	        this.created = this.convertValues(source["created"], null);
+	        this.started = this.convertValues(source["started"], null);
+	        this.finished = this.convertValues(source["finished"], null);
 	        this.state = source["state"];
 	        this.written = source["written"];
 	        this.speed = source["speed"];

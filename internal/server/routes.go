@@ -716,6 +716,7 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 				return
 			}
 			downloadID = dl.ID
+			svcs.Downloads.Begin(downloadID)
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))

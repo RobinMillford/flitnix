@@ -59,6 +59,7 @@ type testEnv struct {
 	trans *transfer.Service
 	coord *transfer.Coordinator
 	reg   *transfer.Registry
+	dls   *transfer.DownloadRegistry
 	store *transfer.Store
 	clock *fakeClock
 	srv   *Server
@@ -89,11 +90,13 @@ func newTestEnv(t *testing.T) *testEnv {
 	env.trans = transfer.NewService(transfer.Config{Store: store})
 	env.coord = transfer.NewCoordinator(transfer.CoordinatorConfig{})
 	env.reg = transfer.NewRegistry()
+	env.dls = transfer.NewDownloadRegistry()
 	env.srv = New(Config{Services: &Services{
 		Sessions:    env.sess,
 		Transfers:   env.trans,
 		Coordinator: env.coord,
 		Registry:    env.reg,
+		Downloads:   env.dls,
 		Diagnose:    env.diagSink,
 	}})
 	return env
@@ -441,6 +444,10 @@ func TestDownloadGrantStreamsSharedFileWithoutBuffering(t *testing.T) {
 	if out.Code != http.StatusOK || out.Body.String() != "hello from desktop" {
 		t.Fatalf("download = %d %q", out.Code, out.Body.String())
 	}
+	downloads := env.dls.List()
+	if len(downloads) != 1 || downloads[0].Kind != "file" || downloads[0].State != transfer.DownloadSent {
+		t.Fatalf("direct download telemetry = %#v", downloads)
+	}
 	replay := httptest.NewRecorder()
 	env.srv.Handler().ServeHTTP(replay, req)
 	if replay.Code != http.StatusForbidden {
@@ -487,6 +494,10 @@ func TestDownloadGrantStreamsFolderArchive(t *testing.T) {
 	}
 	if len(zr.File) != 1 || zr.File[0].Name != source.RootName+"/nested/note.txt" {
 		t.Fatalf("archive entries = %v", archiveNames(zr.File))
+	}
+	downloads := env.dls.List()
+	if len(downloads) != 1 || downloads[0].Kind != "archive" || downloads[0].State != transfer.DownloadSent {
+		t.Fatalf("archive download telemetry = %#v", downloads)
 	}
 }
 

@@ -15,6 +15,7 @@
   var PROGRESS_POLL_MS = 500;   // download progress cadence while it is live
   var MAX_PROGRESS_FAILURES = 20; // consecutive failed progress polls before giving up
   var PAINT_MIN_MS = 200;       // upload progress repaint throttle
+  var FIREFOX_LARGE_UPLOAD_BYTES = 256 * 1024 * 1024;
 
   // ------------------------------------------------------------------
   // Token: read once, then scrub the fragment.
@@ -25,6 +26,19 @@
     var cand = frag.slice(1);
     try { cand = decodeURIComponent(cand); } catch (err) { /* keep raw */ }
     if (TOKEN_RE.test(cand)) token = cand;
+  }
+
+  function diagnoseUpload(kind, job) {
+    if (!window.console || typeof window.console.info !== "function") return;
+    window.console.info("flitnix upload", {
+      kind: kind, phase: job.phase, size: job.size,
+      computable: job.size > 0
+    });
+  }
+
+  function firefoxLargeUploadWarning(bytes) {
+    return /Firefox/i.test(navigator.userAgent || "") &&
+      bytes >= FIREFOX_LARGE_UPLOAD_BYTES;
   }
   if (frag) {
     // One-time use: the link disappears from the address bar (and from any
@@ -50,6 +64,7 @@
   var filesEmptyEl = document.getElementById("files-empty");
   var refreshBtn = document.getElementById("refresh-btn");
   var downloadSelectedBtn = document.getElementById("download-selected-btn");
+  var filesRefreshGeneration = 0;
 
   var appState = { ended: false };
   var queue = [];      // upload jobs, FIFO
@@ -223,10 +238,16 @@
     li.dataset.phase = job.phase;
     var r = job.refs;
     var text = phaseText(job);
-    r.bar.hidden = !(job.phase === "sending" || job.phase === "done");
-    if (job.phase === "done") { r.bar.value = r.bar.max; }
+    var active = job.phase === "sending" || job.phase === "done";
+    r.bar.hidden = !active;
+    var renderedPercent = job.size > 0
+      ? Math.min(100, Math.max(0, Math.round((job.uploaded / job.size) * 100)))
+      : (job.phase === "done" ? 100 : 0);
+    if (job.phase === "done") renderedPercent = 100;
+    r.fill.style.width = renderedPercent + "%";
+    r.bar.setAttribute("aria-valuenow", String(renderedPercent));
     if (job.phase === "sending" && job.uploaded > 0 && job.size > 0) {
-      text += " " + Math.min(100, Math.round((job.uploaded / job.size) * 100)) + "%";
+      text += " " + renderedPercent + "%";
     }
     r.state.textContent = text;
     r.err.hidden = !job.err;
@@ -268,9 +289,13 @@
     top.appendChild(el("span", "queue-item__size", fmtBytes(job.size)));
     var row = el("div", "queue-item__row");
     var state = el("span", "queue-item__state");
-    var bar = el("progress", "queue-item__bar");
-    bar.max = job.size > 0 ? job.size : 1;
-    bar.value = job.uploaded;
+    var bar = el("div", "queue-item__bar");
+    bar.setAttribute("role", "progressbar");
+    bar.setAttribute("aria-valuemin", "0");
+    bar.setAttribute("aria-valuemax", "100");
+    bar.setAttribute("aria-valuenow", "0");
+    var fill = el("i", "queue-item__fill");
+    bar.appendChild(fill);
     bar.hidden = true;
     var btn = el("button", "queue-item__btn");
     btn.type = "button";
@@ -283,7 +308,7 @@
     li.appendChild(row);
     li.appendChild(errLine);
     job.el = li;
-    job.refs = { state: state, bar: bar, btn: btn, err: errLine };
+    job.refs = { state: state, bar: bar, fill: fill, btn: btn, err: errLine };
     paint(job);
     return li;
   }
@@ -297,13 +322,16 @@
         // job holds and can then be released at the terminal phase.
         file: f, name: f.name, size: f.size, id: null, phase: "queued", uploaded: 0,
         failures: 0, retryable: false, err: null,
-        xhr: null, timer: null, removed: false,
+        xhr: null, timer: null, removed: false, cancelRequested: false,
         el: null, refs: null, btnAction: null, batchID: null, itemID: null,
         relativePath: folder ? f.webkitRelativePath.slice(folder.length + 1) : "",
         rootName: folder || "", group: folder ? "folder:" + folder : "files"
       };
       queue.push(job);
       queueEl.appendChild(buildItem(job));
+      if (firefoxLargeUploadWarning(job.size)) {
+        setStatus("warning", "Firefox may pause during very large uploads. Keep this page visible; Chrome or Chromium is a temporary alternative if it stalls.");
+      }
     });
     pump();
   }
@@ -312,14 +340,14 @@
     queue.forEach(function (job) {
       job.removed = true;
       if (job.timer) { clearTimeout(job.timer); job.timer = null; }
-      if (job.xhr) { try { job.xhr.abort(); } catch (e) { /* gone */ } }
+      if (job.xhr) { job.cancelRequested = true; try { job.xhr.abort(); } catch (e) { /* gone */ } }
     });
   }
 
   function removeJob(job) {
     job.removed = true;
     if (job.timer) { clearTimeout(job.timer); job.timer = null; }
-    if (job.xhr) { try { job.xhr.abort(); } catch (e) { /* gone */ } }
+    if (job.xhr) { job.cancelRequested = true; try { job.xhr.abort(); } catch (e) { /* gone */ } }
     var i = queue.indexOf(job);
     if (i >= 0) queue.splice(i, 1);
     if (job.el && job.el.parentNode) job.el.parentNode.removeChild(job.el);
@@ -363,7 +391,8 @@
     if (appState.ended) return;
     job.id = null; job.phase = "queued"; job.err = null;
     job.uploaded = 0; job.failures = 0; job.retryable = false;
-    job.refs.bar.value = 0;
+    job.cancelRequested = false;
+    job.refs.fill.style.width = "0%";
     job.refs.bar.hidden = true;
     paint(job);
     pump();
@@ -520,28 +549,33 @@
     return new Promise(function (resolve, reject) {
       var xhr = new XMLHttpRequest();
       job.xhr = xhr;
+      var lastPaint = 0;
       xhr.open("PUT", "/api/batches/" + encodeURIComponent(job.batchID) +
         "/items/" + encodeURIComponent(job.itemID) + "/content");
+      xhr.upload.addEventListener("progress", function (ev) {
+        if (!ev.lengthComputable) return;
+        job.uploaded = Math.min(job.size, ev.loaded);
+        var now = Date.now();
+        if (now - lastPaint >= PAINT_MIN_MS || ev.loaded === ev.total) { lastPaint = now; paint(job); }
+      });
       xhr.setRequestHeader("Authorization", "Bearer " + token);
       xhr.setRequestHeader("Content-Type", "application/octet-stream");
       xhr.onload = function () {
         job.xhr = null;
         if (job.removed || appState.ended) { reject({ aborted: true }); return; }
         if (xhr.status === 401) { endUnauthorized(errorCode(xhr)); reject({ aborted: true }); return; }
-        if (xhr.status >= 200 && xhr.status < 300) { resolve(); return; }
+        if (xhr.status >= 200 && xhr.status < 300) { diagnoseUpload("completed", job); resolve(); return; }
         var msg = "Upload failed (" + xhr.status + ")";
         try { var parsed = JSON.parse(xhr.responseText); if (parsed && parsed.error) msg = parsed.error; } catch (e) {}
         reject(new Error(msg));
       };
-      var lastPaint = 0;
-      xhr.upload.onprogress = function (ev) {
-        if (!ev.lengthComputable) return;
-        job.uploaded = ev.loaded;
-        var now = Date.now();
-        if (now - lastPaint >= PAINT_MIN_MS || ev.loaded === ev.total) { lastPaint = now; paint(job); }
+      xhr.onerror = function () { diagnoseUpload("network-error", job); job.xhr = null; reject(new Error("Network error while uploading. The desktop may have received part of this file; retry to send it again.")); };
+      xhr.ontimeout = function () { diagnoseUpload("timeout", job); job.xhr = null; reject(new Error("Upload timed out. Keep the page visible and retry this file.")); };
+      xhr.onabort = function () {
+        diagnoseUpload(job.cancelRequested ? "canceled" : "aborted", job);
+        job.xhr = null;
+        reject({ aborted: true });
       };
-      xhr.onerror = function () { job.xhr = null; reject(new Error("Network error while uploading. The desktop may have received part of this file; retry to send it again.")); };
-      xhr.onabort = function () { job.xhr = null; reject({ aborted: true }); };
       xhr.send(job.file);
     });
   }
@@ -550,32 +584,42 @@
   // Shared files (desktop → phone)
   // ------------------------------------------------------------------
   function refreshFiles() {
+    var generation = ++filesRefreshGeneration;
     refreshBtn.disabled = true;
     var prev = refreshBtn.textContent;
     refreshBtn.textContent = "Loading…";
     api("/api/sources").then(function (data) {
-      if (appState.ended) return;
+      if (appState.ended || generation !== filesRefreshGeneration) return;
       drawFiles(data || []);
     }).catch(function (err) {
       if (appState.ended || (err && err.silent)) return;
-      filesEmptyEl.textContent = err.message || "Could not load the desktop files.";
-      filesEmptyEl.hidden = false;
+      if (generation === filesRefreshGeneration) {
+        drawFiles([]);
+        filesEmptyEl.textContent = err.message || "Could not load the desktop files.";
+      }
     }).then(function () {
-      refreshBtn.disabled = false;
-      refreshBtn.textContent = prev;
+      if (generation === filesRefreshGeneration) {
+        refreshBtn.disabled = false;
+        refreshBtn.textContent = prev;
+      }
     });
   }
 
   function drawFiles(list) {
     filesEl.textContent = "";
-    var items = Array.isArray(list) ? list : [];
+    var items = (Array.isArray(list) ? list : []).filter(function (f) {
+      return f && f.id && f.name && (f.kind === "file" || f.kind === "folder");
+    });
     filesEmptyEl.hidden = items.length > 0;
+    var actions = document.getElementById("file-actions");
+    if (actions) actions.hidden = items.length === 0;
+    downloadSelectedBtn.hidden = items.length === 0;
+    downloadSelectedBtn.disabled = items.length === 0;
     if (!items.length) {
       filesEmptyEl.textContent = "Nothing is shared with this session yet.";
       return;
     }
     items.forEach(function (f) {
-      if (!f || !f.id || !f.name) return;
       filesEl.appendChild(fileRow(f));
     });
   }

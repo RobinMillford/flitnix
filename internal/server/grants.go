@@ -70,6 +70,7 @@ type archiveEntry struct {
 // name, a query string) can alter which files it covers or what it is called.
 type downloadGrant struct {
 	ID, Secret, Session, Filename, Progress string
+	DownloadID                              string
 	Sess                                    *session.Session
 	Entries                                 []archiveEntry
 	Total                                   int64
@@ -85,7 +86,9 @@ type archiveProgress struct {
 
 	// clock stamps Updated; it is the owning store's clock so retention is
 	// judged against one time source.
-	clock func() time.Time
+	clock      func() time.Time
+	downloads  *transfer.DownloadRegistry
+	downloadID string
 }
 
 func (p *archiveProgress) now() time.Time {
@@ -98,19 +101,21 @@ func (p *archiveProgress) now() time.Time {
 // DownloadGrantStore holds deliberately short-lived, in-memory browser grants
 // and the progress records that follow them.
 type DownloadGrantStore struct {
-	mu       sync.Mutex
-	now      func() time.Time
-	grants   map[string]downloadGrant
-	progress map[string]*archiveProgress
-	active   map[string]int
+	mu        sync.Mutex
+	now       func() time.Time
+	grants    map[string]downloadGrant
+	progress  map[string]*archiveProgress
+	active    map[string]int
+	downloads *transfer.DownloadRegistry
 }
 
-func newGrantStore() *DownloadGrantStore {
+func newGrantStore(downloads *transfer.DownloadRegistry) *DownloadGrantStore {
 	return &DownloadGrantStore{
-		now:      time.Now,
-		grants:   make(map[string]downloadGrant),
-		progress: make(map[string]*archiveProgress),
-		active:   make(map[string]int),
+		now:       time.Now,
+		grants:    make(map[string]downloadGrant),
+		progress:  make(map[string]*archiveProgress),
+		active:    make(map[string]int),
+		downloads: downloads,
 	}
 }
 
@@ -135,6 +140,9 @@ func (s *DownloadGrantStore) pruneLocked(now time.Time) {
 				p.mu.Lock()
 				if p.State == progressPending {
 					p.State, p.Error, p.Updated = progressExpired, "the download was not started in time", now
+					if p.downloads != nil {
+						p.downloads.Fail(p.downloadID, p.Error, 0)
+					}
 				}
 				p.mu.Unlock()
 			}
@@ -190,13 +198,25 @@ func (s *DownloadGrantStore) create(sess *session.Session, sources []archiveSour
 	if err != nil {
 		return downloadGrant{}, nil, err
 	}
+	kind := "file"
+	if len(sources) != 1 || sources[0].Kind != transfer.SourceKindFile {
+		kind = "archive"
+	}
+	var downloadID string
+	if s.downloads != nil {
+		record, startErr := s.downloads.StartKind(progressID, filename, key, total, kind)
+		if startErr != nil {
+			return downloadGrant{}, nil, startErr
+		}
+		downloadID = record.ID
+	}
 	grant := downloadGrant{
 		ID: id, Secret: secret, Session: key, Sess: sess, Filename: filename,
-		Progress: progressID, Entries: entries, Total: total,
+		Progress: progressID, DownloadID: downloadID, Entries: entries, Total: total,
 		Archive:   len(sources) != 1 || sources[0].Kind != transfer.SourceKindFile,
 		ExpiresAt: now.Add(grantLifetime),
 	}
-	progress := &archiveProgress{ID: progressID, Session: key, Total: total, State: progressPending, Updated: now, clock: s.now}
+	progress := &archiveProgress{ID: progressID, Session: key, Total: total, State: progressPending, Updated: now, clock: s.now, downloads: s.downloads, downloadID: downloadID}
 	s.grants[id], s.progress[progressID] = grant, progress
 	return grant, progress, nil
 }
@@ -234,6 +254,9 @@ func (s *DownloadGrantStore) redeem(id, secret string) (downloadGrant, *archiveP
 	p := s.progress[grant.Progress]
 	p.mu.Lock()
 	p.State, p.Updated = progressTransferring, now
+	if p.downloads != nil {
+		p.downloads.Begin(p.downloadID)
+	}
 	p.mu.Unlock()
 	s.pruneLocked(now)
 	return grant, p, nil

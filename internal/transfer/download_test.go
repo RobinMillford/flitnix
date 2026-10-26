@@ -31,12 +31,36 @@ func TestDownloadRegistryMarksPartialTransferFailed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	r.Progress(d.ID, 37)
 	r.Fail(d.ID, "connection ended", 37)
 
 	got := r.List()[0]
 	if got.State != DownloadFailed || got.Written != 37 || got.Reason == "" {
 		t.Fatalf("download = %#v, want failed 37 with reason", got)
+	}
+}
+
+func TestDownloadRegistryTracksArchiveLifecycleAndIgnoresLateUpdates(t *testing.T) {
+	r := NewDownloadRegistry()
+	d, err := r.StartKind("grant-id", "photos.zip", "session-key", 100, "archive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Kind != "archive" || d.State != DownloadStarting || !d.Started.IsZero() {
+		t.Fatalf("initial archive record = %#v", d)
+	}
+
+	r.Progress(d.ID, 25)
+	r.Begin(d.ID)
+	r.Finalize(d.ID)
+	r.Finish(d.ID, 100)
+	r.Progress(d.ID, 50)
+	r.Fail(d.ID, "late failure", 50)
+
+	got := r.List()[0]
+	if got.State != DownloadSent || got.Written != 100 || got.Finished.IsZero() || got.Started.IsZero() {
+		t.Fatalf("archive record = %#v, want completed 100-byte transfer", got)
 	}
 }
 

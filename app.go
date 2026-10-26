@@ -69,15 +69,18 @@ type UploadView struct {
 }
 
 type DownloadView struct {
-	ID      string    `json:"id"`
-	FileID  string    `json:"fileId"`
-	Name    string    `json:"name"`
-	Size    int64     `json:"size"`
-	Created time.Time `json:"created"`
-	State   string    `json:"state"`
-	Written int64     `json:"written"`
-	Speed   float64   `json:"speed"`
-	Reason  string    `json:"reason,omitempty"`
+	ID       string    `json:"id"`
+	FileID   string    `json:"fileId"`
+	Name     string    `json:"name"`
+	Kind     string    `json:"kind"`
+	Size     int64     `json:"size"`
+	Created  time.Time `json:"created"`
+	Started  time.Time `json:"started"`
+	Finished time.Time `json:"finished,omitempty"`
+	State    string    `json:"state"`
+	Written  int64     `json:"written"`
+	Speed    float64   `json:"speed"`
+	Reason   string    `json:"reason,omitempty"`
 }
 
 // SharedFileView is the UI projection of one file currently shared with
@@ -1004,8 +1007,9 @@ func batchView(b transfer.BatchView) BatchView {
 
 func downloadView(d transfer.Download) DownloadView {
 	return DownloadView{
-		ID: d.ID, FileID: d.FileID, Name: d.Name, Size: d.Size,
-		Created: d.Created, State: string(d.State), Written: d.Written,
+		ID: d.ID, FileID: d.FileID, Name: d.Name, Kind: d.Kind, Size: d.Size,
+		Created: d.Created, Started: d.Started, Finished: d.Finished,
+		State: string(d.State), Written: d.Written,
 		Speed: d.Speed, Reason: d.Reason,
 	}
 }
