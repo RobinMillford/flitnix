@@ -102,6 +102,12 @@ func (h *batchHarness) put(batchID, itemID string, data []byte) *httptest.Respon
 	return h.do(http.MethodPut, "/api/batches/"+batchID+"/items/"+itemID+"/content", data)
 }
 
+// cancelItem withdraws one item exactly like the phone's cancel button.
+func (h *batchHarness) cancelItem(batchID, itemID string) *httptest.ResponseRecorder {
+	h.t.Helper()
+	return h.do(http.MethodDelete, "/api/batches/"+batchID+"/items/"+itemID, nil)
+}
+
 func (h *batchHarness) view(id string) transfer.BatchView {
 	h.t.Helper()
 	v, err := h.a.coordinator.GetBatch(h.sess.Key(), id)
@@ -767,5 +773,101 @@ func TestSessionExpiryDuringABatchDecisionDoesNotDeadlock(t *testing.T) {
 	}
 	if a.sessions.Len() != 1 {
 		t.Fatalf("sessions = %d, want only the owner", a.sessions.Len())
+	}
+}
+
+// TestApproveBatchSkipsItemsWithdrawnByThePhone proves the desktop decision
+// only covers items that still await it, and that the partially completed
+// batch then leaves the pending/active projection and enters history as a
+// canceled batch with its completed work intact.
+func TestApproveBatchSkipsItemsWithdrawnByThePhone(t *testing.T) {
+	h := newBatchHarness(t)
+	b := h.createBatch("a.txt", "b.txt", "c.txt")
+
+	if rec := h.cancelItem(b.ID, b.Items[1].ID); rec.Code != http.StatusOK {
+		t.Fatalf("withdraw item = %d %s", rec.Code, rec.Body.String())
+	}
+	if got := pendingBatchIDs(h.a); len(got) != 1 || got[0] != b.ID {
+		t.Fatalf("pending projection after withdrawal = %v, want [%s]", got, b.ID)
+	}
+
+	v, err := h.a.ApproveBatch(b.ID)
+	if err != nil {
+		t.Fatalf("ApproveBatch: %v", err)
+	}
+	want := []string{"queued", "canceled", "queued"}
+	for i, state := range want {
+		if v.Items[i].State != state {
+			t.Fatalf("approved item %d = %q, want %q", i, v.Items[i].State, state)
+		}
+	}
+	if up, _ := h.a.transfers.Get(h.contentID(b, 1)); up.State != transfer.StateCanceled {
+		t.Fatalf("withdrawn record was resurrected as %q", up.State)
+	}
+
+	for _, i := range []int{0, 2} {
+		if rec := h.put(b.ID, b.Items[i].ID, []byte("data")); rec.Code != http.StatusOK {
+			t.Fatalf("item %d upload = %d %s", i, rec.Code, rec.Body.String())
+		}
+	}
+	final := h.view(b.ID)
+	if final.State != "canceled" {
+		t.Fatalf("final batch = %q, want canceled", final.State)
+	}
+	if final.TransferredBytes != 8 || len(final.Items) != 3 {
+		t.Fatalf("final batch = %+v", final)
+	}
+	completed := 0
+	for _, item := range final.Items {
+		if item.State == "completed" {
+			completed++
+		}
+	}
+	if completed != 2 {
+		t.Fatalf("completed items = %d, want 2", completed)
+	}
+	h.assertCoherent(b)
+
+	// The terminal batch is no longer pending or active and is visible in
+	// ListBatches (the desktop's history source).
+	if got := pendingBatchIDs(h.a); len(got) != 0 {
+		t.Fatalf("pending projection = %v, want empty", got)
+	}
+	all := h.a.ListBatches()
+	if len(all) != 1 || all[0].ID != b.ID || all[0].State != "canceled" {
+		t.Fatalf("history projection = %+v", all)
+	}
+}
+
+// TestWithdrawnItemsCannotResurrectABatch keeps the desktop decision scoped:
+// once every item is withdrawn the batch is already terminal, so approval is
+// refused instead of silently reviving a canceled batch.
+func TestWithdrawnItemsCannotResurrectABatch(t *testing.T) {
+	h := newBatchHarness(t)
+	b := h.createBatch("a.txt", "b.txt")
+
+	if rec := h.cancelItem(b.ID, b.Items[0].ID); rec.Code != http.StatusOK {
+		t.Fatalf("first withdraw = %d %s", rec.Code, rec.Body.String())
+	}
+	if v := h.view(b.ID); v.State != "pending" {
+		t.Fatalf("one withdrawal ended the batch early: %q", v.State)
+	}
+	if rec := h.cancelItem(b.ID, b.Items[1].ID); rec.Code != http.StatusOK {
+		t.Fatalf("second withdraw = %d %s", rec.Code, rec.Body.String())
+	}
+	if v := h.view(b.ID); v.State != "canceled" {
+		t.Fatalf("fully withdrawn batch = %q, want canceled", v.State)
+	}
+	if _, err := h.a.ApproveBatch(b.ID); !errors.Is(err, transfer.ErrInvalidTransition) {
+		t.Fatalf("approve fully withdrawn batch = %v, want ErrInvalidTransition", err)
+	}
+	for i := range b.Items {
+		if up, _ := h.a.transfers.Get(h.contentID(b, i)); up.State != transfer.StateCanceled {
+			t.Fatalf("record %d = %q, want canceled", i, up.State)
+		}
+	}
+	h.assertCoherent(b)
+	if got := pendingBatchIDs(h.a); len(got) != 0 {
+		t.Fatalf("pending projection = %v, want empty", got)
 	}
 }

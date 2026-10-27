@@ -33,6 +33,12 @@ import (
 //	POST /api/uploads                 phone declares an incoming file
 //	GET  /api/uploads/{id}            phone polls one of its own uploads
 //	PUT  /api/uploads/{id}/content    phone streams the approved body
+//	POST /api/batches                phone declares an ordered batch
+//	GET  /api/batches/{id}           phone polls its own batch
+//	DELETE /api/batches/{id}/items/{itemID}
+//	                                 phone withdraws one batch item
+//	PUT  /api/batches/{batchID}/items/{itemID}/content
+//	                                 phone streams one approved item
 //	GET  /api/files                   lists the desktop-shared files
 //	GET  /api/files/{id}/download     streams one shared file
 //
@@ -83,6 +89,7 @@ func newAPIMux(services *Services, stall time.Duration, grants *DownloadGrantSto
 	mux.HandleFunc("PUT /api/uploads/{id}/content", handleUploadContent(services, stall))
 	mux.HandleFunc("POST /api/batches", handleBatchCreate(services))
 	mux.HandleFunc("GET /api/batches/{id}", handleBatchStatus(services))
+	mux.HandleFunc("DELETE /api/batches/{id}/items/{itemID}", handleBatchItemCancel(services))
 	mux.HandleFunc("PUT /api/batches/{batchID}/items/{itemID}/content", handleBatchContent(services, stall))
 	mux.HandleFunc("GET /api/files", serveFilesList(services))
 	mux.HandleFunc("GET /api/files/{id}/download", serveFileDownload(services, stall))
@@ -511,6 +518,42 @@ func handleBatchStatus(svcs *Services) http.HandlerFunc {
 	}
 }
 
+// handleBatchItemCancel serves DELETE /api/batches/{id}/items/{itemID}: the
+// phone withdraws one item it declared, without canceling the rest of the
+// batch. The authenticated session is the only authority: another session's
+// (or an unknown) batch/item is answered 404, exactly like a missing one.
+// An item whose state cannot be canceled answers 409. Repeating a cancel for
+// an already canceled item succeeds, so a retry after a lost response is safe.
+//
+// The success body is the authoritative batch snapshot, so the phone never has
+// to guess whether the item or the batch moved. The matching upload record is
+// withdrawn after the coordinator lock is released: a queued record has no
+// part file, and an active stream's sink is aborted by the cancellation
+// callback, leaving no pin, record or temporary file behind.
+func handleBatchItemCancel(svcs *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess := sessionFrom(r)
+		if sess == nil || svcs.Coordinator == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		batchID, itemID := r.PathValue("id"), r.PathValue("itemID")
+		if err := svcs.Coordinator.CancelItem(sess.Key(), batchID, itemID); err != nil {
+			writeBatchError(w, err)
+			return
+		}
+		if contentID, idErr := svcs.Coordinator.ItemContentID(sess.Key(), batchID, itemID); idErr == nil {
+			_ = svcs.Transfers.Cancel(contentID)
+		}
+		view, err := svcs.Coordinator.GetBatch(sess.Key(), batchID)
+		if err != nil {
+			writeBatchError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, view)
+	}
+}
+
 func handleBatchContent(svcs *Services, stall time.Duration) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sess := sessionFrom(r)
@@ -536,7 +579,14 @@ func handleBatchContent(svcs *Services, stall time.Duration) http.HandlerFunc {
 			writeBatchError(w, err)
 			return
 		}
-		_ = svcs.Coordinator.RegisterCancellation(sess.Key(), lease, func() { _ = svcs.Transfers.Cancel(contentID) })
+		if err := svcs.Coordinator.RegisterCancellation(sess.Key(), lease, func() { _ = svcs.Transfers.Cancel(contentID) }); err != nil {
+			// A cancel won the race between the claim and this registration.
+			// The cancel is authoritative: withdraw the record instead of
+			// publishing bytes for an item the phone already withdrew.
+			_ = svcs.Transfers.Cancel(contentID)
+			writeBatchError(w, err)
+			return
+		}
 		body := &stallBodyReader{ReadCloser: r.Body, rc: http.NewResponseController(w), stall: stall}
 		start := time.Now()
 		// Quarter marks of large streams are the only mid-stream
