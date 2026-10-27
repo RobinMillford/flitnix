@@ -646,6 +646,25 @@ func (a *App) batchContentIDs(key string, v transfer.BatchView) ([]string, error
 	return ids, nil
 }
 
+// batchApprovableContentIDs returns the upload records that still await the
+// desktop decision. Items the phone already withdrew are skipped: a canceled
+// record must not make the whole batch decision fail and strand the items that
+// are still eligible.
+func (a *App) batchApprovableContentIDs(key string, v transfer.BatchView) ([]string, error) {
+	ids := make([]string, 0, len(v.Items))
+	for _, item := range v.Items {
+		if item.State != transfer.ItemStatePending {
+			continue
+		}
+		id, err := a.coordinator.ItemContentID(key, v.ID, item.ID)
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
 // cancelContent cancels the upload records of a batch whose fate was decided
 // elsewhere. Canceling a record that already finished is a no-op.
 func (a *App) cancelContent(ids []string) {
@@ -679,9 +698,15 @@ func (a *App) ApproveBatch(id string) (BatchView, error) {
 		return BatchView{}, fmt.Errorf("%w: the batch is %s and can no longer be approved",
 			transfer.ErrInvalidTransition, v.State)
 	}
-	ids, err := a.batchContentIDs(key, v)
+	ids, err := a.batchApprovableContentIDs(key, v)
 	if err != nil {
 		return BatchView{}, err
+	}
+	if len(ids) == 0 {
+		// Every item was withdrawn before the decision; the coordinator has
+		// already finished the batch, so there is nothing to approve.
+		return BatchView{}, fmt.Errorf("%w: the batch has no items left to approve",
+			transfer.ErrInvalidTransition)
 	}
 	if err := a.transfers.DecideBatchItems(ids, true); err != nil {
 		// Some record was not pending (for example, it was canceled with its

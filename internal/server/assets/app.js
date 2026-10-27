@@ -15,6 +15,7 @@
   var PROGRESS_POLL_MS = 500;   // download progress cadence while it is live
   var MAX_PROGRESS_FAILURES = 20; // consecutive failed progress polls before giving up
   var PAINT_MIN_MS = 200;       // upload progress repaint throttle
+  var CANCEL_RETRIES = 3;       // DELETE attempts before showing the real state
   var FIREFOX_LARGE_UPLOAD_BYTES = 256 * 1024 * 1024;
 
   // ------------------------------------------------------------------
@@ -237,6 +238,7 @@
       case "declaring": return "Contacting the desktop…";
       case "waiting": return "Waiting for approval on the desktop…";
       case "sending": return "Transferring…";
+      case "canceling": return "Canceling…";
       case "done": return "Sent";
       case "canceled": return "Canceled";
       case "failed": return "Failed";
@@ -250,7 +252,8 @@
     li.dataset.phase = job.phase;
     var r = job.refs;
     var text = phaseText(job);
-    var active = job.phase === "sending" || job.phase === "done";
+    var active = job.phase === "sending" || job.phase === "done" ||
+                 (job.phase === "canceling" && job.uploaded > 0);
     r.bar.hidden = !active;
     var renderedPercent = job.size > 0
       ? Math.min(100, Math.max(0, Math.round((job.uploaded / job.size) * 100)))
@@ -269,17 +272,19 @@
     // A failed-but-retryable job deliberately keeps the file — Retry
     // reuploads the same object. paint is idempotent-safe here because
     // the conditions depend only on the terminal phase, never progress.
+    // A "canceling" job keeps it too: if the desktop refuses or the cancel
+    // cannot be confirmed, the file may still have to be sent.
     if (job.file && (job.phase === "done" || job.phase === "canceled" ||
                      (job.phase === "failed" && !job.retryable))) {
       job.file = null;
     }
     // Button is state-dependent.
     var label, action;
-    if (job.phase === "sending") {
-      label = "Cancel"; action = function () { if (job.xhr) job.xhr.abort(); };
-    } else if (job.phase === "queued" || job.phase === "declaring" ||
-               job.phase === "waiting") {
-      label = "Cancel"; action = function () { removeJob(job); };
+    if (job.phase === "sending" || job.phase === "queued" ||
+        job.phase === "declaring" || job.phase === "waiting") {
+      label = "Cancel"; action = function () { requestCancel(job); };
+    } else if (job.phase === "canceling") {
+      label = "Canceling…"; action = function () { /* in flight */ };
     } else if (job.phase === "done") {
       label = "Dismiss"; action = function () { removeJob(job); };
     } else {
@@ -289,6 +294,7 @@
         : function () { removeJob(job); };
     }
     r.btn.textContent = label;
+    r.btn.disabled = job.phase === "canceling";
     if (job.btnAction) r.btn.removeEventListener("click", job.btnAction);
     job.btnAction = action;
     r.btn.addEventListener("click", action);
@@ -335,6 +341,7 @@
         file: f, name: f.name, size: f.size, id: null, phase: "queued", uploaded: 0,
         failures: 0, retryable: false, err: null,
         xhr: null, timer: null, removed: false, cancelRequested: false,
+        cancelInFlight: false,
         el: null, refs: null, btnAction: null, batchID: null, itemID: null,
         relativePath: folder ? f.webkitRelativePath.slice(folder.length + 1) : "",
         rootName: folder || "", group: folder ? "folder:" + folder : "files"
@@ -366,6 +373,111 @@
     // If the removed job was the blocker, let the queue advance.
     if (!pumpBusy && !appState.ended) pump();
   }
+
+  function requestCancel(job) {
+    if (job.removed || appState.ended) return;
+    if (job.phase === "queued") {
+      // Nothing was declared to the desktop yet, so there is nothing to
+      // withdraw: removing the row is already the whole cancellation.
+      removeJob(job);
+      return;
+    }
+    if (job.phase === "declaring") {
+      // The batch POST is in flight and this job has no IDs yet. The intent
+      // is carried to the response handler, which withdraws the declared
+      // item instead of uploading it.
+      job.cancelRequested = true;
+      job.phase = "canceling";
+      paint(job);
+      return;
+    }
+    if (job.phase === "waiting" || job.phase === "sending") {
+      job.cancelRequested = true;
+      job.phase = "canceling";
+      paint(job);
+      // An active PUT is deliberately not aborted here: the server's cancel
+      // releases the lease and aborts the sink itself, so the DELETE wins the
+      // race and the rest of the batch is untouched. Aborting first could
+      // surface as a stream failure and end the whole batch.
+      cancelDeclaredItem(job, 1);
+      return;
+    }
+    // done / canceled / failed rows expose Retry or Dismiss instead.
+  }
+
+  // cancelDeclaredItem asks the desktop to withdraw one already declared
+  // item. The response (or an authoritative refresh after a refusal) is the
+  // only thing allowed to turn the row into "canceled": a cancel is never
+  // shown as done from local intent alone.
+  function cancelDeclaredItem(job, attempt) {
+    if (job.removed || appState.ended) return;
+    // A retry that lost its purpose (the snapshot already settled the row)
+    // must not send another request.
+    if (job.phase !== "canceling") return;
+    if (!job.batchID || !job.itemID) { refreshBatchAfterCancel(); return; }
+    job.cancelInFlight = true;
+    api("/api/batches/" + encodeURIComponent(job.batchID) +
+        "/items/" + encodeURIComponent(job.itemID), { method: "DELETE" })
+      .then(function (batch) {
+        job.cancelInFlight = false;
+        if (job.removed || appState.ended) return;
+        applyBatchSnapshot(batch);
+        if (activeBatch) watchBatch();
+        else pump();
+      })
+      .catch(function (err) {
+        job.cancelInFlight = false;
+        if (job.removed || appState.ended || (err && err.silent)) return;
+        if (err && (err.status === 404 || err.status === 409)) {
+          // 409 means the item moved past cancellation (completed, failed or
+          // the batch ended); 404 means the desktop no longer owns it. Either
+          // way the authoritative snapshot decides what to show.
+          refreshBatchAfterCancel();
+          return;
+        }
+        if (attempt < CANCEL_RETRIES) {
+          setReconnecting(true, "batch");
+          waitThen(job, backoffMs(attempt), function () {
+            cancelDeclaredItem(job, attempt + 1);
+          });
+          return;
+        }
+        refreshBatchAfterCancel();
+      });
+  }
+
+  function refreshBatchAfterCancel() {
+    if (!activeBatch || appState.ended) return;
+    api("/api/batches/" + encodeURIComponent(activeBatch.id)).then(function (batch) {
+      if (!activeBatch || appState.ended) return;
+      applyBatchSnapshot(batch);
+      if (activeBatch) watchBatch();
+      else pump();
+    }).catch(function (err) {
+      if (!activeBatch || appState.ended || (err && err.silent)) return;
+      if (err && err.status === 404) {
+        // The desktop no longer knows the batch. Nothing can be confirmed,
+        // so the row says so instead of pretending it was canceled.
+        activeBatch.jobs.forEach(function (other) {
+          if (other.removed || other.phase === "done" || other.phase === "canceled") return;
+          other.phase = "failed";
+          other.err = "The desktop no longer has this transfer. Retry to send it again.";
+          other.retryable = true;
+          other.cancelRequested = false;
+          paint(other);
+        });
+        activeBatch = null; pumpBusy = false; pump();
+        return;
+      }
+      // Still unreachable: keep the row in "canceling" and let the regular
+      // batch poll establish the truth when the connection returns.
+      activeBatch.failures += 1;
+      setReconnecting(true, "batch");
+      var batch = activeBatch;
+      waitThen(batch, backoffMs(batch.failures), pollBatch);
+    });
+  }
+
 
   function cancelJob(job, msg) {
     if (job.removed || appState.ended) return;
@@ -403,7 +515,7 @@
     if (appState.ended) return;
     job.id = null; job.phase = "queued"; job.err = null;
     job.uploaded = 0; job.failures = 0; job.retryable = false;
-    job.cancelRequested = false;
+    job.cancelRequested = false; job.cancelInFlight = false;
     job.refs.fill.style.width = "0%";
     job.refs.bar.hidden = true;
     paint(job);
@@ -441,17 +553,38 @@
         throw new Error("The desktop gave an unexpected batch reply");
       }
       activeBatch = { id: batch.id, jobs: jobs, failures: 0, timer: null };
+      var cancels = [];
       batch.items.forEach(function (item, index) {
-        jobs[index].batchID = batch.id;
-        jobs[index].itemID = item.id;
-        jobs[index].phase = "waiting";
-        paint(jobs[index]);
+        var job = jobs[index];
+        if (job.removed) return;
+        job.batchID = batch.id;
+        job.itemID = item.id;
+        if (job.cancelRequested) {
+          // Withdrawn while the declaration was in flight: now that the item
+          // has an ID, withdraw it on the desktop instead of uploading it.
+          job.phase = "canceling";
+          paint(job);
+          cancels.push(job);
+        } else {
+          job.phase = "waiting";
+          paint(job);
+        }
       });
       pumpBusy = false;
+      cancels.forEach(function (job) { cancelDeclaredItem(job, 1); });
       watchBatch();
     }).catch(function (err) {
       jobs.forEach(function (job) {
         if (job.removed) return;
+        if (job.cancelRequested) {
+          // The declaration itself failed, so nothing exists on the desktop:
+          // a local cancellation is accurate and needs no server call.
+          job.phase = "canceled";
+          job.err = "Canceled before it was sent.";
+          job.cancelRequested = false;
+          paint(job);
+          return;
+        }
         job.phase = "failed";
         job.err = (!err || !err.status || err.status >= 500)
           ? "Could not reach the desktop. Check the Wi-Fi connection and retry."
@@ -468,31 +601,77 @@
     activeBatch.timer = setTimeout(pollBatch, POLL_MS);
   }
 
+  // applyBatchSnapshot folds one authoritative BatchView into the local job
+  // rows. Only the desktop decides that a file is done, failed or canceled;
+  // local intent never does. A row stays "canceling" while its DELETE is in
+  // flight, and after an unconfirmed cancel it falls back to the real queue
+  // state instead of claiming a cancellation that never happened.
+  function applyBatchSnapshot(batch) {
+    if (!activeBatch || !batch || !Array.isArray(batch.items)) return;
+    batch.items.forEach(function (item) {
+      var job = activeBatch.jobs[item.sequence];
+      if (!job || job.removed) return;
+      var changed = false;
+      if (typeof item.transferred === "number" && item.transferred !== job.uploaded) {
+        job.uploaded = item.transferred;
+        changed = true;
+      }
+      var phase = job.phase;
+      var err = job.err;
+      var retryable = job.retryable;
+      // A cancel is still progressing while its DELETE is in flight or a
+      // retry is scheduled. A snapshot from that window must not silently
+      // abandon the intent: the row stays "canceling" until the request is
+      // answered or the retries are exhausted.
+      var cancelPending = job.phase === "canceling" && (job.cancelInFlight || !!job.timer);
+      var decided = true;
+      switch (item.state) {
+        case "completed":
+          phase = "done"; err = null; retryable = false; break;
+        case "canceled":
+          phase = "canceled"; err = "Upload canceled."; retryable = false; break;
+        case "rejected":
+          phase = "failed"; err = "The desktop declined this file."; retryable = false; break;
+        case "failed":
+          phase = "failed"; err = item.error || "Transfer failed."; retryable = true; break;
+        case "uploading":
+          decided = false;
+          if (!cancelPending) {
+            if (job.phase === "canceling") {
+              // The cancel was refused or could not be confirmed: reflect
+              // the real state and drop the intent instead of claiming a
+              // cancellation that never happened.
+              job.cancelRequested = false;
+              err = "Cancellation was not confirmed; the file is still transferring.";
+            }
+            phase = "sending";
+          }
+          break;
+        default: // pending / approved / queued: not started yet
+          decided = false;
+          if (!cancelPending && job.phase === "canceling") {
+            job.cancelRequested = false;
+            phase = "waiting";
+            err = "Cancellation was not confirmed; the file is still queued.";
+          }
+      }
+      if (decided) job.cancelRequested = false;
+      if (phase !== job.phase || err !== job.err) changed = true;
+      job.phase = phase;
+      job.err = err;
+      job.retryable = retryable;
+      if (changed) paint(job);
+    });
+  }
+
   function pollBatch() {
     if (!activeBatch || appState.ended) return;
     api("/api/batches/" + encodeURIComponent(activeBatch.id)).then(function (batch) {
       if (!activeBatch || appState.ended) return;
       activeBatch.failures = 0;
       setReconnecting(false, "batch");
-      batch.items.forEach(function (item) {
-        var job = activeBatch.jobs[item.sequence];
-        if (!job) return;
-        // A terminal item whose row already shows the same terminal
-        // phase is done being drawn: skip it. Late in a large batch this
-        // is the common case — every poll used to rebuild all done
-        // rows, which multiplied DOM work for dense folder queues.
-        if ((item.state === "completed" && job.phase === "done") ||
-            (item.state === "canceled" && job.phase === "canceled") ||
-            (item.state === "failed" && job.phase === "failed")) return;
-        job.uploaded = item.transferred || 0;
-        if (item.state === "completed") job.phase = "done";
-        else if (item.state === "failed") {
-          job.phase = "failed"; job.err = item.error || "Transfer failed."; job.retryable = true;
-        } else if (item.state === "canceled") {
-          job.phase = "canceled"; job.err = "Upload canceled.";
-        } else if (item.state === "uploading") job.phase = "sending";
-        paint(job);
-      });
+      applyBatchSnapshot(batch);
+      if (!activeBatch) return;
       if (batch.state === "paused") {
         activeBatch.jobs.forEach(function (job) {
           if (job.phase === "waiting") job.phase = "queued";
@@ -500,20 +679,31 @@
         });
         activeBatch = null; pumpBusy = false; pump(); return;
       }
-      var next = activeBatch.jobs.find(function (job) { return job.phase === "waiting"; });
       if (batch.approvalState === "rejected" || batch.state === "rejected") {
-        activeBatch.jobs.forEach(function (job) {
-          if (job.phase !== "done") { job.phase = "failed"; job.err = "The desktop declined this batch."; job.retryable = false; paint(job); }
-        });
-        activeBatch = null; pump(); return;
-      }
-      if (next && (batch.approvalState === "approved" || batch.state === "queued")) {
-        next.phase = "sending"; next.uploaded = 0; paint(next);
-        sendBatchItem(next);
-        return;
-      }
-      if (!next) {
         activeBatch = null; pumpBusy = false; pump(); return;
+      }
+      // Uploads are strictly FIFO across the batch. The head job — the first
+      // row that is not terminal — decides what happens next: a canceling
+      // head blocks later items until its DELETE is acknowledged (claiming a
+      // later item would be refused by the desktop), a waiting head uploads
+      // once approved, and no head at all means the batch is settled.
+      var head = null;
+      for (var i = 0; i < activeBatch.jobs.length; i++) {
+        var job = activeBatch.jobs[i];
+        if (job.removed || job.phase === "done" || job.phase === "canceled" ||
+            job.phase === "failed") continue;
+        head = job;
+        break;
+      }
+      if (!head) {
+        activeBatch = null; pumpBusy = false; pump(); return;
+      }
+      if (head.phase === "canceling") { watchBatch(); return; }
+      if (head.phase === "waiting" &&
+          (batch.approvalState === "approved" || batch.state === "queued")) {
+        head.phase = "sending"; head.uploaded = 0; paint(head);
+        sendBatchItem(head);
+        return;
       }
       watchBatch();
     }).catch(function (err) {
@@ -521,7 +711,10 @@
       if (err && err.status === 404) {
         // The desktop genuinely no longer knows this batch.
         activeBatch.jobs.forEach(function (job) {
-          if (job.phase !== "done") { job.phase = "failed"; job.err = "The desktop no longer has this transfer. Retry to send it again."; job.retryable = true; paint(job); }
+          if (job.removed || job.phase === "done" || job.phase === "canceled") return;
+          job.phase = "failed"; job.err = "The desktop no longer has this transfer. Retry to send it again."; job.retryable = true;
+          job.cancelRequested = false;
+          paint(job);
         });
         activeBatch = null; pumpBusy = false;
         return;
@@ -538,10 +731,23 @@
 
   function sendBatchItem(job) {
     putBatchContent(job).then(function () {
+      if (job.phase === "done" || job.phase === "canceled") return;
       job.phase = "done"; job.err = null; paint(job);
       watchBatch();
     }).catch(function (e) {
       if (!activeBatch || job.removed || appState.ended) return;
+      // A row the desktop already settled must not be overwritten by a late
+      // PUT failure (e.g. the server canceled the sink after our DELETE).
+      if (job.phase === "done" || job.phase === "canceled") return;
+      if (job.cancelRequested) {
+        // The phone withdrew this item; the DELETE response is the authority.
+        // The aborted/failed PUT is its expected consequence and must not
+        // tear down the batch or requeue the files behind it.
+        job.phase = "canceling"; job.err = null; job.retryable = false;
+        paint(job);
+        if (activeBatch) watchBatch();
+        return;
+      }
       if (e && e.aborted) { job.phase = "canceled"; job.err = "Upload canceled."; }
       else { job.phase = "failed"; job.err = (e && e.message) || "Transfer failed."; job.retryable = true; }
       activeBatch.jobs.forEach(function (other) {

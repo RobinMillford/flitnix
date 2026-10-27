@@ -200,7 +200,11 @@ func (c *Coordinator) ApproveBatch(sessionKey, batchID string) (BatchView, error
 	batch.batch.ApprovalState = ApprovalApproved
 	batch.batch.State = BatchStateQueued
 	for i := range batch.batch.Items {
-		batch.batch.Items[i].State = ItemStateQueued
+		// An item canceled before the desktop decision stays canceled; it must
+		// not be resurrected by the approval of its siblings.
+		if batch.batch.Items[i].State == ItemStatePending {
+			batch.batch.Items[i].State = ItemStateQueued
+		}
 	}
 	return batch.batch.View(), nil
 }
@@ -403,9 +407,8 @@ func (c *Coordinator) CompleteItem(sessionKey string, lease TransferLease, sha25
 	item.State = ItemStateCompleted
 	item.SHA256 = sha256
 	session.active = nil
-	if allItemsCompleted(batch.batch.Items) {
-		batch.batch.State = BatchStateCompleted
-		batch.batch.CompletedAt = c.now()
+	if allItemsTerminal(batch.batch.Items) {
+		c.finishBatchLocked(batch)
 	} else {
 		batch.batch.State = BatchStateQueued
 	}
@@ -487,33 +490,57 @@ func (c *Coordinator) FailBatch(sessionKey string, lease TransferLease, transfer
 
 // CancelItem cancels a queued or active item. The active cancellation callback
 // is deliberately invoked after releasing the coordinator mutex.
+//
+// The transition rules are deterministic:
+//   - an already canceled item is a no-op, so a retried or racing cancel is
+//     idempotent;
+//   - completed, rejected and failed items cannot be canceled (a failed item
+//     has its own retry path);
+//   - an item in a batch that already reached a terminal state is refused;
+//   - a queued (not yet claimed) item is canceled without touching the active
+//     lease, so later items stay eligible;
+//   - an active item releases its lease and cancellation callback.
+//
+// A batch finishes as soon as every item is terminal: all-completed means
+// "completed", any intentional cancellation means "canceled". Completed items
+// and their byte counts are preserved.
 func (c *Coordinator) CancelItem(sessionKey, batchID, itemID string) error {
 	var cancel context.CancelFunc
 	c.mu.Lock()
 	session, err := c.sessionForOperationLocked(sessionKey)
 	if err == nil {
 		batch, batchErr := c.ownedBatchLocked(sessionKey, batchID)
-		if batchErr != nil {
+		switch {
+		case batchErr != nil:
 			err = batchErr
-		} else if item := findItem(&batch.batch, itemID); item == nil {
-			err = ErrItemNotFound
-		} else if item.State == ItemStateCompleted || item.State == ItemStateRejected || item.State == ItemStateCanceled {
-			err = ErrInvalidTransition
-		} else {
-			if session.active != nil && session.active.ItemID == itemID {
-				cancel = session.active.cancel
-				session.active = nil
+		default:
+			item := findItem(&batch.batch, itemID)
+			switch {
+			case item == nil:
+				err = ErrItemNotFound
+			case item.State == ItemStateCanceled:
+				// Already canceled: a repeated or concurrent cancel is a no-op.
+			case item.State == ItemStateCompleted || item.State == ItemStateRejected || item.State == ItemStateFailed:
+				err = ErrInvalidTransition
+			case batch.batch.State == BatchStateCompleted || batch.batch.State == BatchStateRejected ||
+				batch.batch.State == BatchStateCanceled || batch.batch.State == BatchStateFailed:
+				err = ErrInvalidTransition
+			default:
+				if session.active != nil && session.active.ItemID == itemID {
+					cancel = session.active.cancel
+					session.active = nil
+				}
+				if item.Transferred > 0 {
+					batch.batch.TransferredBytes -= item.Transferred
+					item.Transferred = 0
+				}
+				item.State = ItemStateCanceled
+				item.Error = "canceled"
+				if session.paused {
+					session.paused = false
+				}
+				c.recomputeBatchTerminalStateLocked(batch)
 			}
-			if item.Transferred > 0 {
-				batch.batch.TransferredBytes -= item.Transferred
-				item.Transferred = 0
-			}
-			item.State = ItemStateCanceled
-			item.Error = "canceled"
-			if session.paused {
-				session.paused = false
-			}
-			c.recomputeBatchTerminalStateLocked(batch)
 		}
 	}
 	c.mu.Unlock()
@@ -902,17 +929,50 @@ func allItemsCompleted(items []TransferItem) bool {
 	return true
 }
 
-func (c *Coordinator) recomputeBatchTerminalStateLocked(batch *coordinatorBatch) {
-	allTerminal := true
-	for _, item := range batch.batch.Items {
-		if item.State != ItemStateCompleted && item.State != ItemStateCanceled && item.State != ItemStateRejected {
-			allTerminal = false
-			break
+// allItemsTerminal reports whether no item still has work to do. Canceled and
+// rejected items are terminal too: an intentional cancellation must not keep
+// a batch alive forever.
+func allItemsTerminal(items []TransferItem) bool {
+	for _, item := range items {
+		switch item.State {
+		case ItemStateCompleted, ItemStateCanceled, ItemStateRejected:
+		default:
+			return false
 		}
 	}
-	if allTerminal {
-		batch.batch.State = BatchStateCanceled
+	return true
+}
+
+// finishBatchLocked moves a batch to its terminal state once every item is
+// terminal. A batch with any intentionally canceled item is "canceled" (not
+// "failed"), preserving the completed items and their byte counts. Callers
+// must hold the coordinator mutex.
+func (c *Coordinator) finishBatchLocked(batch *coordinatorBatch) {
+	if allItemsCompleted(batch.batch.Items) {
+		batch.batch.State = BatchStateCompleted
 	} else {
-		batch.batch.State = BatchStateQueued
+		batch.batch.State = BatchStateCanceled
 	}
+	if batch.batch.CompletedAt.IsZero() {
+		batch.batch.CompletedAt = c.now()
+	}
+}
+
+func (c *Coordinator) recomputeBatchTerminalStateLocked(batch *coordinatorBatch) {
+	if allItemsTerminal(batch.batch.Items) {
+		c.finishBatchLocked(batch)
+		return
+	}
+	// An unapproved batch stays pending: canceling one of its items must not
+	// release the rest to the phone before the desktop decision. A failed
+	// batch keeps its terminal state (FailBatch already decided it).
+	switch batch.batch.State {
+	case BatchStatePending, BatchStateFailed:
+		return
+	}
+	if batch.batch.ApprovalState == ApprovalPending {
+		batch.batch.State = BatchStatePending
+		return
+	}
+	batch.batch.State = BatchStateQueued
 }

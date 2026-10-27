@@ -136,6 +136,7 @@ input:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .queue-item[data-phase="done"] { border-color: rgba(20, 184, 166, 0.5); }
 .queue-item[data-phase="failed"],
 .queue-item[data-phase="canceled"] { border-color: rgba(248, 113, 113, 0.45); }
+.queue-item[data-phase="canceling"] { border-color: rgba(251, 191, 36, 0.5); }
 .queue-item__top { display: flex; align-items: baseline; justify-content: space-between; gap: 0.6rem; }
 .queue-item__name { overflow-wrap: anywhere; font-size: 0.95rem; font-weight: 600; }
 .queue-item__size { flex: none; color: var(--text-muted); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
@@ -144,6 +145,7 @@ input:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .queue-item[data-phase="done"] .queue-item__state { color: #7ff0df; }
 .queue-item[data-phase="failed"] .queue-item__state,
 .queue-item[data-phase="canceled"] .queue-item__state { color: var(--danger); font-weight: 600; }
+.queue-item[data-phase="canceling"] .queue-item__state { color: #fbbf24; font-weight: 600; }
 .queue-item__bar {
   flex: 1 1 4.5rem;
   width: auto;

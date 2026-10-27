@@ -215,6 +215,11 @@
   function finishedBatch(b: main.BatchView): boolean {
     return ['completed', 'failed', 'canceled', 'rejected'].includes(b.state)
   }
+  // A batch with a withdrawn (phone-canceled) item is not a failure: once its
+  // remaining items are terminal it becomes "canceled", leaves Active, and
+  // enters History. doneItems counts only completed items and transferredBytes
+  // excludes the canceled item's discarded bytes, so the history row shows the
+  // work that actually survived (for example "2 of 3 files · 8 B of 15 B").
   function batchName(b: main.BatchView): string {
     return b.rootName || `${b.totalItemCount} ${b.totalItemCount === 1 ? 'file' : 'files'}`
   }
