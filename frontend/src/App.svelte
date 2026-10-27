@@ -2,6 +2,7 @@
   import { onMount } from 'svelte'
   import type { main, netenv } from '../wailsjs/go/models'
   import { OnFileDrop, OnFileDropOff } from '../wailsjs/runtime/runtime.js'
+  import logoUrl from './assets/images/logo-universal.png'
   import {
     StartSession, EndSession, ListSessions, ListPendingUploads, RecentUploads,
     RecentDownloads, ApproveUpload, RejectUpload, CancelUpload,
@@ -235,7 +236,7 @@
 <main class="shell">
   <header class="topbar">
     <div>
-      <div class="brand"><span class="brand-mark">&gt;_</span><h1>Flitnix</h1></div>
+      <div class="brand"><img class="brand-logo" src={logoUrl} alt="Flitnix"/><h1>Flitnix</h1></div>
       <p>Fast, private file transfer over your local network.</p>
     </div>
     <div class:online={sessions.length > 0} class="status">
