@@ -3,6 +3,7 @@
   import type { main, netenv } from '../wailsjs/go/models'
   import { OnFileDrop, OnFileDropOff } from '../wailsjs/runtime/runtime.js'
   import logoUrl from './assets/images/logo-universal.png'
+  import { createRefreshScheduler } from './refreshScheduler'
   import {
     StartSession, EndSession, ListSessions, ListPendingUploads, RecentUploads,
     RecentDownloads, ApproveUpload, RejectUpload, CancelUpload,
@@ -38,7 +39,7 @@
   let activeAddress = ''
   let networkChooserOpen = false
   let networkRefreshGeneration = 0
-  let refreshGeneration = 0
+  let disposed = false
   const SESSION_PORT = '43821'
 
   function stringOfError(err: unknown): string {
@@ -60,19 +61,15 @@
   function hostPort(): string {
     return serverAddress || (activeAddress ? `${activeAddress}:${SESSION_PORT}` : `…:${SESSION_PORT}`)
   }
-  async function refresh(): Promise<void> {
-    // One refresh is ten independent IPC reads, so two of them overlap: the
-    // 800 ms poll starts a round whether or not the previous one finished, and
-    // every decision/cancel also refreshes on completion. A reply from an
-    // older round must never be committed after a newer one, or the panels
-    // walk backwards (progress drops, a finished batch turns active again).
-    const generation = ++refreshGeneration
-    try {
-      const [s, p, u, d, f, sourceList, dir, addr, b, allBatches] = await Promise.all([
-        ListSessions(), ListPendingUploads(), RecentUploads(), RecentDownloads(),
-        ListSharedFiles(), ListSharedSources(), ReceiveDirectory(), ServerAddress(), ListPendingBatches(), ListBatches()
-      ])
-      if (generation !== refreshGeneration) return
+  // Single-flight, coalescing refresh. See refreshScheduler.ts: an 800 ms poll
+  // plus an action callback per decision used to overlap ten-call rounds, and
+  // a round slower than the interval was invalidated by every later tick.
+  const refresh = createRefreshScheduler(
+    () => Promise.all([
+      ListSessions(), ListPendingUploads(), RecentUploads(), RecentDownloads(),
+      ListSharedFiles(), ListSharedSources(), ReceiveDirectory(), ServerAddress(), ListPendingBatches(), ListBatches()
+    ]),
+    ([s, p, u, d, f, sourceList, dir, addr, b, allBatches]) => {
       // Bound methods marshal empty (nil) Go slices as null. Treating them as
       // empty lists is required: a single null here would make the template
       // expressions below throw and abort the render flush, freezing the
@@ -83,8 +80,10 @@
       receiveDir = dir; serverAddress = addr ?? ''
       if (!sessions.length) { qrKey = ''; qrUrl = ''; qrError = '' }
       else if (!sessions.some((x) => x.key === qrKey)) fetchQR(sessions[0].key)
-    } catch (err) { if (generation === refreshGeneration) errorText = stringOfError(err) }
-  }
+    },
+    (err) => { errorText = stringOfError(err) },
+    () => disposed
+  )
   async function fetchQR(key: string): Promise<void> {
     if (!key) return
     qrKey = key
@@ -134,7 +133,7 @@
       const v = await StartSession(selectedIp)
       activeInterfaceName = v.interfaceName ?? ''; activeAddress = v.address ?? ''
       await fetchQR(v.key)
-      await refresh()
+      refresh()
     } catch (err) {
       report(err)
     } finally {
@@ -235,6 +234,7 @@
     const id = setInterval(refresh, 800)
     OnFileDrop(handleDrop, true)
     return () => {
+      disposed = true
       clearInterval(id)
       OnFileDropOff()
     }
