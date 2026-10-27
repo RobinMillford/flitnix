@@ -193,8 +193,11 @@ input:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .file-item__size { color: var(--text-muted); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
 .source-check {
   flex: none;
-  width: 1.15rem;
-  height: 1.15rem;
+  /* 1.5rem = 24 CSS px, the smallest pointer target WCAG 2.2 SC 2.5.8
+     (Target Size Minimum) allows, and a comfortable thumb target for a
+     selection control on a phone. It was 1.15rem, below that floor. */
+  width: 1.5rem;
+  height: 1.5rem;
   margin: 0;
   accent-color: var(--accent);
   cursor: pointer;

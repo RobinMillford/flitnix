@@ -139,11 +139,23 @@
 
   // The desktop is unreachable right now. This is transient: the established
   // session is kept, transfers stay as they are, and polling retries.
+  //
+  // Each polling loop reports for itself. An upload batch poll (1.2 s, backing
+  // off to 5 s) and a download progress poll (0.5 s) run at the same time, so
+  // one shared flag let a single successful download poll clear the banner the
+  // failing batch poll had just raised — and the reverse. The banner stays up
+  // while any loop reports the desktop unreachable, and clears when the last
+  // of them gets through again.
   var reconnecting = false;
-  function setReconnecting(on) {
-    if (appState.ended || on === reconnecting) return;
-    reconnecting = on;
-    if (on) setStatus("reconnecting", "Lost contact with the desktop — retrying…");
+  var unreachable = {};
+  function setReconnecting(on, who) {
+    if (appState.ended) return;
+    if (on) unreachable[who] = true;
+    else delete unreachable[who];
+    var lost = Object.keys(unreachable).length > 0;
+    if (lost === reconnecting) return;
+    reconnecting = lost;
+    if (lost) setStatus("reconnecting", "Lost contact with the desktop — retrying…");
     else setStatus("ready", "Connected — pick files to send or download the shared ones");
   }
 
@@ -461,7 +473,7 @@
     api("/api/batches/" + encodeURIComponent(activeBatch.id)).then(function (batch) {
       if (!activeBatch || appState.ended) return;
       activeBatch.failures = 0;
-      setReconnecting(false);
+      setReconnecting(false, "batch");
       batch.items.forEach(function (item) {
         var job = activeBatch.jobs[item.sequence];
         if (!job) return;
@@ -518,7 +530,7 @@
       // session and the queue, show that we are reconnecting, and retry with
       // a bounded backoff. A real session end arrives as a 401 above.
       activeBatch.failures += 1;
-      setReconnecting(true);
+      setReconnecting(true, "batch");
       var batch = activeBatch;
       waitThen(batch, backoffMs(batch.failures), pollBatch);
     });
@@ -731,11 +743,16 @@
       if (appState.ended) return;
       api("/api/download-progress/" + encodeURIComponent(id)).then(function (p) {
         failures = 0;
-        setReconnecting(false);
+        setReconnecting(false, "download");
         if (p.state === "failed" || p.state === "expired") {
           removeDownloadFrame(id);
+          // Report the reason on the list's status line, then let the list
+          // reload into its own state after the message has been read. Without
+          // the reload the failure copy stayed above a populated file list for
+          // the rest of the session, contradicting every later download.
           filesEmptyEl.hidden = false;
           filesEmptyEl.textContent = "Download failed: " + (p.error || "source unavailable");
+          setTimeout(function () { if (!appState.ended) refreshFiles(); }, 3500);
           return;
         }
         if (p.state === "completed") { removeDownloadFrame(id); return; }
@@ -744,7 +761,10 @@
         if (appState.ended || (err && err.silent)) return;
         if (err && err.status === 404) return; // record already cleaned up
         failures += 1;
-        if (failures >= MAX_PROGRESS_FAILURES) return;
+        if (failures >= MAX_PROGRESS_FAILURES) {
+          setReconnecting(false, "download");
+          return;
+        }
         setTimeout(tick, backoffMs(failures));
       });
     }

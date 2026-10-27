@@ -38,6 +38,7 @@
   let activeAddress = ''
   let networkChooserOpen = false
   let networkRefreshGeneration = 0
+  let refreshGeneration = 0
   const SESSION_PORT = '43821'
 
   function stringOfError(err: unknown): string {
@@ -60,11 +61,18 @@
     return serverAddress || (activeAddress ? `${activeAddress}:${SESSION_PORT}` : `…:${SESSION_PORT}`)
   }
   async function refresh(): Promise<void> {
+    // One refresh is ten independent IPC reads, so two of them overlap: the
+    // 800 ms poll starts a round whether or not the previous one finished, and
+    // every decision/cancel also refreshes on completion. A reply from an
+    // older round must never be committed after a newer one, or the panels
+    // walk backwards (progress drops, a finished batch turns active again).
+    const generation = ++refreshGeneration
     try {
       const [s, p, u, d, f, sourceList, dir, addr, b, allBatches] = await Promise.all([
         ListSessions(), ListPendingUploads(), RecentUploads(), RecentDownloads(),
         ListSharedFiles(), ListSharedSources(), ReceiveDirectory(), ServerAddress(), ListPendingBatches(), ListBatches()
       ])
+      if (generation !== refreshGeneration) return
       // Bound methods marshal empty (nil) Go slices as null. Treating them as
       // empty lists is required: a single null here would make the template
       // expressions below throw and abort the render flush, freezing the
@@ -75,7 +83,7 @@
       receiveDir = dir; serverAddress = addr ?? ''
       if (!sessions.length) { qrKey = ''; qrUrl = ''; qrError = '' }
       else if (!sessions.some((x) => x.key === qrKey)) fetchQR(sessions[0].key)
-    } catch (err) { errorText = stringOfError(err) }
+    } catch (err) { if (generation === refreshGeneration) errorText = stringOfError(err) }
   }
   async function fetchQR(key: string): Promise<void> {
     if (!key) return
