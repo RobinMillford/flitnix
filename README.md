@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="build/branding/flitnix-logo-original.png" alt="Flitnix" width="320">
+</p>
+
 # Flitnix
 
 Offline-first, high-speed local file transfer between a Fedora (Linux) desktop and a phone browser,
