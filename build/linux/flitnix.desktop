@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Flitnix
+GenericName=File Transfer
+Comment=Fast, private local file transfer between desktop and phone
+Exec=flitnix %U
+Icon=flitnix
+Terminal=false
+Categories=Network;FileTransfer;Utility;
+Keywords=file;transfer;offline;local;network;share;
+StartupWMClass=flitnix
+MimeType=x-scheme-handler/flitnix;
