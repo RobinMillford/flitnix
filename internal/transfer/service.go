@@ -52,6 +52,35 @@ var (
 
 	// ErrNoCapacity means a concurrency limit blocked the operation.
 	ErrNoCapacity = errors.New("transfer: too many concurrent uploads")
+
+	// ErrTooLateToCancel means a cancel request lost the race with
+	// publication: the received bytes are already (or are becoming) the
+	// published file, so the cancellation has no authority left. The record
+	// stays completed instead of being relabeled canceled, because a
+	// canceled record next to a published file would be a lie about disk.
+	ErrTooLateToCancel = errors.New("transfer: publication already decided")
+)
+
+// CancelAuthority is the outcome of Service.ReserveCancel: it says whether a
+// cancellation can still decide an upload's fate, or whether publication (or
+// the end of the upload) got there first.
+type CancelAuthority int
+
+const (
+	// CancelWins means the caller now owns the outcome: publication is
+	// refused from this point on, so the item can be canceled and no final
+	// file can appear.
+	CancelWins CancelAuthority = iota
+
+	// CancelLostToPublication means the stream had already claimed
+	// publication before the cancel arrived. The record ends completed and
+	// the caller must leave every other layer describing it as completed.
+	CancelLostToPublication
+
+	// CancelLostToTerminal means the upload already ended some other way
+	// (a failed stream, a rejection, or an earlier cancellation of the
+	// attempt). The upload's own state is authoritative.
+	CancelLostToTerminal
 )
 
 const (
@@ -189,7 +218,29 @@ type upload struct {
 	speed     float64
 	lastAt    time.Time
 	lastBytes int64
+
+	// pub records the single decision a finishing stream and a cancel
+	// contend for. It is taken under mu before any publication work, so
+	// exactly one of "the file is published" and "the upload is canceled"
+	// is ever chosen, and every layer can read the winner afterwards.
+	pub pubPhase
 }
+
+// pubPhase is the publication-versus-cancellation decision of one upload.
+type pubPhase uint8
+
+const (
+	// pubOpen means neither side has decided yet; both may still win.
+	pubOpen pubPhase = iota
+
+	// pubPublishing means the stream won: it claimed publication before any
+	// cancel could, so a later cancel can only report that it was too late.
+	pubPublishing
+
+	// pubCancelReserved means a cancel won: publication is refused from now
+	// on, so no final file can exist for this attempt.
+	pubCancelReserved
+)
 
 // snapshotLocked copies the record; the caller must already hold u.mu.
 func (u *upload) snapshotLocked() Upload {
@@ -553,6 +604,31 @@ func (s *Service) SubmitContent(id, sessionKey string, body io.Reader, onProgres
 		return ContentResult{}, fmt.Errorf("%s: %w", u.name, serr)
 	}
 
+	// The bytes are in. Publication and cancellation contend for exactly one
+	// decision, and it is taken here, under the record lock, before any
+	// publishing work: a cancel that already reserved the outcome refuses
+	// publication (nothing is linked into place), while a stream that claims
+	// it first makes every later cancel a pure "too late" report. Because
+	// both sides take this decision under the same mutex, the record and the
+	// filesystem cannot disagree afterwards.
+	u.mu.Lock()
+	switch u.pub {
+	case pubCancelReserved:
+		u.state = StateCanceled
+		u.reason = "canceled"
+		u.sink = nil
+		u.mu.Unlock()
+		_ = sink.Abort()
+		return ContentResult{}, fmt.Errorf("%w: canceled before publication", ErrCanceled)
+	case pubPublishing:
+		// Unreachable: only the stream that wrote the body calls this, once.
+		u.mu.Unlock()
+		_ = sink.Abort()
+		return ContentResult{}, fmt.Errorf("%w: publication already under way", ErrAlreadyDecided)
+	}
+	u.pub = pubPublishing
+	u.mu.Unlock()
+
 	final, cerr := sink.Commit()
 	u.mu.Lock()
 	u.sink = nil
@@ -575,6 +651,53 @@ func (s *Service) SubmitContent(id, sessionKey string, body io.Reader, onProgres
 	u.published = final
 	u.mu.Unlock()
 	return ContentResult{Written: result.Written, SHA256: result.HexSHA256(), Path: final}, nil
+}
+
+// ReserveCancel decides one upload's contest between cancellation and
+// publication without publishing or aborting anything. It must be called
+// before a cancellation is propagated to the batch coordinator: the decision
+// is what tells the caller whether the item may still be described as
+// canceled, and it is taken under the same record lock the finishing stream
+// uses to claim publication, so no window is left between the two.
+//
+// CancelWins means the caller owns the outcome: from now on publication is
+// refused, so the item must be canceled and Cancel should finish the abort.
+// The other authorities mean the upload already ended; the caller must not
+// relabel it, and the upload's own state is what every layer should show.
+func (s *Service) ReserveCancel(id string) (CancelAuthority, error) {
+	u, err := s.lookup(id, "")
+	if err != nil {
+		return CancelLostToTerminal, err
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	publishing := u.pub == pubPublishing
+	switch u.state {
+	case StateCompleted:
+		return CancelLostToPublication, fmt.Errorf("%w: the file is already published", ErrTooLateToCancel)
+	case StateFailed, StateRejected:
+		return CancelLostToTerminal, fmt.Errorf("%w: the upload already ended", ErrTooLateToCancel)
+	case StateCanceled:
+		// Reading canceled is not enough on its own: a cancel that landed
+		// inside the publishing window set this state while the stream was
+		// already linking the file into place, and the record is about to
+		// read completed. Only a cancel taken before publication decided
+		// anything owns the outcome.
+		if publishing {
+			return CancelLostToPublication, fmt.Errorf("%w: publication is already under way", ErrTooLateToCancel)
+		}
+		return CancelWins, nil
+	}
+	if publishing {
+		return CancelLostToPublication, fmt.Errorf("%w: publication is already under way", ErrTooLateToCancel)
+	}
+	if u.pub == pubCancelReserved {
+		// A concurrent cancel already reserved the outcome; asserting it
+		// again is a safe no-op.
+		return CancelWins, nil
+	}
+	u.pub = pubCancelReserved
+	return CancelWins, nil
 }
 
 // Cancel terminates a pending, approved, or streaming upload. An approved

@@ -395,10 +395,11 @@
       job.cancelRequested = true;
       job.phase = "canceling";
       paint(job);
-      // An active PUT is deliberately not aborted here: the server's cancel
-      // releases the lease and aborts the sink itself, so the DELETE wins the
-      // race and the rest of the batch is untouched. Aborting first could
-      // surface as a stream failure and end the whole batch.
+      // An active PUT is deliberately not aborted here: the server orders the
+      // cancel against publication itself, so it either releases the lease and
+      // aborts the sink, or answers 409 because the bytes were already
+      // published. Aborting first could surface as a stream failure and end
+      // the whole batch; the DELETE's answer is the only authority.
       cancelDeclaredItem(job, 1);
       return;
     }

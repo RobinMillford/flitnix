@@ -541,6 +541,14 @@ func handleBatchStatus(svcs *Services) http.HandlerFunc {
 // withdrawn after the coordinator lock is released: a queued record has no
 // part file, and an active stream's sink is aborted by the cancellation
 // callback, leaving no pin, record or temporary file behind.
+//
+// A withdrawal can arrive while the item's bytes are being published. The
+// upload record is the only place where those two decisions are ordered, so
+// the request asks it first (ReserveCancel) and only cancels the coordinator
+// item if the cancel actually won. An item that was already published keeps
+// its completed state, its completed record and its file, and the phone is
+// answered 409 so it refreshes into that authoritative snapshot instead of
+// showing a cancellation that the receive folder contradicts.
 func handleBatchItemCancel(svcs *Services) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sess := sessionFrom(r)
@@ -549,11 +557,32 @@ func handleBatchItemCancel(svcs *Services) http.HandlerFunc {
 			return
 		}
 		batchID, itemID := r.PathValue("id"), r.PathValue("itemID")
+		var contentID string
+		if id, idErr := svcs.Coordinator.ItemContentID(sess.Key(), batchID, itemID); idErr == nil {
+			contentID = id
+		}
+		if contentID != "" {
+			authority, err := svcs.Transfers.ReserveCancel(contentID)
+			switch {
+			case errors.Is(err, transfer.ErrUploadNotFound):
+				// The record was already pruned, so nothing of its own is
+				// publishing: the batch item is the only authority left.
+			case authority != transfer.CancelWins:
+				// Publication (or the end of the upload) already decided this
+				// item. Leave every layer describing that outcome: rewriting
+				// the coordinator item now would contradict the file.
+				writeError(w, http.StatusConflict, cancelRefusal(authority, err))
+				return
+			case err != nil:
+				writeBatchError(w, err)
+				return
+			}
+		}
 		if err := svcs.Coordinator.CancelItem(sess.Key(), batchID, itemID); err != nil {
 			writeBatchError(w, err)
 			return
 		}
-		if contentID, idErr := svcs.Coordinator.ItemContentID(sess.Key(), batchID, itemID); idErr == nil {
+		if contentID != "" {
 			_ = svcs.Transfers.Cancel(contentID)
 		}
 		view, err := svcs.Coordinator.GetBatch(sess.Key(), batchID)
@@ -563,6 +592,20 @@ func handleBatchItemCancel(svcs *Services) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, view)
 	}
+}
+
+// cancelRefusal words the 409 that a withdrawal arriving after its item's
+// bytes were already published (or after the upload ended another way) gets.
+// Both cases use the existing error body shape, so the phone's existing
+// "refresh and show the authoritative snapshot" path handles them unchanged.
+func cancelRefusal(authority transfer.CancelAuthority, err error) string {
+	if authority == transfer.CancelLostToPublication {
+		return "the file was already received; it cannot be canceled"
+	}
+	if err != nil {
+		return "the upload has already ended"
+	}
+	return "batch item is not eligible"
 }
 
 func handleBatchContent(svcs *Services, stall time.Duration) http.HandlerFunc {
@@ -617,6 +660,20 @@ func handleBatchContent(svcs *Services, stall time.Duration) http.HandlerFunc {
 					shortKey(sess.Key()), shortID(itemID), lastMilestone*25)
 			}
 		})
+		if errors.Is(streamErr, transfer.ErrCanceled) {
+			// The upload record was withdrawn while this stream owned it, so
+			// the cancellation is the intended outcome rather than a fault:
+			// keep the item canceled instead of failing the whole batch. If
+			// the withdrawal already reached the coordinator this is the
+			// idempotent no-op; if this path gets there first, it performs the
+			// cancellation the request asked for (and that later request then
+			// finds the item already canceled).
+			_ = svcs.Coordinator.CancelItem(sess.Key(), batchID, itemID)
+			diagnose(svcs, "batch item canceled session=%s item=%s bytes=%d elapsed=%s",
+				shortKey(sess.Key()), shortID(itemID), res.Written, time.Since(start))
+			writeUploadStreamError(w, streamErr)
+			return
+		}
 		if streamErr != nil {
 			failBatch(svcs, sess.Key(), lease, streamErr)
 			diagnose(svcs, "batch item failed session=%s item=%s bytes=%d reason=%s elapsed=%s",

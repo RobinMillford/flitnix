@@ -98,6 +98,14 @@ after unlocking. Session close is idempotent, prevents future claims and
 cancels unfinished work. Application shutdown applies the same cancellation
 policy to every session.
 
+An item's bytes are published at most once, and publication and cancellation
+contend for a single decision taken under the upload record's lock before any
+publishing work. Whichever side takes it first wins, and the other is refused
+instead of being reported as a second, contradictory outcome. A withdrawal that
+wins makes the stream discard its temporary data, so no final file can appear;
+a withdrawal that arrives after publication has been claimed is answered 409,
+and the item keeps its completed state, its completed record and its file.
+
 Aggregate transferred bytes are maintained incrementally. An update is an
 absolute item byte count, must be non-negative and no greater than the
 declared size, and may not move backward. Repeating a count is idempotent.
@@ -201,7 +209,9 @@ and removed on unmount.
 - A content stream that fails or is interrupted ends its batch as failed
   (the failed item keeps its error, unstarted items are canceled, no partial
   bytes are counted) without pausing the session queue; the phone recovers by
-  declaring a new batch. A desktop cancel stays canceled.
+  declaring a new batch. A cancellation is not a failure: an item whose upload
+  record was withdrawn ends canceled, its partial bytes are discarded, and its
+  siblings keep going. A desktop cancel stays canceled.
 - Sessions are pinned for the life of an upload or download stream, and the
   idle window restarts when the stream ends. Idle expiry still applies to a
   session with no live stream and releases its pending and approved records.
