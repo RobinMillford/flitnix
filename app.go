@@ -196,6 +196,7 @@ func NewApp() (*App, error) {
 func (a *App) releaseSession(key string) {
 	a.transfers.CancelSession(key)
 	_ = a.coordinator.CloseSession(key)
+	a.discardEmptyRoots(key)
 	a.downloads.CancelSession(key)
 	for _, sf := range a.registry.ListSession(key) {
 		a.registry.Remove(sf.ID)
@@ -250,6 +251,7 @@ func (a *App) shutdown(ctx context.Context) {
 	for _, s := range a.sessions.ActiveSessions() {
 		a.transfers.CancelSession(s.Key())
 		_ = a.coordinator.CloseSession(s.Key())
+		a.discardEmptyRoots(s.Key())
 		a.downloads.CancelSession(s.Key())
 	}
 	a.sessions.Close()
@@ -513,6 +515,7 @@ func (a *App) EndSession(key string) error {
 	fmt.Fprintf(os.Stderr, "flitnix: session %s ending at the user's request: explicit_stop\n", shortKey(key))
 	a.transfers.CancelSession(key)
 	_ = a.coordinator.CloseSession(key)
+	a.discardEmptyRoots(key)
 	a.downloads.CancelSession(key)
 	for _, sf := range a.registry.ListSession(key) {
 		a.registry.Remove(sf.ID)
@@ -674,6 +677,40 @@ func (a *App) cancelContent(ids []string) {
 	}
 }
 
+// discardEmptyRoot removes the receive directory a folder batch reserved for
+// itself when that batch will never publish into it. AllocateFolderRoot
+// creates the root with mkdir before the item records exist (that is what
+// makes the reservation atomic and collision-safe), so a batch that is
+// rejected, canceled or ended with its session used to leave an empty
+// directory named after the sender's folder in the user's receive directory
+// forever — the same abandoned-root leak that batch-creation failure already
+// cleans up, one state later.
+//
+// os.Remove refuses a non-empty directory, so a root that received even one
+// published file is left untouched; roots are reserved uniquely per batch, so
+// this can never remove a directory another batch owns. A root that is
+// already gone is not an error.
+func (a *App) discardEmptyRoot(v transfer.BatchView) {
+	if v.Kind != transfer.BatchKindFolder || v.RootName == "" {
+		return
+	}
+	_ = a.store.DiscardFolderRoot(v.RootName)
+}
+
+// discardEmptyRoots applies discardEmptyRoot to every folder batch a session
+// ever owned. It is the session-ending counterpart of discardEmptyRoot and
+// must run after CloseSession, because a closed session's records are only
+// reachable through the read-only history projection.
+func (a *App) discardEmptyRoots(key string) {
+	batches, ok := a.coordinator.SessionHistory(key)
+	if !ok {
+		return
+	}
+	for _, v := range batches {
+		a.discardEmptyRoot(v)
+	}
+}
+
 // ApproveBatch approves a pending batch exactly once. The batch is the only
 // approval authority for its items: their upload records are decided together,
 // atomically, and only then does the coordinator release the batch to the
@@ -754,6 +791,9 @@ func (a *App) RejectBatch(id string) (BatchView, error) {
 		_ = a.transfers.DecideBatchItems(ids, false)
 		a.cancelContent(ids)
 	}
+	// The root was reserved before the desktop decided; a rejected batch
+	// never publishes into it, so it must not stay on disk.
+	a.discardEmptyRoot(v)
 	return batchView(v), nil
 }
 
@@ -772,6 +812,10 @@ func (a *App) CancelBatch(id string) error {
 	if ids, idErr := a.batchContentIDs(key, v); idErr == nil {
 		a.cancelContent(ids)
 	}
+	// Streams are aborted above, so a folder root that received nothing is
+	// now empty and can be removed; one that published a file is non-empty
+	// and os.Remove refuses it.
+	a.discardEmptyRoot(v)
 	return nil
 }
 
