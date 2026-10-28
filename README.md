@@ -81,6 +81,9 @@ Go tests follow the standard package-local layout:
   `tests/e2e/` when they do not belong to one package.
 - Reusable test fixtures belong under `tests/fixtures/`.
 
+For a full directory inventory, subsystem test map, and execution cheatsheet, see the
+[Test Suite Index & Organization Guide](tests/README.md).
+
 Do not move package tests into a centralized directory or expose production internals solely to
 make them testable. This keeps `go test ./...`, package ownership, and standard Go tooling working
 without special configuration.
