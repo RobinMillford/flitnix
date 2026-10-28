@@ -1,14 +1,14 @@
 <#
 .SYNOPSIS
     Flitnix Windows Installer Script
-    https://github.com/itsyamin/flitnix
+    https://github.com/RobinMillford/flitnix
 
 .DESCRIPTION
     Downloads and installs the latest or specified version of Flitnix on Windows x64.
     Performs integrity validation against SHA256SUMS.txt prior to execution.
 
 .EXAMPLE
-    irm https://raw.githubusercontent.com/itsyamin/flitnix/main/install.ps1 | iex
+    irm https://raw.githubusercontent.com/RobinMillford/flitnix/main/install.ps1 | iex
 
 .EXAMPLE
     .\install.ps1 -Version "0.1.0" -DryRun
@@ -36,7 +36,7 @@ if ($Help) {
     exit 0
 }
 
-$Repo = "itsyamin/flitnix"
+$Repo = "RobinMillford/flitnix"
 $BaseUrl = if ($env:FLITNIX_BASE_URL) { $env:FLITNIX_BASE_URL } else { "https://github.com/$Repo" }
 $DefaultVersion = "0.1.0"
 

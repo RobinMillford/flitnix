@@ -29,7 +29,7 @@ If you discover a security vulnerability within Flitnix, please do **NOT** open 
 Instead, please report the vulnerability confidentially:
 
 - **Email**: Send details to RobinMillford at [issan.yamin@gmail.com](mailto:issan.yamin@gmail.com) with the subject `[SECURITY] Flitnix Vulnerability Report`.
-- **GitHub Security Advisory**: Alternatively, you can submit a private advisory through GitHub Security Advisories at `https://github.com/itsyamin/flitnix/security/advisories/new`.
+- **GitHub Security Advisory**: Alternatively, you can submit a private advisory through GitHub Security Advisories at `https://github.com/RobinMillford/flitnix/security/advisories/new`.
 
 Please include:
 - A description of the issue and potential impact.

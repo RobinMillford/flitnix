@@ -10,11 +10,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/itsyamin/flitnix/actions/workflows/ci.yml">
-    <img src="https://github.com/itsyamin/flitnix/actions/workflows/ci.yml/badge.svg" alt="CI Status">
+  <a href="https://github.com/RobinMillford/flitnix/actions/workflows/ci.yml">
+    <img src="https://github.com/RobinMillford/flitnix/actions/workflows/ci.yml/badge.svg" alt="CI Status">
   </a>
-  <a href="https://github.com/itsyamin/flitnix/releases">
-    <img src="https://img.shields.io/github/v/release/itsyamin/flitnix?color=0ea5e9" alt="Latest Release">
+  <a href="https://github.com/RobinMillford/flitnix/releases">
+    <img src="https://img.shields.io/github/v/release/RobinMillford/flitnix?color=0ea5e9" alt="Latest Release">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0">
@@ -53,12 +53,12 @@ Flitnix combines the performance and concurrency safety of Go with a modern Svel
 
 #### Linux and macOS (POSIX sh)
 ```bash
-curl -fsSL https://raw.githubusercontent.com/itsyamin/flitnix/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/RobinMillford/flitnix/main/install.sh | sh
 ```
 
 *Inspect-first option:*
 ```bash
-curl -fsSL https://raw.githubusercontent.com/itsyamin/flitnix/main/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/RobinMillford/flitnix/main/install.sh -o install.sh
 less install.sh
 sh install.sh
 ```
@@ -68,12 +68,12 @@ The installer automatically detects your operating system, CPU architecture, and
 #### Windows (PowerShell)
 Open PowerShell and run:
 ```powershell
-irm https://raw.githubusercontent.com/itsyamin/flitnix/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/RobinMillford/flitnix/main/install.ps1 | iex
 ```
 
 *Inspect-first option:*
 ```powershell
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/itsyamin/flitnix/main/install.ps1 -OutFile install.ps1
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/RobinMillford/flitnix/main/install.ps1 -OutFile install.ps1
 Get-Content install.ps1 | more
 .\install.ps1
 ```
@@ -82,7 +82,7 @@ Get-Content install.ps1 | more
 
 ### Manual Downloads
 
-Official standalone binaries and packages are available on the [Releases page](https://github.com/itsyamin/flitnix/releases):
+Official standalone binaries and packages are available on the [Releases page](https://github.com/RobinMillford/flitnix/releases):
 
 | Operating System | Package Format | Architecture | Description |
 | :--- | :--- | :--- | :--- |

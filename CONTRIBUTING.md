@@ -17,7 +17,7 @@ Thank you for your interest in contributing to Flitnix! Flitnix is focused on hi
 
 1. Fork and clone the repository:
    ```bash
-   git clone https://github.com/itsyamin/flitnix.git
+   git clone https://github.com/RobinMillford/flitnix.git
    cd flitnix
    ```
 2. Install frontend dependencies:
