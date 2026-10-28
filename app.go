@@ -694,6 +694,9 @@ func (a *App) discardEmptyRoot(v transfer.BatchView) {
 	if v.Kind != transfer.BatchKindFolder || v.RootName == "" {
 		return
 	}
+	if v.State == transfer.BatchStateTransferring {
+		return
+	}
 	_ = a.store.DiscardFolderRoot(v.RootName)
 }
 
@@ -804,6 +807,17 @@ func (a *App) CancelBatch(id string) error {
 	key, err := a.findBatchSession(id)
 	if err != nil {
 		return err
+	}
+	if before, bErr := a.coordinator.GetBatch(key, id); bErr == nil {
+		for _, item := range before.Items {
+			if item.State == transfer.ItemStateCompleted || item.State == transfer.ItemStateCanceled ||
+				item.State == transfer.ItemStateRejected || item.State == transfer.ItemStateFailed {
+				continue
+			}
+			if contentID, idErr := a.coordinator.ItemContentID(key, id, item.ID); idErr == nil && contentID != "" {
+				_, _ = a.transfers.ReserveCancel(contentID)
+			}
+		}
 	}
 	v, err := a.coordinator.CancelBatch(key, id)
 	if err != nil {

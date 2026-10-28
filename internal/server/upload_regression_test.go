@@ -420,6 +420,15 @@ func TestSlowContinuousUploadExceedsStallWindow(t *testing.T) {
 			took, stallWindow)
 	}
 
+	// Wind down the poller now that streaming is complete so its concurrent
+	// reads of batch.ID do not race the final unmarshal below.
+	cancel()
+	select {
+	case <-pollDone:
+	case <-time.After(2 * time.Second):
+		t.Error("batch poll goroutine did not exit")
+	}
+
 	// The batch completed with exact accounting and a clean drive.
 	rec = env.do(http.MethodGet, "/api/batches/"+batch.ID, token, nil)
 	if rec.Code != http.StatusOK {
@@ -432,14 +441,6 @@ func TestSlowContinuousUploadExceedsStallWindow(t *testing.T) {
 		t.Fatalf("batch = %+v, want completed with %d bytes", batch, 5*size)
 	}
 
-	// Wind down cleanly: stop the poller first so no late t.Error can
-	// race the test end, then drain the server and check Serve's exit.
-	cancel()
-	select {
-	case <-pollDone:
-	case <-time.After(2 * time.Second):
-		t.Error("batch poll goroutine did not exit")
-	}
 	stop()
 	awaitServeReturn(t, errc)
 }

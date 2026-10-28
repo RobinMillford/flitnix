@@ -55,7 +55,8 @@ type coordinatorSession struct {
 
 type activeLease struct {
 	TransferLease
-	cancel context.CancelFunc
+	cancel     context.CancelFunc
+	publishing bool
 }
 
 type coordinatorBatch struct {
@@ -385,14 +386,40 @@ func (c *Coordinator) UpdateItemProgress(sessionKey string, lease TransferLease,
 	return nil
 }
 
+// MarkItemPublishing records that an active item has reserved its publication
+// decision. Publication is irreversible from this point on: a cancel request
+// that arrives afterwards cannot claim it can prevent publication, and the
+// in-flight stream owns settling the terminal state.
+func (c *Coordinator) MarkItemPublishing(sessionKey string, lease TransferLease) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	session, err := c.sessionForOperationLocked(sessionKey)
+	if err != nil {
+		return err
+	}
+	if !sameLease(session.active, lease) {
+		return ErrLeaseInvalid
+	}
+	session.active.publishing = true
+	return nil
+}
+
 // CompleteItem finalizes a successful lease. A stream must have reported the
 // complete declared size first.
 func (c *Coordinator) CompleteItem(sessionKey string, lease TransferLease, sha256 string) (BatchView, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	session, err := c.sessionForOperationLocked(sessionKey)
-	if err != nil {
-		return BatchView{}, err
+	session := c.sessions[sessionKey]
+	if session == nil {
+		return BatchView{}, ErrWrongSession
+	}
+	if session.closed || c.closed {
+		if session.active == nil || !session.active.publishing || !sameLease(session.active, lease) {
+			if c.closed {
+				return BatchView{}, ErrCoordinatorClosed
+			}
+			return BatchView{}, ErrSessionClosed
+		}
 	}
 	if !sameLease(session.active, lease) {
 		return BatchView{}, ErrLeaseInvalid
@@ -422,9 +449,17 @@ func (c *Coordinator) FailItem(sessionKey string, lease TransferLease, transferE
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	session, err := c.sessionForOperationLocked(sessionKey)
-	if err != nil {
-		return BatchView{}, err
+	session := c.sessions[sessionKey]
+	if session == nil {
+		return BatchView{}, ErrWrongSession
+	}
+	if session.closed || c.closed {
+		if session.active == nil || !session.active.publishing || !sameLease(session.active, lease) {
+			if c.closed {
+				return BatchView{}, ErrCoordinatorClosed
+			}
+			return BatchView{}, ErrSessionClosed
+		}
 	}
 	if !sameLease(session.active, lease) {
 		return BatchView{}, ErrLeaseInvalid
@@ -436,6 +471,12 @@ func (c *Coordinator) FailItem(sessionKey string, lease TransferLease, transferE
 	item.State = ItemStateFailed
 	item.Error = transferErr.Error()
 	session.active = nil
+	if session.closed || c.closed {
+		if allItemsTerminal(batch.batch.Items) {
+			c.finishBatchLocked(batch)
+		}
+		return batch.batch.View(), nil
+	}
 	session.paused = true
 	batch.batch.State = BatchStateFailed
 	batch.batch.Error = item.Error
@@ -454,9 +495,17 @@ func (c *Coordinator) FailBatch(sessionKey string, lease TransferLease, transfer
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	session, err := c.sessionForOperationLocked(sessionKey)
-	if err != nil {
-		return BatchView{}, err
+	session := c.sessions[sessionKey]
+	if session == nil {
+		return BatchView{}, ErrWrongSession
+	}
+	if session.closed || c.closed {
+		if session.active == nil || !session.active.publishing || !sameLease(session.active, lease) {
+			if c.closed {
+				return BatchView{}, ErrCoordinatorClosed
+			}
+			return BatchView{}, ErrSessionClosed
+		}
 	}
 	if !sameLease(session.active, lease) {
 		return BatchView{}, ErrLeaseInvalid
@@ -483,8 +532,15 @@ func (c *Coordinator) FailBatch(sessionKey string, lease TransferLease, transfer
 		}
 	}
 	session.active = nil
-	batch.batch.State = BatchStateFailed
-	batch.batch.Error = failed.Error
+	if session.closed || c.closed {
+		c.finishBatchLocked(batch)
+	} else {
+		batch.batch.State = BatchStateFailed
+		batch.batch.Error = failed.Error
+		if batch.batch.CompletedAt.IsZero() {
+			batch.batch.CompletedAt = c.now()
+		}
+	}
 	return batch.batch.View(), nil
 }
 
@@ -527,6 +583,10 @@ func (c *Coordinator) CancelItem(sessionKey, batchID, itemID string) error {
 				err = ErrInvalidTransition
 			default:
 				if session.active != nil && session.active.ItemID == itemID {
+					if session.active.publishing {
+						err = ErrInvalidTransition
+						break
+					}
 					cancel = session.active.cancel
 					session.active = nil
 				}
@@ -691,6 +751,8 @@ func (c *Coordinator) QueueStatus(sessionKey string) (QueueSnapshot, error) {
 
 // CloseSession cancels and closes a session. It is idempotent and prevents
 // later claims or retries. The active cancellation callback runs unlocked.
+// An in-flight upload that has already reserved publication is allowed to
+// settle its terminal outcome without being relabeled canceled.
 func (c *Coordinator) CloseSession(sessionKey string) error {
 	var cancel context.CancelFunc
 	c.mu.Lock()
@@ -704,14 +766,24 @@ func (c *Coordinator) CloseSession(sessionKey string) error {
 		return nil
 	}
 	session.closed = true
+	var activePublishing bool
 	if session.active != nil {
-		cancel = session.active.cancel
-		session.active = nil
+		if session.active.publishing {
+			activePublishing = true
+		} else {
+			cancel = session.active.cancel
+			session.active = nil
+		}
 	}
 	for _, id := range session.batches {
 		if batch := c.batches[id]; batch != nil {
+			var batchHasPublishing bool
 			for i := range batch.batch.Items {
 				item := &batch.batch.Items[i]
+				if activePublishing && session.active != nil && session.active.ItemID == item.ID {
+					batchHasPublishing = true
+					continue
+				}
 				if item.State != ItemStateCompleted && item.State != ItemStateRejected && item.State != ItemStateCanceled {
 					if item.Transferred > 0 {
 						batch.batch.TransferredBytes -= item.Transferred
@@ -721,9 +793,14 @@ func (c *Coordinator) CloseSession(sessionKey string) error {
 					item.Error = "session closed"
 				}
 			}
-			if batch.batch.State != BatchStateCompleted && batch.batch.State != BatchStateRejected {
-				batch.batch.State = BatchStateCanceled
-				batch.batch.Error = "session closed"
+			if !batchHasPublishing {
+				if batch.batch.State != BatchStateCompleted && batch.batch.State != BatchStateRejected {
+					batch.batch.State = BatchStateCanceled
+					batch.batch.Error = "session closed"
+					if batch.batch.CompletedAt.IsZero() {
+						batch.batch.CompletedAt = c.now()
+					}
+				}
 			}
 		}
 	}
@@ -748,24 +825,43 @@ func (c *Coordinator) Close() {
 			continue
 		}
 		session.closed = true
-		if session.active != nil && session.active.cancel != nil {
-			cancels = append(cancels, session.active.cancel)
+		var activePublishing bool
+		if session.active != nil {
+			if session.active.publishing {
+				activePublishing = true
+			} else {
+				if session.active.cancel != nil {
+					cancels = append(cancels, session.active.cancel)
+				}
+				session.active = nil
+			}
 		}
-		session.active = nil
 		for _, id := range session.batches {
 			if batch := c.batches[id]; batch != nil {
+				var batchHasPublishing bool
 				for i := range batch.batch.Items {
 					item := &batch.batch.Items[i]
+					if activePublishing && session.active != nil && session.active.ItemID == item.ID {
+						batchHasPublishing = true
+						continue
+					}
 					if item.State != ItemStateCompleted && item.State != ItemStateRejected && item.State != ItemStateCanceled {
-						batch.batch.TransferredBytes -= item.Transferred
+						if item.Transferred > 0 {
+							batch.batch.TransferredBytes -= item.Transferred
+							item.Transferred = 0
+						}
 						item.State = ItemStateCanceled
-						item.Transferred = 0
 						item.Error = "coordinator closed"
 					}
 				}
-				if batch.batch.State != BatchStateCompleted && batch.batch.State != BatchStateRejected {
-					batch.batch.State = BatchStateCanceled
-					batch.batch.Error = "coordinator closed"
+				if !batchHasPublishing {
+					if batch.batch.State != BatchStateCompleted && batch.batch.State != BatchStateRejected {
+						batch.batch.State = BatchStateCanceled
+						batch.batch.Error = "coordinator closed"
+						if batch.batch.CompletedAt.IsZero() {
+							batch.batch.CompletedAt = c.now()
+						}
+					}
 				}
 			}
 		}
@@ -786,13 +882,18 @@ func (c *Coordinator) endBatch(sessionKey, batchID string, state BatchState, app
 			err = ErrInvalidTransition
 		} else {
 			session := c.sessions[sessionKey]
+			hasPublishing := false
 			for i := range batch.batch.Items {
 				item := &batch.batch.Items[i]
 				if session.active != nil && session.active.ItemID == item.ID {
+					if session.active.publishing {
+						hasPublishing = true
+						continue
+					}
 					cancel = session.active.cancel
 					session.active = nil
 				}
-				if item.State != ItemStateCompleted {
+				if item.State != ItemStateCompleted && item.State != ItemStateRejected && item.State != ItemStateCanceled && item.State != ItemStateFailed {
 					if item.Transferred > 0 {
 						batch.batch.TransferredBytes -= item.Transferred
 						item.Transferred = 0
@@ -801,13 +902,18 @@ func (c *Coordinator) endBatch(sessionKey, batchID string, state BatchState, app
 					item.Error = string(state)
 				}
 			}
-			batch.batch.State = state
 			if approval != "" {
 				batch.batch.ApprovalState = approval
 			}
-			batch.batch.Error = string(state)
 			if session.paused {
 				session.paused = false
+			}
+			if !hasPublishing {
+				batch.batch.State = state
+				batch.batch.Error = string(state)
+				if batch.batch.CompletedAt.IsZero() {
+					batch.batch.CompletedAt = c.now()
+				}
 			}
 			view = batch.batch.View()
 		}
@@ -929,18 +1035,27 @@ func allItemsCompleted(items []TransferItem) bool {
 	return true
 }
 
-// allItemsTerminal reports whether no item still has work to do. Canceled and
-// rejected items are terminal too: an intentional cancellation must not keep
-// a batch alive forever.
+// allItemsTerminal reports whether no item still has work to do. Canceled,
+// rejected and failed items are terminal too: an intentional cancellation must
+// not keep a batch alive forever.
 func allItemsTerminal(items []TransferItem) bool {
 	for _, item := range items {
 		switch item.State {
-		case ItemStateCompleted, ItemStateCanceled, ItemStateRejected:
+		case ItemStateCompleted, ItemStateCanceled, ItemStateRejected, ItemStateFailed:
 		default:
 			return false
 		}
 	}
 	return true
+}
+
+func hasFailedItem(items []TransferItem) bool {
+	for _, item := range items {
+		if item.State == ItemStateFailed {
+			return true
+		}
+	}
+	return false
 }
 
 // finishBatchLocked moves a batch to its terminal state once every item is
@@ -950,6 +1065,8 @@ func allItemsTerminal(items []TransferItem) bool {
 func (c *Coordinator) finishBatchLocked(batch *coordinatorBatch) {
 	if allItemsCompleted(batch.batch.Items) {
 		batch.batch.State = BatchStateCompleted
+	} else if hasFailedItem(batch.batch.Items) {
+		batch.batch.State = BatchStateFailed
 	} else {
 		batch.batch.State = BatchStateCanceled
 	}

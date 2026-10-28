@@ -652,13 +652,15 @@ func handleBatchContent(svcs *Services, stall time.Duration) http.HandlerFunc {
 			milestoneBytes = lease.DeclaredSize / 4
 		}
 		lastMilestone := int64(0)
-		res, streamErr := svcs.Transfers.SubmitContent(contentID, sess.Key(), body, func(up transfer.Upload) {
+		res, streamErr := svcs.Transfers.SubmitContentWithPublish(contentID, sess.Key(), body, func(up transfer.Upload) {
 			_ = svcs.Coordinator.UpdateItemProgress(sess.Key(), lease, up.Uploaded)
 			for lastMilestone < 3 && milestoneBytes > 0 && up.Uploaded >= (lastMilestone+1)*milestoneBytes {
 				lastMilestone++
 				diagnose(svcs, "batch item progress session=%s item=%s at=%d%%",
 					shortKey(sess.Key()), shortID(itemID), lastMilestone*25)
 			}
+		}, func() {
+			_ = svcs.Coordinator.MarkItemPublishing(sess.Key(), lease)
 		})
 		if errors.Is(streamErr, transfer.ErrCanceled) {
 			// The upload record was withdrawn while this stream owned it, so
