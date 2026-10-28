@@ -101,10 +101,28 @@ policy to every session.
 An item's bytes are published at most once, and publication and cancellation
 contend for a single decision taken under the upload record's lock before any
 publishing work. Whichever side takes it first wins, and the other is refused
-instead of being reported as a second, contradictory outcome. A withdrawal that
-wins makes the stream discard its temporary data, so no final file can appear;
-a withdrawal that arrives after publication has been claimed is answered 409,
-and the item keeps its completed state, its completed record and its file.
+instead of being reported as a second, contradictory outcome. This policy is
+enforced consistently across item cancellation, whole-batch cancellation,
+session expiry, explicit session end, network changes, and application shutdown:
+
+- **Publication has not been reserved**: cancellation wins. The item does not
+  publish a final file, temporary resources are cleaned up, and cancellation
+  remains distinct from an upload failure.
+- **Publication has been reserved**: a cancellation request arriving too late
+  cannot prevent publication. If the filesystem commit succeeds, the item and
+  record end completed, the final file remains intact, byte counts and completed
+  counts are accurate, the batch does not relabel the item canceled, and retained
+  history preserves the successful outcome. If the commit fails, the item ends
+  failed without claiming publication.
+- **Whole-batch cancellation while an item is publishing**: all remaining items
+  whose publication has not been reserved are canceled, previously completed items
+  are preserved, and the batch remains nonterminal while the reserved publication
+  settles. Once all outcomes settle, the truthful terminal batch state and
+  history are recorded.
+- **Session teardown**: revokes tokens and prevents new authenticated operations,
+  while allowing in-flight publishing leases to settle their filesystem outcome
+  truthfully into closed session history without leaking session pins, callbacks,
+  or temporary files.
 
 Aggregate transferred bytes are maintained incrementally. An update is an
 absolute item byte count, must be non-negative and no greater than the

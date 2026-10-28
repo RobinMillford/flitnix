@@ -526,6 +526,13 @@ func (s *Service) DecideBatchItems(ids []string, approve bool) error {
 // every non-success path. onProgress, if non-nil, is invoked from the
 // streaming path as bytes land on disk.
 func (s *Service) SubmitContent(id, sessionKey string, body io.Reader, onProgress func(Upload)) (ContentResult, error) {
+	return s.SubmitContentWithPublish(id, sessionKey, body, onProgress, nil)
+}
+
+// SubmitContentWithPublish streams the body of an approved upload into the
+// receive directory. It invokes onPublish immediately after the publication
+// decision is taken under the record lock, before filesystem commit I/O begins.
+func (s *Service) SubmitContentWithPublish(id, sessionKey string, body io.Reader, onProgress func(Upload), onPublish func()) (ContentResult, error) {
 	if sessionKey == "" || body == nil {
 		return ContentResult{}, ErrWrongSession // content always requires a live session and a body
 	}
@@ -628,6 +635,10 @@ func (s *Service) SubmitContent(id, sessionKey string, body io.Reader, onProgres
 	}
 	u.pub = pubPublishing
 	u.mu.Unlock()
+
+	if onPublish != nil {
+		onPublish()
+	}
 
 	final, cerr := sink.Commit()
 	u.mu.Lock()
@@ -750,12 +761,18 @@ func (s *Service) CancelSession(sessionKey string) {
 	s.mu.Unlock()
 	for _, u := range targets {
 		u.mu.Lock()
+		if u.pub == pubPublishing {
+			u.mu.Unlock()
+			continue
+		}
 		switch u.state {
 		case StatePending, StateApproved:
+			u.pub = pubCancelReserved
 			u.state = StateCanceled
 			u.mu.Unlock()
 		case StateUploading:
 			sink := u.sink
+			u.pub = pubCancelReserved
 			u.state = StateCanceled
 			u.mu.Unlock()
 			if sink != nil {
