@@ -530,9 +530,11 @@ func (s *Service) SubmitContent(id, sessionKey string, body io.Reader, onProgres
 }
 
 // SubmitContentWithPublish streams the body of an approved upload into the
-// receive directory. It invokes onPublish immediately after the publication
-// decision is taken under the record lock, before filesystem commit I/O begins.
-func (s *Service) SubmitContentWithPublish(id, sessionKey string, body io.Reader, onProgress func(Upload), onPublish func()) (ContentResult, error) {
+// receive directory. It invokes onPublish under the record lock when publication
+// is claimed, before filesystem commit I/O begins. If onPublish reports an error
+// (such as a canceled lease or closed session), publication is refused and
+// the received data is discarded.
+func (s *Service) SubmitContentWithPublish(id, sessionKey string, body io.Reader, onProgress func(Upload), onPublish func() error) (ContentResult, error) {
 	if sessionKey == "" || body == nil {
 		return ContentResult{}, ErrWrongSession // content always requires a live session and a body
 	}
@@ -633,12 +635,20 @@ func (s *Service) SubmitContentWithPublish(id, sessionKey string, body io.Reader
 		_ = sink.Abort()
 		return ContentResult{}, fmt.Errorf("%w: publication already under way", ErrAlreadyDecided)
 	}
-	u.pub = pubPublishing
-	u.mu.Unlock()
 
 	if onPublish != nil {
-		onPublish()
+		if err := onPublish(); err != nil {
+			u.pub = pubCancelReserved
+			u.state = StateCanceled
+			u.reason = "canceled"
+			u.sink = nil
+			u.mu.Unlock()
+			_ = sink.Abort()
+			return ContentResult{}, fmt.Errorf("%w: canceled before publication: %v", ErrCanceled, err)
+		}
 	}
+	u.pub = pubPublishing
+	u.mu.Unlock()
 
 	final, cerr := sink.Commit()
 	u.mu.Lock()

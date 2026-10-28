@@ -659,8 +659,8 @@ func handleBatchContent(svcs *Services, stall time.Duration) http.HandlerFunc {
 				diagnose(svcs, "batch item progress session=%s item=%s at=%d%%",
 					shortKey(sess.Key()), shortID(itemID), lastMilestone*25)
 			}
-		}, func() {
-			_ = svcs.Coordinator.MarkItemPublishing(sess.Key(), lease)
+		}, func() error {
+			return svcs.Coordinator.MarkItemPublishing(sess.Key(), lease)
 		})
 		if errors.Is(streamErr, transfer.ErrCanceled) {
 			// The upload record was withdrawn while this stream owned it, so

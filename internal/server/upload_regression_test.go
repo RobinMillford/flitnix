@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -251,12 +252,12 @@ func TestLargeStreamQuarterMarkDiagnostics(t *testing.T) {
 // every delay, until exhausted. Each inter-chunk gap stays under the stall
 // window while the total run is comfortably longer than it.
 type pacedBody struct {
-	data   []byte
-	pos    int
-	chunk  int
-	delay  time.Duration
-	stop   chan struct{}
-	closed bool
+	data  []byte
+	pos   int
+	chunk int
+	delay time.Duration
+	stop  chan struct{}
+	once  sync.Once
 }
 
 func newPacedBody(data []byte, chunk int, delay time.Duration) *pacedBody {
@@ -285,14 +286,9 @@ func (p *pacedBody) Read(buf []byte) (int, error) {
 }
 
 func (p *pacedBody) Close() error {
-	select {
-	case <-p.stop:
-	default:
-		if !p.closed {
-			close(p.stop)
-			p.closed = true
-		}
-	}
+	p.once.Do(func() {
+		close(p.stop)
+	})
 	return nil
 }
 

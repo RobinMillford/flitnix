@@ -95,8 +95,8 @@ func TestCancelBatchAfterPublicationReservationPreservesCommittedFile(t *testing
 	if err := h.a.coordinator.UpdateItemProgress(key, l1, 4); err != nil {
 		t.Fatalf("progress 1: %v", err)
 	}
-	pub1, err := h.a.transfers.SubmitContentWithPublish(cid1, key, bytes.NewReader([]byte("1111")), nil, func() {
-		_ = h.a.coordinator.MarkItemPublishing(key, l1)
+	pub1, err := h.a.transfers.SubmitContentWithPublish(cid1, key, bytes.NewReader([]byte("1111")), nil, func() error {
+		return h.a.coordinator.MarkItemPublishing(key, l1)
 	})
 	if err != nil {
 		t.Fatalf("submit 1: %v", err)
@@ -238,8 +238,8 @@ func TestExplicitSessionEndDuringPublicationPreservesFileAndRetainedHistory(t *t
 	if err := h.a.coordinator.UpdateItemProgress(key, l0, 4); err != nil {
 		t.Fatalf("UpdateItemProgress: %v", err)
 	}
-	pub0, err := h.a.transfers.SubmitContentWithPublish(cid0, key, bytes.NewReader([]byte("spub")), nil, func() {
-		_ = h.a.coordinator.MarkItemPublishing(key, l0)
+	pub0, err := h.a.transfers.SubmitContentWithPublish(cid0, key, bytes.NewReader([]byte("spub")), nil, func() error {
+		return h.a.coordinator.MarkItemPublishing(key, l0)
 	})
 	if err != nil {
 		t.Fatalf("SubmitContent: %v", err)
@@ -306,8 +306,8 @@ func TestIdleExpiryAndNetworkChangePreservePublicationInvariant(t *testing.T) {
 
 		l, _ := h.a.coordinator.ClaimItem(key, b.ID, b.Items[0].ID)
 		_ = h.a.coordinator.UpdateItemProgress(key, l, 4)
-		pub, _ := h.a.transfers.SubmitContentWithPublish(cid, key, bytes.NewReader([]byte("idle")), nil, func() {
-			_ = h.a.coordinator.MarkItemPublishing(key, l)
+		pub, _ := h.a.transfers.SubmitContentWithPublish(cid, key, bytes.NewReader([]byte("idle")), nil, func() error {
+			return h.a.coordinator.MarkItemPublishing(key, l)
 		})
 
 		// Idle expiration fires releaseSession.
@@ -340,8 +340,8 @@ func TestIdleExpiryAndNetworkChangePreservePublicationInvariant(t *testing.T) {
 
 		l, _ := h.a.coordinator.ClaimItem(key, b.ID, b.Items[0].ID)
 		_ = h.a.coordinator.UpdateItemProgress(key, l, 4)
-		pub, _ := h.a.transfers.SubmitContentWithPublish(cid, key, bytes.NewReader([]byte("netw")), nil, func() {
-			_ = h.a.coordinator.MarkItemPublishing(key, l)
+		pub, _ := h.a.transfers.SubmitContentWithPublish(cid, key, bytes.NewReader([]byte("netw")), nil, func() error {
+			return h.a.coordinator.MarkItemPublishing(key, l)
 		})
 
 		// Network change triggers endAllSessions.
@@ -379,8 +379,8 @@ func TestShutdownDuringPublicationPreservesFileWithoutLeaks(t *testing.T) {
 
 	l, _ := h.a.coordinator.ClaimItem(key, b.ID, b.Items[0].ID)
 	_ = h.a.coordinator.UpdateItemProgress(key, l, 4)
-	pub, _ := h.a.transfers.SubmitContentWithPublish(cid, key, bytes.NewReader([]byte("shut")), nil, func() {
-		_ = h.a.coordinator.MarkItemPublishing(key, l)
+	pub, _ := h.a.transfers.SubmitContentWithPublish(cid, key, bytes.NewReader([]byte("shut")), nil, func() error {
+		return h.a.coordinator.MarkItemPublishing(key, l)
 	})
 
 	// Shutdown begins.
