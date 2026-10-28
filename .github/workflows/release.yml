@@ -32,7 +32,7 @@ jobs:
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev rpm
 
       - name: Install Wails CLI & nfpm
         run: |
@@ -54,6 +54,32 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           mkdir -p artifacts
           bash scripts/package-linux.sh "${VERSION}" "amd64" "artifacts"
+
+      - name: Validate Linux package metadata
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          RPM="artifacts/flitnix_${VERSION}_linux_amd64.rpm"
+          DEB="artifacts/flitnix_${VERSION}_linux_amd64.deb"
+
+          test -f "$RPM"
+          test -f "$DEB"
+
+          RPM_VERSION="$(rpm -qp --qf '%{VERSION}' "$RPM")"
+          test "$RPM_VERSION" = "$VERSION" || {
+            echo "Unexpected RPM version: $RPM_VERSION; expected $VERSION" >&2
+            exit 1
+          }
+
+          DEB_VERSION="$(dpkg-deb -f "$DEB" Version)"
+          case "$DEB_VERSION" in
+            "$VERSION"|"$VERSION"-*|"$VERSION"+*) ;;
+            *)
+              echo "Unexpected DEB version: $DEB_VERSION; expected $VERSION" >&2
+              exit 1
+              ;;
+          esac
+
+          echo "Package metadata verified: RPM=$RPM_VERSION DEB=$DEB_VERSION"
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1

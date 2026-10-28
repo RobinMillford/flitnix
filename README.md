@@ -14,7 +14,7 @@
     <img src="https://github.com/RobinMillford/flitnix/actions/workflows/ci.yml/badge.svg" alt="CI Status">
   </a>
   <a href="https://github.com/RobinMillford/flitnix/releases">
-    <img src="https://img.shields.io/github/v/release/RobinMillford/flitnix?color=0ea5e9" alt="Latest Release">
+    <img src="https://img.shields.io/github/v/release/RobinMillford/flitnix?cacheSeconds=300&color=0ea5e9" alt="Latest Release">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0">

@@ -5,6 +5,21 @@ VERSION="${1:-${VERSION:-0.1.0}}"
 ARCH="${2:-${ARCH:-amd64}}"
 DIST_DIR="${3:-dist}"
 
+# Normalize version (strip leading 'v' if present)
+VERSION="${VERSION#v}"
+
+# Validate VERSION
+if [ -z "${VERSION}" ] || ! [[ "${VERSION}" =~ ^[0-9]+(\.[0-9]+)*(-[a-zA-Z0-9.+~-]+)?$ ]]; then
+    echo "Error: Invalid or empty VERSION '${VERSION}'. VERSION must follow semantic version format." >&2
+    exit 1
+fi
+
+# Validate ARCH
+if [ -z "${ARCH}" ] || ! [[ "${ARCH}" =~ ^[a-zA-Z0-9_]+$ ]]; then
+    echo "Error: Invalid or empty ARCH '${ARCH}'." >&2
+    exit 1
+fi
+
 # Ensure build binary exists
 if [ ! -f "build/bin/flitnix" ]; then
     echo "Error: build/bin/flitnix does not exist. Run wails build first." >&2
@@ -13,7 +28,8 @@ fi
 
 mkdir -p "${DIST_DIR}"
 
-export VERSION ARCH
+export VERSION
+export ARCH
 
 echo "Packaging Linux releases for Flitnix v${VERSION} (${ARCH})..."
 
