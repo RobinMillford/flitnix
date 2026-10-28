@@ -46,6 +46,59 @@ log_error() {
     printf "\033[1;31m[ERROR]\033[0m %s\n" "$*" >&2
 }
 
+verify_installed_package() {
+    pkg_type="$1"
+    expected_ver="$2"
+    installed_ver=""
+    full_info=""
+
+    case "${pkg_type}" in
+        deb)
+            if command -v dpkg-query >/dev/null 2>&1; then
+                installed_ver="$(dpkg-query -W -f='${Version}\n' flitnix 2>/dev/null | tail -n 1 || true)"
+            elif command -v dpkg >/dev/null 2>&1; then
+                installed_ver="$(dpkg -s flitnix 2>/dev/null | grep -i '^Version:' | awk '{print $2}' | tail -n 1 || true)"
+            fi
+            full_info="flitnix ${installed_ver}"
+            # Strip debian epoch prefix (e.g. "1:") and revision suffix (e.g. "-1", "+...")
+            base_ver="${installed_ver#*:}"
+            base_ver="${base_ver%%-*}"
+            base_ver="${base_ver%%+*}"
+            ;;
+        rpm)
+            if command -v rpm >/dev/null 2>&1; then
+                installed_ver="$(rpm -q --qf '%{VERSION}\n' flitnix 2>/dev/null | tail -n 1 || true)"
+                full_info="$(rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' flitnix 2>/dev/null | tail -n 1 || true)"
+            fi
+            base_ver="${installed_ver}"
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+
+    if [ -z "${installed_ver}" ] || [ "${installed_ver}" = "package flitnix is not installed" ]; then
+        log_error "Package verification failed: flitnix package does not appear to be installed after package manager execution."
+        exit 1
+    fi
+
+    if [ "${base_ver}" != "${expected_ver}" ]; then
+        log_error "Installed package version mismatch!"
+        log_error "  Expected version:  ${expected_ver}"
+        log_error "  Installed version: ${full_info}"
+        log_error "The package manager reported success, but requested version ${expected_ver} is not installed (no-op or outdated package metadata)."
+        exit 1
+    fi
+
+    log_info "Verified installed package: ${full_info} matches target version ${expected_ver}."
+}
+
+# Test hook to directly verify installed packages
+if [ "${FLITNIX_TEST_VERIFY_ONLY:-0}" = "1" ]; then
+    verify_installed_package "$@"
+    exit 0
+fi
+
 show_help() {
     cat << EOF
 Flitnix Installer
@@ -290,6 +343,7 @@ if [ "${OS}" = "linux" ]; then
             else
                 run_elevated dpkg -i "${TMP_DIR}/${ASSET_NAME}"
             fi
+            verify_installed_package "deb" "${VERSION}"
             ;;
         rpm)
             log_info "Installing RPM package..."
@@ -300,6 +354,7 @@ if [ "${OS}" = "linux" ]; then
             else
                 run_elevated rpm -Uvh --replacepkgs "${TMP_DIR}/${ASSET_NAME}"
             fi
+            verify_installed_package "rpm" "${VERSION}"
             ;;
         *)
             log_info "Installing from tarball archive..."
