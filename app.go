@@ -496,9 +496,9 @@ func (a *App) SessionQR(key string) (string, error) {
 }
 
 // EndSession revokes the session identified by its non-secret key: its
-// uploads are canceled, its shared files unlisted and the token dies. When
-// the last session ends, all remaining shared files are forgotten and the
-// HTTP server stops.
+// uploads are canceled, its held download records are canceled with it, its
+// shared files unlisted and the token dies. When the last session ends, all
+// remaining shared files are forgotten and the HTTP server stops.
 func (a *App) EndSession(key string) error {
 	var target *session.Session
 	for _, s := range a.sessions.ActiveSessions() {
@@ -513,6 +513,7 @@ func (a *App) EndSession(key string) error {
 	fmt.Fprintf(os.Stderr, "flitnix: session %s ending at the user's request: explicit_stop\n", shortKey(key))
 	a.transfers.CancelSession(key)
 	_ = a.coordinator.CloseSession(key)
+	a.downloads.CancelSession(key)
 	for _, sf := range a.registry.ListSession(key) {
 		a.registry.Remove(sf.ID)
 	}
