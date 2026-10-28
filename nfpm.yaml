@@ -1,0 +1,46 @@
+name: "flitnix"
+arch: "${ARCH:-amd64}"
+platform: "linux"
+version: "${VERSION:-0.1.0}"
+section: "net"
+priority: "optional"
+maintainer: "RobinMillford <issan.yamin@gmail.com>"
+description: "Fast, private local file transfer between desktop and phone"
+vendor: "Flitnix"
+homepage: "https://github.com/itsyamin/flitnix"
+
+contents:
+  - src: ./build/bin/flitnix
+    dst: /usr/bin/flitnix
+    file_info:
+      mode: 0755
+  - src: ./build/linux/flitnix.desktop
+    dst: /usr/share/applications/flitnix.desktop
+    file_info:
+      mode: 0644
+  - src: ./build/linux/icons/hicolor/16x16/apps/flitnix.png
+    dst: /usr/share/icons/hicolor/16x16/apps/flitnix.png
+  - src: ./build/linux/icons/hicolor/24x24/apps/flitnix.png
+    dst: /usr/share/icons/hicolor/24x24/apps/flitnix.png
+  - src: ./build/linux/icons/hicolor/32x32/apps/flitnix.png
+    dst: /usr/share/icons/hicolor/32x32/apps/flitnix.png
+  - src: ./build/linux/icons/hicolor/48x48/apps/flitnix.png
+    dst: /usr/share/icons/hicolor/48x48/apps/flitnix.png
+  - src: ./build/linux/icons/hicolor/64x64/apps/flitnix.png
+    dst: /usr/share/icons/hicolor/64x64/apps/flitnix.png
+  - src: ./build/linux/icons/hicolor/128x128/apps/flitnix.png
+    dst: /usr/share/icons/hicolor/128x128/apps/flitnix.png
+  - src: ./build/linux/icons/hicolor/256x256/apps/flitnix.png
+    dst: /usr/share/icons/hicolor/256x256/apps/flitnix.png
+  - src: ./build/linux/icons/hicolor/512x512/apps/flitnix.png
+    dst: /usr/share/icons/hicolor/512x512/apps/flitnix.png
+
+overrides:
+  deb:
+    depends:
+      - libgtk-3-0
+      - libwebkit2gtk-4.1-0 | libwebkit2gtk-4.0-37
+  rpm:
+    depends:
+      - gtk3
+      - webkit2gtk4.1
