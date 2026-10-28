@@ -715,7 +715,8 @@ func TestCompletedItemSurvivesALaterItemFailure(t *testing.T) {
 
 	waitFor(t, "second item settles as failed", func() bool {
 		u, _ := env.trans.Get(ids[1])
-		return u.State == transfer.StateFailed
+		v, err := env.coord.GetBatch(key, batch.ID)
+		return u.State == transfer.StateFailed && err == nil && len(v.Items) >= 2 && v.Items[1].State == transfer.ItemStateFailed
 	})
 	if u, _ := env.trans.Get(ids[0]); u.State != transfer.StateCompleted {
 		t.Fatalf("first record = %q, want completed; finished work must keep its state", u.State)
