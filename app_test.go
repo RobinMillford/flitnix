@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/itsyamin/flitnix/internal/netenv"
+	"github.com/itsyamin/flitnix/internal/transfer"
 )
 
 // ---- synthetic-network fakes (mirrors of the netenv test helpers) ----
@@ -521,6 +522,33 @@ func TestEndSessionUnknownKey(t *testing.T) {
 	a := newTestApp(t)
 	if err := a.EndSession("no-such-key"); err == nil {
 		t.Fatal("unknown key must fail visibly")
+	}
+}
+
+func TestEndSessionCancelsPendingDownloadRecord(t *testing.T) {
+	// A granted download whose native navigation never redeemed it stays
+	// in the starting state for the grant lifetime. Idle expiry and a
+	// changed network cancel such a record ("session ended"); ending the
+	// session at the user's request must too, or the desktop keeps a
+	// phantom Active-transfers row that can never progress again.
+	a := newTestApp(t)
+	s, err := a.sessions.Create()
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := a.downloads.StartKind("<?>progress", "film.mkv", s.Key(), 2048, "archive"); err != nil {
+		t.Fatalf("StartKind: %v", err)
+	}
+	if err := a.EndSession(s.Key()); err != nil {
+		t.Fatalf("EndSession: %v", err)
+	}
+	list := a.RecentDownloads()
+	if len(list) != 1 {
+		t.Fatalf("RecentDownloads holds %d entries, want the one pending download", len(list))
+	}
+	if list[0].State != string(transfer.DownloadCanceled) {
+		t.Errorf("pending download after EndSession = state %q reason %q, want %q \"session ended\"",
+			list[0].State, list[0].Reason, transfer.DownloadCanceled)
 	}
 }
 
