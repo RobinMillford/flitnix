@@ -91,3 +91,9 @@ sh -n install.sh
 2. Make atomic, well-tested commits using conventional commit messages (e.g., `feat:`, `fix:`, `docs:`, `test:`, `refactor:`).
 3. Do not push unformatted files or break existing tests.
 4. Open a pull request against the `main` branch using the provided PR template.
+
+---
+
+## Licensing Terms
+
+By contributing to Flitnix, you agree that your contributions will be licensed under the [Apache License, Version 2.0](LICENSE) in accordance with Section 5 of the Apache-2.0 license terms.

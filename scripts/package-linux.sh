@@ -35,6 +35,12 @@ cp build/bin/flitnix "${TAR_STAGE}/flitnix/bin/"
 chmod 0755 "${TAR_STAGE}/flitnix/bin/flitnix"
 cp build/linux/flitnix.desktop "${TAR_STAGE}/flitnix/share/applications/"
 cp -r build/linux/icons/hicolor "${TAR_STAGE}/flitnix/share/icons/"
+if [ -f LICENSE ]; then
+    cp LICENSE "${TAR_STAGE}/flitnix/"
+fi
+if [ -f NOTICE ]; then
+    cp NOTICE "${TAR_STAGE}/flitnix/"
+fi
 if [ -f README.md ]; then
     cp README.md "${TAR_STAGE}/flitnix/"
 fi

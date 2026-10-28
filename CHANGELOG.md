@@ -30,3 +30,4 @@ Initial public release of Flitnix: fast, private, offline-first local file trans
 - **Automated CI/CD**:
   - GitHub Actions CI workflow executing Go tests, concurrency race detector, and frontend checks
   - Release workflow building cross-platform packages and publishing checksummed draft releases
+- **Open Source Licensing**: Distributed under the authoritative Apache License 2.0 (`Apache-2.0`).
