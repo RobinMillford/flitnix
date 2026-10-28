@@ -16,6 +16,9 @@
   <a href="https://github.com/itsyamin/flitnix/releases">
     <img src="https://img.shields.io/github/v/release/itsyamin/flitnix?color=0ea5e9" alt="Latest Release">
   </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0">
+  </a>
   <img src="https://img.shields.io/badge/go-1.27+-00ADD8?logo=go&logoColor=white" alt="Go Version">
   <img src="https://img.shields.io/badge/wails-v2-DF1E59?logo=wails&logoColor=white" alt="Wails v2">
   <img src="https://img.shields.io/badge/svelte-5-FF3E00?logo=svelte&logoColor=white" alt="Svelte 5">
@@ -195,4 +198,5 @@ For detailed test coverage information and subsystem test layouts, see the [Test
 
 ## License
 
-This project currently has no declared open-source license. All rights are reserved by the author pending a formal license decision. Please see [CONTRIBUTING.md](CONTRIBUTING.md) for contribution terms.
+Flitnix is licensed under the [Apache License, Version 2.0](LICENSE).
+See the [`LICENSE`](LICENSE) file for the full license text and [`NOTICE`](NOTICE) for third-party font and software notices.

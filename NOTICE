@@ -1,0 +1,12 @@
+Flitnix
+Copyright 2026 RobinMillford <issan.yamin@gmail.com>
+
+This product includes software developed by RobinMillford (https://github.com/itsyamin/flitnix).
+
+========================================================================
+Third-Party Software and Font Notices
+========================================================================
+
+This product bundles the Nunito font:
+- Nunito Font: Copyright 2016 The Nunito Project Authors (contact@sansoxygen.com)
+  Licensed under the SIL Open Font License, Version 1.1 (see frontend/src/assets/fonts/OFL.txt)

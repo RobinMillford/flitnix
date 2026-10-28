@@ -8,6 +8,7 @@ maintainer: "RobinMillford <issan.yamin@gmail.com>"
 description: "Fast, private local file transfer between desktop and phone"
 vendor: "Flitnix"
 homepage: "https://github.com/itsyamin/flitnix"
+license: "Apache-2.0"
 
 contents:
   - src: ./build/bin/flitnix
@@ -34,6 +35,14 @@ contents:
     dst: /usr/share/icons/hicolor/256x256/apps/flitnix.png
   - src: ./build/linux/icons/hicolor/512x512/apps/flitnix.png
     dst: /usr/share/icons/hicolor/512x512/apps/flitnix.png
+  - src: ./LICENSE
+    dst: /usr/share/doc/flitnix/LICENSE
+    file_info:
+      mode: 0644
+  - src: ./NOTICE
+    dst: /usr/share/doc/flitnix/NOTICE
+    file_info:
+      mode: 0644
 
 overrides:
   deb:
