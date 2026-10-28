@@ -37,6 +37,7 @@ if ($Help) {
 }
 
 $Repo = "itsyamin/flitnix"
+$BaseUrl = if ($env:FLITNIX_BASE_URL) { $env:FLITNIX_BASE_URL } else { "https://github.com/$Repo" }
 $DefaultVersion = "0.1.0"
 
 # Check Architecture
@@ -61,8 +62,8 @@ if (-not [string]::IsNullOrWhiteSpace($Version)) {
 }
 
 $AssetName = "flitnix_${CleanVersion}_windows_amd64_setup.exe"
-$DownloadUrl = "https://github.com/$Repo/releases/download/$ReleaseTag/$AssetName"
-$ChecksumUrl = "https://github.com/$Repo/releases/download/$ReleaseTag/SHA256SUMS.txt"
+$DownloadUrl = "$BaseUrl/releases/download/$ReleaseTag/$AssetName"
+$ChecksumUrl = "$BaseUrl/releases/download/$ReleaseTag/SHA256SUMS.txt"
 
 Write-Host "==> Flitnix Windows Installer" -ForegroundColor Cyan
 Write-Host "==> Version: $CleanVersion ($ReleaseTag)"

@@ -44,56 +44,56 @@ Across the repository, there are **37 Go test files** and **1 frontend TypeScrip
 ### A. Root Desktop App Tests (`package main`)
 | File | Scope & Focus |
 |---|---|
-| [`app_test.go`](file:///home/itsyamin/Codes/Flitnix/app_test.go) | Desktop app initialization, session creation, pairing QR, network binding, and session revocation. |
-| [`app_batch_test.go`](file:///home/itsyamin/Codes/Flitnix/app_batch_test.go) | Desktop batch manifest validation, approval, rejection, and the shared HTTP test harness (`batchHarness`). |
-| [`app_batch_telemetry_test.go`](file:///home/itsyamin/Codes/Flitnix/app_batch_telemetry_test.go) | Real-time byte accounting, transfer progress reporting, and completion events. |
-| [`app_batch_cancel_publication_test.go`](file:///home/itsyamin/Codes/Flitnix/app_batch_cancel_publication_test.go) | Cancellation vs publication ordering during whole-batch cancellation, idle expiry, network change, and shutdown. |
-| [`app_cancel_publication_test.go`](file:///home/itsyamin/Codes/Flitnix/app_cancel_publication_test.go) | Standalone upload cancellation vs publication ordering. |
-| [`app_folder_root_test.go`](file:///home/itsyamin/Codes/Flitnix/app_folder_root_test.go) | Folder root directory reservation, collision variant resolution, and cleanup of abandoned empty roots. |
-| [`app_handoff_publication_race_test.go`](file:///home/itsyamin/Codes/Flitnix/app_handoff_publication_race_test.go) | Publication-reservation handoff concurrency between upload service and coordinator under batch cancellation and session teardown. |
+| [`app_test.go`](../app_test.go) | Desktop app initialization, session creation, pairing QR, network binding, and session revocation. |
+| [`app_batch_test.go`](../app_batch_test.go) | Desktop batch manifest validation, approval, rejection, and the shared HTTP test harness (`batchHarness`). |
+| [`app_batch_telemetry_test.go`](../app_batch_telemetry_test.go) | Real-time byte accounting, transfer progress reporting, and completion events. |
+| [`app_batch_cancel_publication_test.go`](../app_batch_cancel_publication_test.go) | Cancellation vs publication ordering during whole-batch cancellation, idle expiry, network change, and shutdown. |
+| [`app_cancel_publication_test.go`](../app_cancel_publication_test.go) | Standalone upload cancellation vs publication ordering. |
+| [`app_folder_root_test.go`](../app_folder_root_test.go) | Folder root directory reservation, collision variant resolution, and cleanup of abandoned empty roots. |
+| [`app_handoff_publication_race_test.go`](../app_handoff_publication_race_test.go) | Publication-reservation handoff concurrency between upload service and coordinator under batch cancellation and session teardown. |
 
 ### B. HTTP Server & Mobile API Tests (`internal/server/`)
 | File | Scope & Focus |
 |---|---|
-| [`internal/server/api_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/server/api_test.go) | Core HTTP API endpoints, authentication bearer checks, batch creation, and HTTP test environment (`testEnv`). |
-| [`internal/server/api_integration_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/server/api_integration_test.go) | End-to-end phone upload workflow from declaration to final completion response. |
-| [`internal/server/routes_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/server/routes_test.go) | URL routing, path sanitization, content classification, and error responses. |
-| [`internal/server/server_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/server/server_test.go) | HTTP server lifecycle, graceful shutdown, and address reuse. |
-| [`internal/server/upload_regression_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/server/upload_regression_test.go) | Large file streaming, continuous slow uploads across stall windows (`pacedBody`), and quarter-mark milestone telemetry. |
-| [`internal/server/cancel_item_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/server/cancel_item_test.go) | Phone-side item cancellation (`DELETE /api/batches/{id}/items/{itemId}`). |
-| [`internal/server/cancel_publication_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/server/cancel_publication_test.go) | Server-level HTTP cancellation vs publication contest. |
-| [`internal/server/download_stability_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/server/download_stability_test.go) | Direct and zip-streamed downloads, byte ranges, and connection drops. |
-| [`internal/server/download_revocation_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/server/download_revocation_test.go) | Mid-stream session revocation on direct downloads cutting streams without falsely claiming success. |
-| [`internal/server/session_stability_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/server/session_stability_test.go) | Concurrent HTTP requests under active and revoking sessions. |
-| [`internal/server/bidirectional_stability_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/server/bidirectional_stability_test.go) | Simultaneous upload and download on a single session without interference. |
-| [`internal/server/archive_name_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/server/archive_name_test.go) | Zip archive entry name sanitization, path traversal defense, and colon handling. |
+| [`internal/server/api_test.go`](../internal/server/api_test.go) | Core HTTP API endpoints, authentication bearer checks, batch creation, and HTTP test environment (`testEnv`). |
+| [`internal/server/api_integration_test.go`](../internal/server/api_integration_test.go) | End-to-end phone upload workflow from declaration to final completion response. |
+| [`internal/server/routes_test.go`](../internal/server/routes_test.go) | URL routing, path sanitization, content classification, and error responses. |
+| [`internal/server/server_test.go`](../internal/server/server_test.go) | HTTP server lifecycle, graceful shutdown, and address reuse. |
+| [`internal/server/upload_regression_test.go`](../internal/server/upload_regression_test.go) | Large file streaming, continuous slow uploads across stall windows (`pacedBody`), and quarter-mark milestone telemetry. |
+| [`internal/server/cancel_item_test.go`](../internal/server/cancel_item_test.go) | Phone-side item cancellation (`DELETE /api/batches/{id}/items/{itemId}`). |
+| [`internal/server/cancel_publication_test.go`](../internal/server/cancel_publication_test.go) | Server-level HTTP cancellation vs publication contest. |
+| [`internal/server/download_stability_test.go`](../internal/server/download_stability_test.go) | Direct and zip-streamed downloads, byte ranges, and connection drops. |
+| [`internal/server/download_revocation_test.go`](../internal/server/download_revocation_test.go) | Mid-stream session revocation on direct downloads cutting streams without falsely claiming success. |
+| [`internal/server/session_stability_test.go`](../internal/server/session_stability_test.go) | Concurrent HTTP requests under active and revoking sessions. |
+| [`internal/server/bidirectional_stability_test.go`](../internal/server/bidirectional_stability_test.go) | Simultaneous upload and download on a single session without interference. |
+| [`internal/server/archive_name_test.go`](../internal/server/archive_name_test.go) | Zip archive entry name sanitization, path traversal defense, and colon handling. |
 
 ### C. Transfer Engine, Coordinator & Store Tests (`internal/transfer/`)
 | File | Scope & Focus |
 |---|---|
-| [`internal/transfer/service_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/transfer/service_test.go) | Upload service state transitions, content submission, commit-window cancel races, and terminal outcomes. |
-| [`internal/transfer/coordinator_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/transfer/coordinator_test.go) | Batch and item state machine, FIFO leasing, and queue manipulation. |
-| [`internal/transfer/coordinator_stability_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/transfer/coordinator_stability_test.go) | Multi-goroutine queue concurrency, rapid leasing, and cancellation stress. |
-| [`internal/transfer/publication_decision_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/transfer/publication_decision_test.go) | `ReserveCancel` contest vs `pubPublishing` reservation logic. |
-| [`internal/transfer/batch_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/transfer/batch_test.go) | Coordinator batch creation, item sequencing, and terminal aggregation. |
-| [`internal/transfer/batch_link_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/transfer/batch_link_test.go) | Association between coordinator items and streaming upload records (`SetItemContentID`). |
-| [`internal/transfer/batch_cancel_publication_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/transfer/batch_cancel_publication_test.go) | Coordinator item cancellation against active publishing leases. |
-| [`internal/transfer/cancel_item_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/transfer/cancel_item_test.go) | Coordinator-level item cancellation semantics. |
-| [`internal/transfer/store_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/transfer/store_test.go) | Atomic hard-link commit, part-file staging, collision variants, and directory confinement. |
-| [`internal/transfer/stream_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/transfer/stream_test.go) | Streaming body I/O, 64 KiB buffer sizing, SHA-256 calculation, and exact size enforcement. |
-| [`internal/transfer/sanitize_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/transfer/sanitize_test.go) | Filename and path sanitization rules, traversal rejection, and UTF-8 handling. |
-| [`internal/transfer/registry_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/transfer/registry_test.go) | Shared files and sources registry. |
-| [`internal/transfer/source_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/transfer/source_test.go) | Shared directory source tree enumeration and tracking. |
-| [`internal/transfer/download_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/transfer/download_test.go) | Download ticket registry and token validation. |
+| [`internal/transfer/service_test.go`](../internal/transfer/service_test.go) | Upload service state transitions, content submission, commit-window cancel races, and terminal outcomes. |
+| [`internal/transfer/coordinator_test.go`](../internal/transfer/coordinator_test.go) | Batch and item state machine, FIFO leasing, and queue manipulation. |
+| [`internal/transfer/coordinator_stability_test.go`](../internal/transfer/coordinator_stability_test.go) | Multi-goroutine queue concurrency, rapid leasing, and cancellation stress. |
+| [`internal/transfer/publication_decision_test.go`](../internal/transfer/publication_decision_test.go) | `ReserveCancel` contest vs `pubPublishing` reservation logic. |
+| [`internal/transfer/batch_test.go`](../internal/transfer/batch_test.go) | Coordinator batch creation, item sequencing, and terminal aggregation. |
+| [`internal/transfer/batch_link_test.go`](../internal/transfer/batch_link_test.go) | Association between coordinator items and streaming upload records (`SetItemContentID`). |
+| [`internal/transfer/batch_cancel_publication_test.go`](../internal/transfer/batch_cancel_publication_test.go) | Coordinator item cancellation against active publishing leases. |
+| [`internal/transfer/cancel_item_test.go`](../internal/transfer/cancel_item_test.go) | Coordinator-level item cancellation semantics. |
+| [`internal/transfer/store_test.go`](../internal/transfer/store_test.go) | Atomic hard-link commit, part-file staging, collision variants, and directory confinement. |
+| [`internal/transfer/stream_test.go`](../internal/transfer/stream_test.go) | Streaming body I/O, 64 KiB buffer sizing, SHA-256 calculation, and exact size enforcement. |
+| [`internal/transfer/sanitize_test.go`](../internal/transfer/sanitize_test.go) | Filename and path sanitization rules, traversal rejection, and UTF-8 handling. |
+| [`internal/transfer/registry_test.go`](../internal/transfer/registry_test.go) | Shared files and sources registry. |
+| [`internal/transfer/source_test.go`](../internal/transfer/source_test.go) | Shared directory source tree enumeration and tracking. |
+| [`internal/transfer/download_test.go`](../internal/transfer/download_test.go) | Download ticket registry and token validation. |
 
 ### D. Infrastructure & Support Tests
 | File | Package | Focus |
 |---|---|---|
-| [`internal/session/session_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/session/session_test.go) | `session` | Token generation, crypto-safe entropy, expiry timers, and revocation events. |
-| [`internal/netenv/netenv_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/netenv/netenv_test.go) | `netenv` | Network interface filtering, loopback exclusion, and IP selection. |
-| [`internal/netenv/metadata_linux_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/netenv/metadata_linux_test.go) | `netenv` | Linux-specific interface and Wi-Fi SSID metadata discovery. |
-| [`internal/qr/qr_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/qr/qr_test.go) | `qr` | QR code PNG and data URI rendering. |
-| [`frontend/test/refreshScheduler.test.ts`](file:///home/itsyamin/Codes/Flitnix/frontend/test/refreshScheduler.test.ts) | `frontend` | Desktop UI IPC refresh coalescing, slow-round ordering, and teardown. |
+| [`internal/session/session_test.go`](../internal/session/session_test.go) | `session` | Token generation, crypto-safe entropy, expiry timers, and revocation events. |
+| [`internal/netenv/netenv_test.go`](../internal/netenv/netenv_test.go) | `netenv` | Network interface filtering, loopback exclusion, and IP selection. |
+| [`internal/netenv/metadata_linux_test.go`](../internal/netenv/metadata_linux_test.go) | `netenv` | Linux-specific interface and Wi-Fi SSID metadata discovery. |
+| [`internal/qr/qr_test.go`](../internal/qr/qr_test.go) | `qr` | QR code PNG and data URI rendering. |
+| [`frontend/test/refreshScheduler.test.ts`](../frontend/test/refreshScheduler.test.ts) | `frontend` | Desktop UI IPC refresh coalescing, slow-round ordering, and teardown. |
 
 ---
 
@@ -102,23 +102,23 @@ Across the repository, there are **37 Go test files** and **1 frontend TypeScrip
 When investigating a specific subsystem or regression, consult these files:
 
 ### Publication vs. Cancellation Contention
-- **Core Record Contest**: [`internal/transfer/service_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/transfer/service_test.go) (`TestServiceCancelDuringSuccessfulCommitKeepsCompleted`, `TestServiceCancelDuringCommitKeepsCanceled`)
-- **Authority Reservation**: [`internal/transfer/publication_decision_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/transfer/publication_decision_test.go)
-- **Handoff Atomicity**: [`app_handoff_publication_race_test.go`](file:///home/itsyamin/Codes/Flitnix/app_handoff_publication_race_test.go)
-- **Batch & Session Boundaries**: [`app_batch_cancel_publication_test.go`](file:///home/itsyamin/Codes/Flitnix/app_batch_cancel_publication_test.go), [`internal/transfer/batch_cancel_publication_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/transfer/batch_cancel_publication_test.go)
+- **Core Record Contest**: [`internal/transfer/service_test.go`](../internal/transfer/service_test.go) (`TestServiceCancelDuringSuccessfulCommitKeepsCompleted`, `TestServiceCancelDuringCommitKeepsCanceled`)
+- **Authority Reservation**: [`internal/transfer/publication_decision_test.go`](../internal/transfer/publication_decision_test.go)
+- **Handoff Atomicity**: [`app_handoff_publication_race_test.go`](../app_handoff_publication_race_test.go)
+- **Batch & Session Boundaries**: [`app_batch_cancel_publication_test.go`](../app_batch_cancel_publication_test.go), [`internal/transfer/batch_cancel_publication_test.go`](../internal/transfer/batch_cancel_publication_test.go)
 
 ### Session Lifecycle & Teardown Races
-- **Idle Expiry & Network Changes**: [`app_batch_cancel_publication_test.go`](file:///home/itsyamin/Codes/Flitnix/app_batch_cancel_publication_test.go) (`TestIdleExpiryAndNetworkChangePreservePublicationInvariant`)
-- **App Shutdown In-Flight**: [`app_batch_cancel_publication_test.go`](file:///home/itsyamin/Codes/Flitnix/app_batch_cancel_publication_test.go) (`TestShutdownDuringPublicationPreservesFileWithoutLeaks`)
-- **Explicit Stop & Closed History**: [`app_handoff_publication_race_test.go`](file:///home/itsyamin/Codes/Flitnix/app_handoff_publication_race_test.go) (`TestHandoffSessionTeardownConcurrentWithPublishClaim`)
+- **Idle Expiry & Network Changes**: [`app_batch_cancel_publication_test.go`](../app_batch_cancel_publication_test.go) (`TestIdleExpiryAndNetworkChangePreservePublicationInvariant`)
+- **App Shutdown In-Flight**: [`app_batch_cancel_publication_test.go`](../app_batch_cancel_publication_test.go) (`TestShutdownDuringPublicationPreservesFileWithoutLeaks`)
+- **Explicit Stop & Closed History**: [`app_handoff_publication_race_test.go`](../app_handoff_publication_race_test.go) (`TestHandoffSessionTeardownConcurrentWithPublishClaim`)
 
 ### Large Streams & Paced Uploads
-- **Stall Windows & Progress Pacing**: [`internal/server/upload_regression_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/server/upload_regression_test.go) (`TestSlowContinuousUploadExceedsStallWindow`)
-- **Quarter-Mark Telemetry**: [`internal/server/upload_regression_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/server/upload_regression_test.go) (`TestLargeStreamQuarterMarkDiagnostics`)
+- **Stall Windows & Progress Pacing**: [`internal/server/upload_regression_test.go`](../internal/server/upload_regression_test.go) (`TestSlowContinuousUploadExceedsStallWindow`)
+- **Quarter-Mark Telemetry**: [`internal/server/upload_regression_test.go`](../internal/server/upload_regression_test.go) (`TestLargeStreamQuarterMarkDiagnostics`)
 
 ### Folder Roots & Atomic Linking
-- **Collision Variants & Atomic Commit**: [`internal/transfer/store_test.go`](file:///home/itsyamin/Codes/Flitnix/internal/transfer/store_test.go)
-- **Abandoned Empty Root Cleanup**: [`app_folder_root_test.go`](file:///home/itsyamin/Codes/Flitnix/app_folder_root_test.go)
+- **Collision Variants & Atomic Commit**: [`internal/transfer/store_test.go`](../internal/transfer/store_test.go)
+- **Abandoned Empty Root Cleanup**: [`app_folder_root_test.go`](../app_folder_root_test.go)
 
 ---
 
