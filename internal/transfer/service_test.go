@@ -440,6 +440,88 @@ func TestServiceCancelMidStream(t *testing.T) {
 	}
 }
 
+// commitRaceSink mirrors PartFile's decided flag so a Commit that arrives
+// after an Abort fails exactly like the production part file does. Commit
+// parks on release until the test has injected the cancel, reproducing the
+// window between the last successful write and the part-file mutex.
+type commitRaceSink struct {
+	commitEntered chan struct{} // closed when Commit begins
+	release       chan struct{} // closed by the test to let Commit finish
+
+	// decided is written by Abort (test goroutine, after the Submit
+	// goroutine is parked in Commit) and read by Commit (Submit
+	// goroutine, after release); the channel handoff orders both.
+	decided bool
+}
+
+func (s *commitRaceSink) Write(p []byte) (int, error) { return len(p), nil }
+
+func (s *commitRaceSink) Commit() (string, error) {
+	close(s.commitEntered)
+	<-s.release
+	if s.decided {
+		return "", errors.New("transfer: part file already committed or aborted")
+	}
+	return "fake-published", nil
+}
+
+func (s *commitRaceSink) Abort() error {
+	s.decided = true
+	return nil
+}
+
+func TestServiceCancelDuringCommitKeepsCanceled(t *testing.T) {
+	// A cancel can land in the window between the final successful write
+	// and publication: the part file holds the mutex for fsync, which is
+	// real time on large files, while the record still reads uploading.
+	// When the cancel's abort wins the part-file mutex the commit fails;
+	// the record must stay canceled instead of being relabeled failed,
+	// and the phone must still receive ErrCanceled.
+	oldSinkFactory := newPartSink
+	t.Cleanup(func() { newPartSink = oldSinkFactory })
+	race := &commitRaceSink{
+		commitEntered: make(chan struct{}),
+		release:       make(chan struct{}),
+	}
+	newPartSink = func(*Store, string) (contentSink, error) { return race, nil }
+
+	svc, _ := newTestService(t)
+	const key = "sess-key-commitcancel"
+	const size = 256
+
+	up, err := svc.Declare(key, "commit.bin", size)
+	if err != nil {
+		t.Fatalf("Declare: %v", err)
+	}
+	if _, err := svc.Decide(up.ID, true); err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := svc.SubmitContent(up.ID, key, strings.NewReader(strings.Repeat("z", size)), nil)
+		done <- err
+	}()
+
+	<-race.commitEntered
+	if err := svc.Cancel(up.ID); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	close(race.release)
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrCanceled) {
+			t.Fatalf("commit-time cancel err = %v, want ErrCanceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("submission did not conclude after Cancel")
+	}
+	if u, ok := svc.Get(up.ID); !ok || u.State != StateCanceled {
+		t.Errorf("record after commit-time cancel = %+v (ok=%v), want canceled", u, ok)
+	}
+}
+
 func TestServiceCancelPendingUpload(t *testing.T) {
 	svc, st := newTestService(t)
 	const key = "sess-key-cancelpend"

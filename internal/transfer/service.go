@@ -560,6 +560,13 @@ func (s *Service) SubmitContent(id, sessionKey string, body io.Reader, onProgres
 		// The data arrived intact but atomic publication failed; keep
 		// the record failed and surface the store's precise error.
 		u.reason = cerr.Error()
+		if u.state == StateCanceled {
+			// Cancel decided the fate during the commit (its abort won
+			// the publication race): keep the canceled status honest
+			// rather than overwriting failed.
+			u.mu.Unlock()
+			return ContentResult{}, fmt.Errorf("%w: %v", ErrCanceled, cerr)
+		}
 		u.state = StateFailed
 		u.mu.Unlock()
 		return ContentResult{}, fmt.Errorf("%s: %w", u.name, cerr)
