@@ -183,6 +183,29 @@ func (s *Store) AllocateFolderRoot(raw string) (string, error) {
 	return "", fmt.Errorf("transfer: could not allocate a folder root for %q", root)
 }
 
+// DiscardFolderRoot removes a folder root reserved by AllocateFolderRoot
+// when the surrounding batch could not be created. It only ever deletes an
+// empty directory (os.Remove refuses otherwise), so a root that received
+// data cannot be harmed, and a missing root is already-discarded success.
+// The store owns receive paths, so the routes never join filesystem names.
+func (s *Store) DiscardFolderRoot(raw string) error {
+	root, err := sanitizeRootName(raw)
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(s.dir, root)
+	if !s.withinDir(path) {
+		return fmt.Errorf("transfer: refusing folder root outside receive directory")
+	}
+	if err := os.Remove(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("transfer: discarding folder root: %w", err)
+	}
+	return nil
+}
+
 // OpenPartPath creates a part file beneath a server-resolved folder root and
 // validated relative path. Existing path components must be real directories,
 // never symlinks, before any file is opened.

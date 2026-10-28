@@ -817,3 +817,30 @@ func TestOversizedBatchItemUploadIsRefusedAndPublishesNothing(t *testing.T) {
 		t.Errorf("size_exceeded diagnosed %d times, want 1: %s", got, env.diagText())
 	}
 }
+
+func TestFailedFolderBatchCreationLeavesNoRootDirectory(t *testing.T) {
+	// A folder batch reserves its receive root with mkdir before the
+	// coordinator can create the batch. If creation fails (shutdown
+	// race, closed coordinator, exhausted records) the reservation must
+	// be undone, or repeated failures litter the desktop's receive
+	// directory with empty folders the user never agreed to.
+	env := newTestEnv(t)
+	token := env.token()
+
+	env.coord.Close() // every CreateBatch now fails after the root was made
+
+	manifest := `{"direction":"phone_to_desktop","kind":"folder",` +
+		`"rootName":"Photos","items":[{"relativePath":"cover.jpg","size":5}]}`
+	rec := env.do(http.MethodPost, "/api/batches", token, []byte(manifest))
+	if rec.Code == http.StatusCreated {
+		t.Fatalf("folder batch created despite the closed coordinator (body=%s)", rec.Body.String())
+	}
+
+	entries, err := os.ReadDir(env.store.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("failed folder creation left %d entries behind: %+v", len(entries), entries)
+	}
+}

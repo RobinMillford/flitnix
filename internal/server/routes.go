@@ -467,6 +467,10 @@ func handleBatchCreate(svcs *Services) http.HandlerFunc {
 		}
 		view, err := svcs.Coordinator.CreateBatch(sess.Key(), manifest)
 		if err != nil {
+			// Undo the on-disk root reservation: the batch will never
+			// exist, so the empty directory must not linger on the
+			// desktop's receive disk.
+			_ = svcs.Transfers.Store().DiscardFolderRoot(resolvedRoot)
 			writeBatchError(w, err)
 			return
 		}
@@ -476,6 +480,13 @@ func handleBatchCreate(svcs *Services) http.HandlerFunc {
 		// records already declared as well as the batch itself.
 		declared := make([]string, 0, len(view.Items))
 		abort := func(cause error) {
+			// A failed reserve loop cannot have streamed content in the
+			// pre-approval window (content needs an approved item), so
+			// the discard sees an empty directory; nothing is removed
+			// if anything ever grew inside it.
+			if resolvedRoot != "" {
+				_ = svcs.Transfers.Store().DiscardFolderRoot(resolvedRoot)
+			}
 			for _, id := range declared {
 				_ = svcs.Transfers.Cancel(id)
 			}
