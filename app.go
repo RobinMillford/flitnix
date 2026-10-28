@@ -823,8 +823,13 @@ func (a *App) CancelBatch(id string) error {
 	if err != nil {
 		return err
 	}
-	if ids, idErr := a.batchContentIDs(key, v); idErr == nil {
-		a.cancelContent(ids)
+	for _, item := range v.Items {
+		if item.State != transfer.ItemStateCanceled {
+			continue
+		}
+		if contentID, idErr := a.coordinator.ItemContentID(key, v.ID, item.ID); idErr == nil && contentID != "" {
+			_ = a.transfers.Cancel(contentID)
+		}
 	}
 	// Streams are aborted above, so a folder root that received nothing is
 	// now empty and can be removed; one that published a file is non-empty
