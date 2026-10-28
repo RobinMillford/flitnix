@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -519,6 +520,111 @@ func TestServiceCancelDuringCommitKeepsCanceled(t *testing.T) {
 	}
 	if u, ok := svc.Get(up.ID); !ok || u.State != StateCanceled {
 		t.Errorf("record after commit-time cancel = %+v (ok=%v), want canceled", u, ok)
+	}
+}
+
+// commitSuccessRaceSink is the success twin of commitRaceSink: the commit
+// wins the part-file race. It mirrors the production PartFile, whose mutex
+// is held across the publishing fsync — an Abort that arrives once the
+// commit has begun cannot decide the file; it queues behind the mutex and
+// finds the publication already done. Holding the sink mutex across the
+// park makes the ordering deterministic: the test releases the commit, the
+// commit finishes under the mutex, and only then does Abort run.
+type commitSuccessRaceSink struct {
+	mu            sync.Mutex
+	commitEntered chan struct{} // closed when Commit begins
+	release       chan struct{} // closed by the test to let Commit finish
+	abortStarted  chan struct{} // closed when Abort begins (state write already landed)
+
+	decided bool // written by Abort after the commit has published
+}
+
+func (s *commitSuccessRaceSink) Write(p []byte) (int, error) { return len(p), nil }
+
+func (s *commitSuccessRaceSink) Commit() (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	close(s.commitEntered)
+	<-s.release
+	if s.decided {
+		return "", errors.New("transfer: part file already committed or aborted")
+	}
+	return "fake-published", nil
+}
+
+func (s *commitSuccessRaceSink) Abort() error {
+	close(s.abortStarted)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.decided = true
+	return nil
+}
+
+// TestServiceCancelDuringSuccessfulCommitKeepsCompleted pins the published-
+// complete-wins policy: when a cancel's abort loses the part-file race to a
+// commit that succeeds, the file is published and the record must read
+// completed — reporting canceled would contradict the file on disk, and
+// unlinking a published file would break atomic publication. The cancel
+// request is genuinely lost: it arrived in the commit window, but the
+// publication it raced against was already inevitable.
+func TestServiceCancelDuringSuccessfulCommitKeepsCompleted(t *testing.T) {
+	oldSinkFactory := newPartSink
+	t.Cleanup(func() { newPartSink = oldSinkFactory })
+	race := &commitSuccessRaceSink{
+		commitEntered: make(chan struct{}),
+		release:       make(chan struct{}),
+		abortStarted:  make(chan struct{}),
+	}
+	newPartSink = func(*Store, string) (contentSink, error) { return race, nil }
+
+	svc, _ := newTestService(t)
+	const key = "sess-key-commitwins"
+	const size = 256
+
+	up, err := svc.Declare(key, "commit-wins.bin", size)
+	if err != nil {
+		t.Fatalf("Declare: %v", err)
+	}
+	if _, err := svc.Decide(up.ID, true); err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := svc.SubmitContent(up.ID, key, strings.NewReader(strings.Repeat("z", size)), nil)
+		done <- err
+	}()
+
+	<-race.commitEntered
+	// Cancel from the commit window. Its state write lands before Abort
+	// begins (Cancel unlocks the record mutex before touching the sink),
+	// and Abort then parks behind the publishing commit's mutex.
+	cancelDone := make(chan error, 1)
+	go func() { cancelDone <- svc.Cancel(up.ID) }()
+	<-race.abortStarted
+	close(race.release)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("submission after a successful commit race err = %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("submission did not conclude after releasing the commit")
+	}
+	if err := <-cancelDone; err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+
+	u, ok := svc.Get(up.ID)
+	if !ok {
+		t.Fatalf("record vanished after the successful commit race")
+	}
+	if u.State != StateCompleted {
+		t.Errorf("record after commit won the cancel race = %q, want completed", u.State)
+	}
+	if u.Published != "fake-published" {
+		t.Errorf("published path after the race = %q, want fake-published", u.Published)
 	}
 }
 
