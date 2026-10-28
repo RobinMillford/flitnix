@@ -801,6 +801,22 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 		buf := make([]byte, downloadCopySize)
 		var written int64
 		for written < size {
+			// A direct download is an authenticated transfer, so a session
+			// that was revoked while the body was streaming must stop here
+			// — the same policy the archive path applies through
+			// guardedReader (errDownloadSession). Without this check a
+			// revoked phone kept receiving every remaining byte and the
+			// desktop recorded the transfer as `sent`, which made a dead
+			// session look like a completed one. The response status line
+			// is already committed, so the connection is cut instead of
+			// sealed and the client sees a short body, not a whole file.
+			if sess.Status() == session.StatusRevoked {
+				_ = forceClose(w, f)
+				if svcs.Downloads != nil {
+					svcs.Downloads.Fail(downloadID, errDownloadSession.Error(), written)
+				}
+				return
+			}
 			n, rerr := f.Read(buf)
 			if n > 0 {
 				wn, werr := out.Write(buf[:n])
