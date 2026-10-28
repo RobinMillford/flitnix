@@ -14,16 +14,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
         with:
           go-version-file: 'go.mod'
           cache: true
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
         with:
           node-version: '22'
           cache: 'npm'
@@ -56,7 +56,7 @@ jobs:
           bash scripts/package-linux.sh "${VERSION}" "amd64" "artifacts"
 
       - name: Upload Linux artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
           name: linux-artifacts
           path: artifacts/*
@@ -67,16 +67,16 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
         with:
           go-version-file: 'go.mod'
           cache: true
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
         with:
           node-version: '22'
           cache: 'npm'
@@ -110,7 +110,7 @@ jobs:
           fi
 
       - name: Upload Windows artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
           name: windows-artifacts
           path: artifacts/*
@@ -121,16 +121,16 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
         with:
           go-version-file: 'go.mod'
           cache: true
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
         with:
           node-version: '22'
           cache: 'npm'
@@ -154,15 +154,22 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           mkdir -p artifacts
-          
+
+          # Find app bundle (whether Flitnix.app or flitnix.app)
+          APP_DIR=$(ls -d build/bin/*.app | head -n 1)
+          if [ -z "${APP_DIR}" ]; then
+            echo "Error: macOS .app bundle not found in build/bin!" >&2
+            exit 1
+          fi
+
           # Create DMG
-          hdiutil create -volname "Flitnix" -srcfolder "build/bin/Flitnix.app" -ov -format UDZO "artifacts/flitnix_${VERSION}_macOS_universal.dmg"
-          
+          hdiutil create -volname "Flitnix" -srcfolder "${APP_DIR}" -ov -format UDZO "artifacts/flitnix_${VERSION}_macOS_universal.dmg"
+
           # Create ZIP
-          ditto -c -k --sequesterRsrc --keepParent "build/bin/Flitnix.app" "artifacts/flitnix_${VERSION}_macOS_universal.zip"
+          ditto -c -k --sequesterRsrc --keepParent "${APP_DIR}" "artifacts/flitnix_${VERSION}_macOS_universal.zip"
 
       - name: Upload macOS artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
         with:
           name: macos-artifacts
           path: artifacts/*
@@ -174,15 +181,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download all built artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4.1.9
         with:
           path: release-assets
           merge-multiple: true
 
+      - name: Validate all required release artifacts exist
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          REQUIRED_ASSETS=(
+            "flitnix_${VERSION}_linux_amd64.deb"
+            "flitnix_${VERSION}_linux_amd64.rpm"
+            "flitnix_${VERSION}_linux_amd64.tar.gz"
+            "flitnix_${VERSION}_windows_amd64_setup.exe"
+            "flitnix_${VERSION}_macOS_universal.dmg"
+            "flitnix_${VERSION}_macOS_universal.zip"
+          )
+          cd release-assets
+          for asset in "${REQUIRED_ASSETS[@]}"; do
+            if [ ! -f "$asset" ]; then
+              echo "Error: Required asset '$asset' is missing from release payload!" >&2
+              exit 1
+            fi
+          done
+          echo "All 6 required release assets present."
+
       - name: Generate SHA-256 Checksums
         run: |
           cd release-assets
-          sha256sum * > SHA256SUMS.txt
+          sha256sum flitnix_* > SHA256SUMS.txt
           echo "Generated SHA256SUMS.txt:"
           cat SHA256SUMS.txt
 

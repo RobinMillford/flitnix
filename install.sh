@@ -19,7 +19,7 @@
 set -eu
 
 REPO="itsyamin/flitnix"
-GITHUB_URL="https://github.com/${REPO}"
+GITHUB_URL="${FLITNIX_BASE_URL:-https://github.com/${REPO}}"
 DEFAULT_VERSION="0.1.0"
 
 TARGET_VERSION=""
