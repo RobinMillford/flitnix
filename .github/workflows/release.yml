@@ -242,7 +242,14 @@ jobs:
     name: Publish Draft Release
     needs: [build-linux, build-windows, build-macos]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
       - name: Download all built artifacts
         uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4.1.9
         with:
@@ -278,10 +285,12 @@ jobs:
 
       - name: Create Draft GitHub Release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "${GITHUB_REF_NAME}" \
             release-assets/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --verify-tag \
             --draft \
             --title "Flitnix ${GITHUB_REF_NAME}" \
             --generate-notes
