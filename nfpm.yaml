@@ -7,7 +7,7 @@ priority: "optional"
 maintainer: "RobinMillford <issan.yamin@gmail.com>"
 description: "Fast, private local file transfer between desktop and phone"
 vendor: "Flitnix"
-homepage: "https://github.com/itsyamin/flitnix"
+homepage: "https://github.com/RobinMillford/flitnix"
 license: "Apache-2.0"
 
 contents:

@@ -1,12 +1,12 @@
 #!/usr/bin/env sh
 # Flitnix Universal Installer
-# https://github.com/itsyamin/flitnix
+# https://github.com/RobinMillford/flitnix
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/itsyamin/flitnix/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/RobinMillford/flitnix/main/install.sh | sh
 #
 # Inspect-first:
-#   curl -fsSL https://raw.githubusercontent.com/itsyamin/flitnix/main/install.sh -o install.sh
+#   curl -fsSL https://raw.githubusercontent.com/RobinMillford/flitnix/main/install.sh -o install.sh
 #   less install.sh
 #   sh install.sh
 #
@@ -18,7 +18,7 @@
 
 set -eu
 
-REPO="itsyamin/flitnix"
+REPO="RobinMillford/flitnix"
 GITHUB_URL="${FLITNIX_BASE_URL:-https://github.com/${REPO}}"
 DEFAULT_VERSION="0.1.0"
 
