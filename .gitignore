@@ -1,3 +1,47 @@
-build/bin
-node_modules
-frontend/dist
+# Binaries and build output
+/build/bin/
+/dist/
+/artifacts/
+/release-assets/
+cmd/flitnix-serve/flitnix-serve
+flitnix
+
+# Frontend dependencies and output
+node_modules/
+*/node_modules/
+.npm/
+frontend/dist/
+
+# Go test binaries, coverage, and profiling
+*.test
+*.out
+*.prof
+*.pprof
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE, editor, and tool files
+.idea/
+*.swp
+*.swo
+*~
+*.bak
+.freebuff/
+.vscode/*
+!.vscode/extensions.json
+!frontend/.vscode/extensions.json
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and temporary files
+*.log
