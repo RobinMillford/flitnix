@@ -226,12 +226,28 @@ func uniqueArchiveName(name string, used map[string]bool) string {
 	}
 }
 
+// validateArchiveName keeps every archive entry inside the archive's intended
+// directory structure. It rejects only what could escape that structure or
+// misdescribe it: empty names, absolute paths, backslashes, and empty, "." or
+// ".." components.
+//
+// It deliberately does NOT apply SanitizeRelativePath's extra cross-platform
+// rules (colons, trailing dots/spaces, Windows device names). Those govern
+// paths Flitnix WRITES to its own receive directory, where the receiver's
+// filesystem has the final say. An archive entry name instead has to stay
+// byte-identical to the desktop file the user selected: the registry admits a
+// source through SanitizeName (which allows ':' — it is a legal Linux and
+// macOS filename), and both the direct-download endpoint and
+// Content-Disposition already carry such a name unchanged. Rejecting it only
+// here made a shared file appear in the phone's list and then fail every
+// download with an internal policy error, so a name the share path accepted
+// must remain archivable.
 func validateArchiveName(name string) error {
 	if name == "" || len(name) > transfer.MaxRelativePathBytes || strings.HasPrefix(name, "/") || strings.Contains(name, `\`) {
 		return errors.New("invalid archive entry name")
 	}
 	for _, part := range strings.Split(strings.TrimSuffix(name, "/"), "/") {
-		if part == "" || part == "." || part == ".." || strings.Contains(part, ":") {
+		if part == "" || part == "." || part == ".." {
 			return errors.New("invalid archive entry name")
 		}
 	}
