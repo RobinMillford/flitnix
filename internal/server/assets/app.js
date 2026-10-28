@@ -634,7 +634,14 @@
           phase = "failed"; err = "The desktop declined this file."; retryable = false; break;
         case "failed":
           phase = "failed"; err = item.error || "Transfer failed."; retryable = true; break;
-        case "uploading":
+        // The server's item vocabulary is queued / pending / approved /
+        // transferring / completed / failed / canceled / rejected
+        // (transfer.ItemState). Reading "uploading" here — the *upload
+        // record* vocabulary — meant this branch never matched: an item that
+        // was really transferring fell through to the idle default and the
+        // row claimed its cancellation "was not confirmed; the file is still
+        // queued" while the bytes were actually in flight.
+        case "transferring":
           decided = false;
           if (!cancelPending) {
             if (job.phase === "canceling") {
