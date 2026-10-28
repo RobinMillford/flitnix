@@ -45,14 +45,6 @@ jobs:
         run: |
           node --check internal/server/assets/app.js
 
-      - name: Run Go unit and integration tests
-        run: |
-          go test -count=1 ./...
-
-      - name: Run Go race detector on concurrency-sensitive packages
-        run: |
-          go test -race ./internal/transfer ./internal/server .
-
       - name: Frontend checks and tests
         run: |
           cd frontend
@@ -60,6 +52,14 @@ jobs:
           npm test
           npm run check
           npm run build
+
+      - name: Run Go unit and integration tests
+        run: |
+          go test -count=1 ./...
+
+      - name: Run Go race detector on concurrency-sensitive packages
+        run: |
+          go test -race ./internal/transfer ./internal/server .
 
       - name: Install Wails CLI & nfpm
         run: |
