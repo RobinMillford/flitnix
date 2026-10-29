@@ -548,7 +548,7 @@
             <button class="button secondary small" on:click={runDoctor} disabled={doctorLoading}>
               {doctorLoading ? 'Checking…' : 'Run Diagnostics'}
             </button>
-            <button class="button ghost small" on:click={regenerateQRAction} disabled={!sessions.length}>
+            <button class="button ghost small" on:click={regenerateQRAction} disabled={!sessions.length && (!guestRoomState || !guestRoomState.room)}>
               Regenerate QR
             </button>
           </div>
@@ -802,7 +802,7 @@
 
   <!-- TAB 2: GUEST DROP BOX -->
   {:else if activeTab === 'guest'}
-    {#if !guestRoomState?.room || guestRoomState.room.state === 'Ended'}
+    {#if !guestRoomState?.room || guestRoomState.room.state === 'ended' || guestRoomState.room.state === 'expired' || guestRoomState.room.state === 'Ended'}
       <!-- Room Setup Card -->
       <section class="panel">
         <div class="section-heading">

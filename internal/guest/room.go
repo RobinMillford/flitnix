@@ -64,6 +64,11 @@ var (
 	ErrUploadNotApproved    = errors.New("guest: upload request not approved")
 	ErrUploadAlreadyDecided = errors.New("guest: upload request already decided")
 	ErrUnauthorized         = errors.New("guest: unauthorized")
+	ErrRoomFull             = errors.New("guest: room capacity reached")
+)
+
+const (
+	MaxGuestsPerRoom = 256
 )
 
 var slugInvalidChars = regexp.MustCompile(`[^a-z0-9_-]+`)
@@ -81,8 +86,9 @@ func SanitizeNickname(name string) (display string, slug string) {
 	if cleaned == "" {
 		cleaned = "Guest"
 	}
-	if len(cleaned) > 30 {
-		cleaned = cleaned[:30]
+	runes := []rune(cleaned)
+	if len(runes) > 30 {
+		cleaned = string(runes[:30])
 	}
 	display = cleaned
 
@@ -320,6 +326,9 @@ func (r *Room) Join(nickname string) (*Guest, error) {
 	if r.State != RoomActive && r.State != RoomExpiring {
 		return nil, ErrRoomInactive
 	}
+	if len(r.guests) >= MaxGuestsPerRoom {
+		return nil, ErrRoomFull
+	}
 
 	guestID, err := randomHex(6)
 	if err != nil {
@@ -421,6 +430,13 @@ func (r *Room) RejectGuest(id string) error {
 	}
 	g.State = GuestRejected
 	g.DecidedAt = time.Now()
+
+	for _, u := range r.uploads {
+		if u.GuestID == id && (u.State == UploadPendingApproval || u.State == UploadApproved || u.State == UploadUploading) {
+			u.State = UploadCanceled
+			u.Error = "guest rejected by host"
+		}
+	}
 	return nil
 }
 
@@ -467,7 +483,7 @@ func (r *Room) DeclareUpload(guestID, fileName string, size int64) (*UploadReque
 	if err != nil {
 		return nil, err
 	}
-	if size <= 0 {
+	if size < 0 {
 		return nil, transfer.ErrInvalidUpload
 	}
 
@@ -562,6 +578,10 @@ func (r *Room) RejectUpload(uploadID string) error {
 
 func (r *Room) StreamUpload(uploadID string, body io.Reader) (*transfer.ContentResult, error) {
 	r.mu.Lock()
+	if r.State != RoomActive && r.State != RoomExpiring {
+		r.mu.Unlock()
+		return nil, ErrRoomInactive
+	}
 	u, ok := r.uploads[uploadID]
 	if !ok {
 		r.mu.Unlock()
@@ -595,6 +615,16 @@ func (r *Room) StreamUpload(uploadID string, body io.Reader) (*transfer.ContentR
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	if u.State == UploadCanceled {
+		return nil, fmt.Errorf("%w: upload canceled", transfer.ErrCanceled)
+	}
+
+	if r.State == RoomEnded || r.State == RoomExpired {
+		u.State = UploadCanceled
+		u.Error = "room ended during transfer"
+		return nil, ErrRoomEnded
+	}
 
 	if err != nil {
 		u.State = UploadFailed

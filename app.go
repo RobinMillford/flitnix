@@ -594,7 +594,9 @@ func (a *App) EndSession(key string) error {
 	a.sessions.RevokeSession(target)
 	if a.sessions.Len() == 0 {
 		a.registry.Clear()
-		a.stopServer()
+		if !a.isGuestRoomActive() {
+			a.stopServer()
+		}
 	}
 	return nil
 }
@@ -1380,8 +1382,25 @@ func (a *App) RejectGuestUpload(uploadID string) error {
 	return room.RejectUpload(uploadID)
 }
 
+func (a *App) isGuestRoomActive() bool {
+	if a.guestMgr == nil {
+		return false
+	}
+	room := a.guestMgr.ActiveRoom()
+	if room == nil {
+		return false
+	}
+	room.CheckExpiry()
+	v := room.View()
+	return v.State == guest.RoomActive || v.State == guest.RoomExpiring
+}
+
 func (a *App) EndGuestRoom() error {
-	return a.guestMgr.EndRoom()
+	err := a.guestMgr.EndRoom()
+	if a.sessions.Len() == 0 {
+		a.stopServer()
+	}
+	return err
 }
 
 func (a *App) PickGuestDestination() (string, error) {
@@ -1469,6 +1488,17 @@ func (a *App) SendTextMessage(sessionKey, content string) (TextMessageView, erro
 			return TextMessageView{}, errors.New("flitnix: no active pairing session; start one first")
 		}
 		sessionKey = sessions[0].Key()
+	} else {
+		found := false
+		for _, s := range a.sessions.ActiveSessions() {
+			if s.Key() == sessionKey {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return TextMessageView{}, errors.New("flitnix: no active pairing session matches that identifier")
+		}
 	}
 
 	msg, err := a.textStore.Add(sessionKey, "desktop", content)
@@ -1492,6 +1522,17 @@ func (a *App) ListTextMessages(sessionKey string) []TextMessageView {
 			return []TextMessageView{}
 		}
 		sessionKey = sessions[0].Key()
+	} else {
+		found := false
+		for _, s := range a.sessions.ActiveSessions() {
+			if s.Key() == sessionKey {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return []TextMessageView{}
+		}
 	}
 
 	msgs := a.textStore.List(sessionKey)
