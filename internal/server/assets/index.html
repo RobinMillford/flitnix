@@ -81,6 +81,7 @@
         <button type="button" class="btn btn--small" id="download-selected-btn" disabled>Download selected</button>
       </div>
       <ul class="file-list" id="files"></ul>
+      <div class="download-integrity" id="download-integrity" hidden aria-live="polite"></div>
     </section>
 
     <p class="footnote">Transfers run over plain HTTP inside your own hotspot network — connect only devices you trust.</p>
@@ -91,6 +92,7 @@
   </footer>
 
 </main>
+<script src="/static/sha256.min.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

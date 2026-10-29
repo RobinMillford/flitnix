@@ -54,3 +54,36 @@ export function fmtRemaining(expiresAt: unknown, nowMs: number = Date.now()): st
   const s = diff % 60
   return `${m}m ${s < 10 ? '0' : ''}${s}s remaining`
 }
+
+/**
+ * Parses an RFC 9530 Content-Digest header (e.g. sha-256=:BASE64:)
+ * and returns the lowercase hex-encoded SHA-256 digest, or null if invalid.
+ */
+export function parseContentDigest(header: string | null | undefined): string | null {
+  if (!header) return null
+  const clean = header.trim()
+  const lower = clean.toLowerCase()
+  if (lower.includes('sha-256=:')) {
+    const start = lower.indexOf('sha-256=:') + 'sha-256=:'.length
+    const end = clean.indexOf(':', start)
+    if (end === -1) return null
+    const b64 = clean.slice(start, end).trim()
+    try {
+      const raw = atob(b64)
+      if (raw.length !== 32) return null
+      let hex = ''
+      for (let i = 0; i < raw.length; i++) {
+        hex += raw.charCodeAt(i).toString(16).padStart(2, '0')
+      }
+      return hex.toLowerCase()
+    } catch {
+      return null
+    }
+  }
+  return null
+}
+
+export function verifyDigestMatch(actualHex: string | null | undefined, expectedHex: string | null | undefined): boolean {
+  if (!actualHex || !expectedHex) return false
+  return actualHex.trim().toLowerCase() === expectedHex.trim().toLowerCase()
+}

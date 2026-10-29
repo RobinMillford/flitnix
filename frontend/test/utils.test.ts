@@ -1,7 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  formatBytes, percent, speed, formatEta, calcEta, fmtTime, fmtRemaining
+  formatBytes, percent, speed, formatEta, calcEta, fmtTime, fmtRemaining,
+  parseContentDigest, verifyDigestMatch
 } from '../src/utils.ts'
 
 test('formatBytes formats binary unit boundaries accurately', () => {
@@ -65,4 +66,30 @@ test('fmtRemaining computes remaining time countdown', () => {
 
   const past = new Date(now - 1000).toISOString()
   assert.equal(fmtRemaining(past, now), 'Expired')
+})
+
+test('parseContentDigest correctly parses RFC 9530 Structured Field bytes', () => {
+  // Empty SHA-256 base64
+  const emptyHdr = 'sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:'
+  const expectedEmptyHex = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+  assert.equal(parseContentDigest(emptyHdr), expectedEmptyHex)
+
+  // Invalid formats
+  assert.equal(parseContentDigest(null), null)
+  assert.equal(parseContentDigest(''), null)
+  assert.equal(parseContentDigest('invalid-header'), null)
+  assert.equal(parseContentDigest('sha-256=:incomplete:colon:'), null)
+  assert.equal(parseContentDigest('sha-256=:???invalid-base64???=:'), null)
+})
+
+test('verifyDigestMatch validates case-insensitive hex digests and rejects mismatches', () => {
+  const hashA = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+  const hashAUpper = 'E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855'
+  const hashB = 'b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9'
+
+  assert.equal(verifyDigestMatch(hashA, hashA), true)
+  assert.equal(verifyDigestMatch(hashA, hashAUpper), true)
+  assert.equal(verifyDigestMatch(hashA, hashB), false)
+  assert.equal(verifyDigestMatch(hashA, null), false)
+  assert.equal(verifyDigestMatch(null, hashB), false)
 })
