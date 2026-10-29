@@ -62,15 +62,21 @@ func RunDiagnostics(p Params) DiagnosticReport {
 			ID:          "adapter_presence",
 			Title:       "Network Adapter Status",
 			Status:      StatusFail,
-			Message:     "No active network adapter with a local IPv4 address was found.",
+			Message:     "No active network adapter with a usable local IP address was found.",
 			Remediation: "Connect your computer to a local Wi-Fi network, Ethernet, or mobile hotspot.",
 		})
 	} else {
 		foundActive := false
+		v4Count := 0
+		v6Count := 0
 		for _, v := range views {
-			if (p.ActiveIP != "" && v.IP == p.ActiveIP) || (p.ActiveIface != "" && v.Name == p.ActiveIface) {
+			if v.Family == "IPv6" {
+				v6Count++
+			} else {
+				v4Count++
+			}
+			if (p.ActiveIP != "" && (v.IP == p.ActiveIP || v.IP == strings.Trim(p.ActiveIP, "[]"))) || (p.ActiveIface != "" && v.Name == p.ActiveIface) {
 				foundActive = true
-				break
 			}
 		}
 		if p.ActiveIP != "" && !foundActive {
@@ -82,45 +88,56 @@ func RunDiagnostics(p Params) DiagnosticReport {
 				Remediation: "Your network connection may have changed. Click 'Regenerate QR' to bind to an active network.",
 			})
 		} else {
+			familySummary := fmt.Sprintf("%d IPv4", v4Count)
+			if v6Count > 0 {
+				familySummary += fmt.Sprintf(", %d IPv6", v6Count)
+			}
 			report.Items = append(report.Items, DiagnosticItem{
 				ID:      "adapter_presence",
 				Title:   "Network Adapter Status",
 				Status:  StatusPass,
-				Message: fmt.Sprintf("Active network adapter detected (%d usable local network interface(s)).", len(views)),
+				Message: fmt.Sprintf("Active network adapter detected (%d usable candidate(s): %s).", len(views), familySummary),
 			})
 		}
 	}
 
-	// 2. Check local IPv4 validity (ipv4_address)
+	// 2. Check local IP validity (ipv4_address)
 	targetIP := p.ActiveIP
 	if targetIP == "" && len(views) > 0 {
 		targetIP = views[0].IP
 	}
+	rawTargetIP := strings.Trim(targetIP, "[]")
 
 	if targetIP == "" {
 		report.Items = append(report.Items, DiagnosticItem{
 			ID:          "ipv4_address",
-			Title:       "Local IPv4 Address",
+			Title:       "Local IP Address",
 			Status:      StatusFail,
-			Message:     "No local IPv4 address assigned to your machine.",
+			Message:     "No local IP address assigned to your machine.",
 			Remediation: "Ensure your computer is assigned a local IP address by your router or hotspot.",
 		})
 	} else {
-		parsedIP, err := netip.ParseAddr(targetIP)
-		if err != nil || !parsedIP.Is4() || parsedIP.IsLoopback() || parsedIP.IsUnspecified() {
+		parsedIP, err := netip.ParseAddr(rawTargetIP)
+		if err != nil || parsedIP.IsLoopback() || parsedIP.IsUnspecified() || (!parsedIP.Is4() && !parsedIP.Is6()) {
 			report.Items = append(report.Items, DiagnosticItem{
 				ID:          "ipv4_address",
-				Title:       "Local IPv4 Address",
+				Title:       "Local IP Address",
 				Status:      StatusFail,
-				Message:     fmt.Sprintf("Current address %s is not a valid local network IPv4 address.", targetIP),
+				Message:     fmt.Sprintf("Current address %s is not a valid local network address.", targetIP),
 				Remediation: "Switch to a private LAN or Wi-Fi network.",
 			})
 		} else {
+			var msg string
+			if parsedIP.Is6() {
+				msg = fmt.Sprintf("Using reachable local IPv6 address: [%s]", rawTargetIP)
+			} else {
+				msg = fmt.Sprintf("Using reachable local IPv4 address: %s", rawTargetIP)
+			}
 			report.Items = append(report.Items, DiagnosticItem{
 				ID:      "ipv4_address",
-				Title:   "Local IPv4 Address",
+				Title:   "Local IP Address",
 				Status:  StatusPass,
-				Message: fmt.Sprintf("Using reachable local IPv4 address: %s", targetIP),
+				Message: msg,
 			})
 		}
 	}
@@ -137,7 +154,16 @@ func RunDiagnostics(p Params) DiagnosticReport {
 
 	// 3. Check server listening status & port conflict (port_available)
 	if !p.ServerRunning {
-		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		probeHost := "127.0.0.1"
+		if rawTargetIP != "" {
+			if parsed, perr := netip.ParseAddr(rawTargetIP); perr == nil {
+				if parsed.Is6() {
+					probeHost = "::1"
+				}
+			}
+		}
+		probeAddr := net.JoinHostPort(probeHost, strconv.Itoa(port))
+		ln, err := net.Listen("tcp", probeAddr)
 		if err != nil {
 			report.Items = append(report.Items, DiagnosticItem{
 				ID:          "port_available",
@@ -156,11 +182,15 @@ func RunDiagnostics(p Params) DiagnosticReport {
 			})
 		}
 	} else {
+		familyLabel := "IPv4"
+		if strings.Contains(p.ServerAddr, "[") || strings.Count(p.ServerAddr, ":") > 1 {
+			familyLabel = "IPv6"
+		}
 		report.Items = append(report.Items, DiagnosticItem{
 			ID:      "port_available",
 			Title:   "Server Port Availability",
 			Status:  StatusPass,
-			Message: fmt.Sprintf("Server is actively listening on %s.", p.ServerAddr),
+			Message: fmt.Sprintf("Server is actively listening on %s (%s).", p.ServerAddr, familyLabel),
 		})
 	}
 
@@ -181,11 +211,15 @@ func RunDiagnostics(p Params) DiagnosticReport {
 		} else {
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
+				msg := "HTTP server responds promptly to local health requests."
+				if p.LastPhoneContact != nil {
+					msg = fmt.Sprintf("HTTP server healthy. Phone connection active (last contact at %s).", p.LastPhoneContact.Format("15:04:05"))
+				}
 				report.Items = append(report.Items, DiagnosticItem{
 					ID:      "server_health",
 					Title:   "HTTP Health Probe",
 					Status:  StatusPass,
-					Message: "HTTP server responds promptly to local health requests.",
+					Message: msg,
 				})
 			} else {
 				report.Items = append(report.Items, DiagnosticItem{
@@ -248,17 +282,24 @@ func RunDiagnostics(p Params) DiagnosticReport {
 		if err != nil {
 			host = p.ServerAddr
 		}
+		cleanHost := strings.Trim(host, "[]")
 		matches := false
 		for _, v := range views {
-			if v.IP == host {
+			if v.IP == cleanHost || v.IP == host {
 				matches = true
 				break
 			}
 		}
-		if matches || host == "127.0.0.1" || host == "localhost" {
-			msg := fmt.Sprintf("Server is bound to reachable local address %s.", host)
+		if matches || cleanHost == "127.0.0.1" || cleanHost == "::1" || cleanHost == "localhost" {
+			family := "IPv4"
+			if strings.Contains(cleanHost, ":") {
+				family = "IPv6"
+			}
+			msg := fmt.Sprintf("Server is bound to reachable local %s address %s.", family, host)
 			if p.LastPhoneContact != nil {
-				msg = fmt.Sprintf("Server is bound to %s. Phone handshake active (last contact at %s).", host, p.LastPhoneContact.Format("15:04:05"))
+				msg = fmt.Sprintf("Server is bound to %s (%s). Phone handshake active (last contact at %s).", host, family, p.LastPhoneContact.Format("15:04:05"))
+			} else {
+				msg += " Local health check passed; awaiting phone connection."
 			}
 			report.Items = append(report.Items, DiagnosticItem{
 				ID:      "host_reachability",
