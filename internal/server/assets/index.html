@@ -56,6 +56,21 @@
       <ul class="queue" id="queue" aria-live="polite"></ul>
     </section>
 
+    <section class="panel" id="text-panel">
+      <div class="panel__head">
+        <h2>Quick Text & Links</h2>
+        <span class="muted" id="text-char-count">0 / 64 KB</span>
+      </div>
+      <p class="muted">Send text, notes, or web links bidirectionally with the desktop.</p>
+      <form id="text-form" class="text-form">
+        <textarea id="text-input" class="text-input" rows="2" maxlength="65536" placeholder="Type text or paste a link (http/https)…"></textarea>
+        <div class="text-form__actions">
+          <button type="submit" class="btn btn--small" id="text-send-btn" disabled>Send Text</button>
+        </div>
+      </form>
+      <ul class="text-messages" id="text-messages" aria-live="polite"></ul>
+    </section>
+
     <section class="panel">
       <div class="panel__head">
         <h2>Files on the desktop</h2>

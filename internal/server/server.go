@@ -63,7 +63,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/itsyamin/flitnix/internal/guest"
 	"github.com/itsyamin/flitnix/internal/session"
+	"github.com/itsyamin/flitnix/internal/textmsg"
 	"github.com/itsyamin/flitnix/internal/transfer"
 )
 
@@ -132,11 +134,13 @@ type Config struct {
 // application is the composition root: it owns these instances (and the
 // receive Store inside the transfer Service) and handed to Config.
 type Services struct {
-	Sessions    *session.Manager
-	Transfers   *transfer.Service
-	Coordinator *transfer.Coordinator
-	Registry    *transfer.Registry
-	Downloads   *transfer.DownloadRegistry
+	Sessions     *session.Manager
+	Transfers    *transfer.Service
+	Coordinator  *transfer.Coordinator
+	Registry     *transfer.Registry
+	Downloads    *transfer.DownloadRegistry
+	GuestManager *guest.Manager
+	TextMessages *textmsg.Store
 
 	// Diagnose, when non-nil, receives low-volume transfer diagnostics at
 	// meaningful transitions: one line when an item is claimed, milestones

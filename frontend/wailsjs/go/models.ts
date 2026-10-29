@@ -1,3 +1,65 @@
+export namespace doctor {
+	
+	export class DiagnosticItem {
+	    id: string;
+	    title: string;
+	    status: string;
+	    message: string;
+	    remediation?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new DiagnosticItem(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.title = source["title"];
+	        this.status = source["status"];
+	        this.message = source["message"];
+	        this.remediation = source["remediation"];
+	    }
+	}
+	export class DiagnosticReport {
+	    overallStatus: string;
+	    // Go type: time
+	    timestamp: any;
+	    summary: string;
+	    items: DiagnosticItem[];
+	
+	    static createFrom(source: any = {}) {
+	        return new DiagnosticReport(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.overallStatus = source["overallStatus"];
+	        this.timestamp = this.convertValues(source["timestamp"], null);
+	        this.summary = source["summary"];
+	        this.items = this.convertValues(source["items"], DiagnosticItem);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+
+}
+
 export namespace main {
 	
 	export class BatchItemView {
@@ -144,6 +206,192 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class GuestUploadView {
+	    id: string;
+	    guestId: string;
+	    guestName: string;
+	    fileName: string;
+	    size: number;
+	    state: string;
+	    transferred: number;
+	    speed: number;
+	    // Go type: time
+	    createdAt: any;
+	    // Go type: time
+	    completedAt?: any;
+	    sha256?: string;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new GuestUploadView(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.guestId = source["guestId"];
+	        this.guestName = source["guestName"];
+	        this.fileName = source["fileName"];
+	        this.size = source["size"];
+	        this.state = source["state"];
+	        this.transferred = source["transferred"];
+	        this.speed = source["speed"];
+	        this.createdAt = this.convertValues(source["createdAt"], null);
+	        this.completedAt = this.convertValues(source["completedAt"], null);
+	        this.sha256 = source["sha256"];
+	        this.error = source["error"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class GuestView {
+	    id: string;
+	    nickname: string;
+	    state: string;
+	    // Go type: time
+	    createdAt: any;
+	
+	    static createFrom(source: any = {}) {
+	        return new GuestView(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.nickname = source["nickname"];
+	        this.state = source["state"];
+	        this.createdAt = this.convertValues(source["createdAt"], null);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class GuestRoomView {
+	    id: string;
+	    date: string;
+	    destinationRoot: string;
+	    roomFolder: string;
+	    state: string;
+	    durationSeconds: number;
+	    // Go type: time
+	    createdAt: any;
+	    // Go type: time
+	    expiresAt: any;
+	    inviteSecret?: string;
+	    inviteUrl?: string;
+	    qrDataUrl?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new GuestRoomView(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.date = source["date"];
+	        this.destinationRoot = source["destinationRoot"];
+	        this.roomFolder = source["roomFolder"];
+	        this.state = source["state"];
+	        this.durationSeconds = source["durationSeconds"];
+	        this.createdAt = this.convertValues(source["createdAt"], null);
+	        this.expiresAt = this.convertValues(source["expiresAt"], null);
+	        this.inviteSecret = source["inviteSecret"];
+	        this.inviteUrl = source["inviteUrl"];
+	        this.qrDataUrl = source["qrDataUrl"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class GuestRoomStateView {
+	    room?: GuestRoomView;
+	    pendingGuests: GuestView[];
+	    approvedGuests: GuestView[];
+	    pendingUploads: GuestUploadView[];
+	    completedUploads: GuestUploadView[];
+	    recentUploads: GuestUploadView[];
+	
+	    static createFrom(source: any = {}) {
+	        return new GuestRoomStateView(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.room = this.convertValues(source["room"], GuestRoomView);
+	        this.pendingGuests = this.convertValues(source["pendingGuests"], GuestView);
+	        this.approvedGuests = this.convertValues(source["approvedGuests"], GuestView);
+	        this.pendingUploads = this.convertValues(source["pendingUploads"], GuestUploadView);
+	        this.completedUploads = this.convertValues(source["completedUploads"], GuestUploadView);
+	        this.recentUploads = this.convertValues(source["recentUploads"], GuestUploadView);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	
+	
 	export class SessionView {
 	    key: string;
 	    // Go type: time
@@ -248,6 +496,47 @@ export namespace main {
 	        this.itemCount = source["itemCount"];
 	        this.totalBytes = source["totalBytes"];
 	        this.created = this.convertValues(source["created"], null);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class TextMessageView {
+	    id: string;
+	    sender: string;
+	    content: string;
+	    isLink: boolean;
+	    url?: string;
+	    // Go type: time
+	    createdAt: any;
+	
+	    static createFrom(source: any = {}) {
+	        return new TextMessageView(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.sender = source["sender"];
+	        this.content = source["content"];
+	        this.isLink = source["isLink"];
+	        this.url = source["url"];
+	        this.createdAt = this.convertValues(source["createdAt"], null);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

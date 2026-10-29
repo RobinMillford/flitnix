@@ -10,6 +10,14 @@ export function ApproveBatch(arg1) {
   return window['go']['main']['App']['ApproveBatch'](arg1);
 }
 
+export function ApproveGuest(arg1) {
+  return window['go']['main']['App']['ApproveGuest'](arg1);
+}
+
+export function ApproveGuestUpload(arg1) {
+  return window['go']['main']['App']['ApproveGuestUpload'](arg1);
+}
+
 export function ApproveUpload(arg1) {
   return window['go']['main']['App']['ApproveUpload'](arg1);
 }
@@ -22,12 +30,24 @@ export function CancelUpload(arg1) {
   return window['go']['main']['App']['CancelUpload'](arg1);
 }
 
+export function ClearTextMessages(arg1) {
+  return window['go']['main']['App']['ClearTextMessages'](arg1);
+}
+
+export function EndGuestRoom() {
+  return window['go']['main']['App']['EndGuestRoom']();
+}
+
 export function EndSession(arg1) {
   return window['go']['main']['App']['EndSession'](arg1);
 }
 
 export function GetBatch(arg1) {
   return window['go']['main']['App']['GetBatch'](arg1);
+}
+
+export function GetGuestRoomState() {
+  return window['go']['main']['App']['GetGuestRoomState']();
 }
 
 export function ListBatches() {
@@ -58,12 +78,24 @@ export function ListSharedSources() {
   return window['go']['main']['App']['ListSharedSources']();
 }
 
+export function ListTextMessages(arg1) {
+  return window['go']['main']['App']['ListTextMessages'](arg1);
+}
+
+export function OpenGuestFolder() {
+  return window['go']['main']['App']['OpenGuestFolder']();
+}
+
 export function PickFilesForSharing() {
   return window['go']['main']['App']['PickFilesForSharing']();
 }
 
 export function PickFolderForSharing() {
   return window['go']['main']['App']['PickFolderForSharing']();
+}
+
+export function PickGuestDestination() {
+  return window['go']['main']['App']['PickGuestDestination']();
 }
 
 export function ReceiveDirectory() {
@@ -82,8 +114,20 @@ export function RejectBatch(arg1) {
   return window['go']['main']['App']['RejectBatch'](arg1);
 }
 
+export function RejectGuest(arg1) {
+  return window['go']['main']['App']['RejectGuest'](arg1);
+}
+
+export function RejectGuestUpload(arg1) {
+  return window['go']['main']['App']['RejectGuestUpload'](arg1);
+}
+
 export function RejectUpload(arg1) {
   return window['go']['main']['App']['RejectUpload'](arg1);
+}
+
+export function RevokeGuest(arg1) {
+  return window['go']['main']['App']['RevokeGuest'](arg1);
 }
 
 export function RevokeSharedFile(arg1) {
@@ -94,12 +138,24 @@ export function RevokeSharedSource(arg1) {
   return window['go']['main']['App']['RevokeSharedSource'](arg1);
 }
 
+export function RunConnectionDiagnostics() {
+  return window['go']['main']['App']['RunConnectionDiagnostics']();
+}
+
+export function SendTextMessage(arg1, arg2) {
+  return window['go']['main']['App']['SendTextMessage'](arg1, arg2);
+}
+
 export function ServerAddress() {
   return window['go']['main']['App']['ServerAddress']();
 }
 
 export function SessionQR(arg1) {
   return window['go']['main']['App']['SessionQR'](arg1);
+}
+
+export function StartGuestRoom(arg1, arg2) {
+  return window['go']['main']['App']['StartGuestRoom'](arg1, arg2);
 }
 
 export function StartSession(arg1) {

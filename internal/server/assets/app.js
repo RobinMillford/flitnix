@@ -67,6 +67,14 @@
   var downloadSelectedBtn = document.getElementById("download-selected-btn");
   var filesRefreshGeneration = 0;
 
+  var textForm = document.getElementById("text-form");
+  var textInput = document.getElementById("text-input");
+  var textSendBtn = document.getElementById("text-send-btn");
+  var textMessagesEl = document.getElementById("text-messages");
+  var textCharCount = document.getElementById("text-char-count");
+  var textMessagesCache = [];
+  var textPollTimer = null;
+
   var appState = { ended: false };
   var queue = [];      // upload jobs, FIFO
   var pumpBusy = false; // one upload in flight at a time
@@ -89,6 +97,14 @@
     while (v >= 1000 && u < units.length - 1) { v /= 1000; u += 1; }
     var digits = u === 0 || v >= 100 ? 0 : v >= 10 ? 1 : 2;
     return v.toFixed(digits) + " " + units[u];
+  }
+
+  function fmtEta(seconds) {
+    if (typeof seconds !== "number" || !isFinite(seconds) || seconds <= 0) return "< 1s";
+    if (seconds < 60) return seconds + "s";
+    var m = Math.floor(seconds / 60);
+    var s = seconds % 60;
+    return m + "m " + (s < 10 ? "0" : "") + s + "s";
   }
 
   function setStatus(stateName, text) {
@@ -263,6 +279,12 @@
     r.bar.setAttribute("aria-valuenow", String(renderedPercent));
     if (job.phase === "sending" && job.uploaded > 0 && job.size > 0) {
       text += " " + renderedPercent + "%";
+      if (job.speed > 0) {
+        text += " · " + fmtBytes(job.speed) + "/s";
+        if (job.eta != null && job.eta > 0) {
+          text += " · ETA " + fmtEta(job.eta);
+        }
+      }
     }
     r.state.textContent = text;
     r.err.hidden = !job.err;
@@ -356,6 +378,7 @@
   }
 
   function teardownJobs() {
+    if (textPollTimer) { clearInterval(textPollTimer); textPollTimer = null; }
     queue.forEach(function (job) {
       job.removed = true;
       if (job.timer) { clearTimeout(job.timer); job.timer = null; }
@@ -776,12 +799,26 @@
       var xhr = new XMLHttpRequest();
       job.xhr = xhr;
       var lastPaint = 0;
+      var lastLoaded = 0;
+      var lastTime = Date.now();
+      var currentSpeed = 0;
       xhr.open("PUT", "/api/batches/" + encodeURIComponent(job.batchID) +
         "/items/" + encodeURIComponent(job.itemID) + "/content");
       xhr.upload.addEventListener("progress", function (ev) {
         if (!ev.lengthComputable) return;
         job.uploaded = Math.min(job.size, ev.loaded);
         var now = Date.now();
+        var dt = (now - lastTime) / 1000;
+        if (dt >= 0.25) {
+          var instant = (ev.loaded - lastLoaded) / dt;
+          currentSpeed = currentSpeed === 0 ? instant : (0.7 * currentSpeed + 0.3 * instant);
+          job.speed = currentSpeed;
+          lastLoaded = ev.loaded;
+          lastTime = now;
+          if (currentSpeed > 0 && job.size > job.uploaded) {
+            job.eta = Math.round((job.size - job.uploaded) / currentSpeed);
+          }
+        }
         if (now - lastPaint >= PAINT_MIN_MS || ev.loaded === ev.total) { lastPaint = now; paint(job); }
       });
       xhr.setRequestHeader("Authorization", "Bearer " + token);
@@ -1030,6 +1067,113 @@
   }
 
   // ------------------------------------------------------------------
+  // Quick Text & Link Sharing
+  // ------------------------------------------------------------------
+  function renderTextMessages(messages) {
+    if (!textMessagesEl) return;
+    textMessagesEl.innerHTML = "";
+    if (!messages || !messages.length) {
+      var emptyLi = el("li", "muted", "No messages yet. Send a note or link to get started.");
+      emptyLi.style.padding = "0.5rem 0";
+      textMessagesEl.appendChild(emptyLi);
+      return;
+    }
+    messages.forEach(function (msg) {
+      var li = el("li", "text-msg");
+      var hdr = el("div", "text-msg__header");
+      var senderBadge = el("span", "text-msg__badge text-msg__badge--" + (msg.sender === "desktop" ? "desktop" : "phone"), msg.sender === "desktop" ? "Desktop" : "Phone");
+      var timeStr = "";
+      try {
+        timeStr = new Date(msg.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      } catch (e) { timeStr = ""; }
+      var timeSpan = el("span", "", timeStr);
+      hdr.appendChild(senderBadge);
+      hdr.appendChild(timeSpan);
+      li.appendChild(hdr);
+
+      var body = el("div", "text-msg__content", msg.content);
+      li.appendChild(body);
+
+      var actions = el("div", "text-msg__actions");
+      var copyBtn = el("button", "text-msg__btn", "Copy");
+      copyBtn.type = "button";
+      copyBtn.addEventListener("click", function () {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(msg.content).then(function () {
+            copyBtn.textContent = "Copied!";
+            setTimeout(function () { copyBtn.textContent = "Copy"; }, 1500);
+          });
+        }
+      });
+      actions.appendChild(copyBtn);
+
+      if (msg.isLink && msg.url) {
+        var openBtn = el("a", "text-msg__btn", "Open Link");
+        openBtn.href = msg.url;
+        openBtn.target = "_blank";
+        openBtn.rel = "noopener noreferrer";
+        actions.appendChild(openBtn);
+      }
+      li.appendChild(actions);
+      textMessagesEl.appendChild(li);
+    });
+  }
+
+  function fetchTextMessages() {
+    if (appState.ended || !token) return;
+    api("/api/text").then(function (messages) {
+      if (appState.ended) return;
+      textMessagesCache = messages || [];
+      renderTextMessages(textMessagesCache);
+    }).catch(function () {
+      // transient failures are ignored during background polling
+    });
+  }
+
+  function scheduleTextPoll() {
+    if (appState.ended) return;
+    fetchTextMessages();
+    textPollTimer = setInterval(function () {
+      if (appState.ended) {
+        if (textPollTimer) { clearInterval(textPollTimer); textPollTimer = null; }
+        return;
+      }
+      fetchTextMessages();
+    }, 2500);
+  }
+
+  function initQuickText() {
+    if (!textForm || !textInput) return;
+    textInput.addEventListener("input", function () {
+      var len = textInput.value.length;
+      if (textCharCount) {
+        textCharCount.textContent = len > 1024 ? Math.round(len / 1024) + " KB / 64 KB" : len + " / 64 KB";
+      }
+      if (textSendBtn) textSendBtn.disabled = len === 0 || len > 65536;
+    });
+
+    textForm.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var text = textInput.value.trim();
+      if (!text || text.length > 65536) return;
+      if (textSendBtn) textSendBtn.disabled = true;
+      api("/api/text", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: text })
+      }).then(function () {
+        textInput.value = "";
+        if (textCharCount) textCharCount.textContent = "0 / 64 KB";
+        if (textSendBtn) textSendBtn.disabled = true;
+        fetchTextMessages();
+      }).catch(function (err) {
+        if (textSendBtn) textSendBtn.disabled = false;
+        alert("Failed to send text: " + ((err && err.message) || "Unknown error"));
+      });
+    });
+  }
+
+  // ------------------------------------------------------------------
   // Boot
   // ------------------------------------------------------------------
   function boot() {
@@ -1085,6 +1229,8 @@
     setStatus("ready", "Connected — pick files to send or download the shared ones");
     flowEl.hidden = false;
     refreshFiles();
+    initQuickText();
+    scheduleTextPoll();
   }
 
   boot();

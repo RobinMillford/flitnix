@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/itsyamin/flitnix/internal/session"
+	"github.com/itsyamin/flitnix/internal/textmsg"
 	"github.com/itsyamin/flitnix/internal/transfer"
 )
 
@@ -61,12 +62,21 @@ func newRouter(services *Services, stall, downloadStall time.Duration, grants *D
 	mux.HandleFunc("/{$}", serveHome(index))
 	mux.HandleFunc("/healthz", serveHealth)
 	mux.HandleFunc("/static/", serveStatic(assetsRoot))
+
+	guestIndex, err := pageAssets.ReadFile("assets/guest.html")
+	if err == nil && len(guestIndex) > 0 {
+		mux.HandleFunc("GET /guest", serveHome(guestIndex))
+	} else {
+		mux.HandleFunc("GET /guest", serveHome(index))
+	}
+
 	mux.HandleFunc("/", serveNotFound)
 
 	if services == nil {
 		// Stages before the transfer endpoints keep deterministic page-only
 		// semantics: no API surface, everything under /api/ is a 404.
 		mux.HandleFunc("/api/", serveNotFound)
+		mux.HandleFunc("/guest-api/", serveNotFound)
 	} else {
 		// The whole API router sits behind one session check, so unknown
 		// /api/* paths and method mismatches are answered only after
@@ -75,6 +85,13 @@ func newRouter(services *Services, stall, downloadStall time.Duration, grants *D
 		api := newAPIMux(services, stall, grants)
 		mux.Handle("/api/", requireSession(services.Sessions, api.ServeHTTP))
 		mux.HandleFunc("GET /api/downloads/{id}/content", serveArchiveDownload(services, grants, downloadStall))
+
+		if services.GuestManager != nil {
+			guestAPI := newGuestAPIMux(services, stall)
+			mux.Handle("/guest-api/", guestAPI)
+		} else {
+			mux.HandleFunc("/guest-api/", serveNotFound)
+		}
 	}
 	return mux
 }
@@ -96,6 +113,8 @@ func newAPIMux(services *Services, stall time.Duration, grants *DownloadGrantSto
 	mux.HandleFunc("GET /api/sources", serveSourcesList(services))
 	mux.HandleFunc("POST /api/download-grants", createDownloadGrant(services, grants))
 	mux.HandleFunc("GET /api/download-progress/{id}", serveDownloadProgress(services, grants))
+	mux.HandleFunc("POST /api/text", handleTextMessageSend(services))
+	mux.HandleFunc("GET /api/text", handleTextMessageList(services))
 	return mux
 }
 
@@ -1017,4 +1036,70 @@ func writeError(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+type textSendRequest struct {
+	Content string `json:"content"`
+}
+
+func handleTextMessageSend(svcs *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess := sessionFrom(r)
+		if sess == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if svcs.TextMessages == nil {
+			writeError(w, http.StatusNotFound, "text messaging unavailable")
+			return
+		}
+
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, textmsg.MaxContentBytes+1024))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "reading message body")
+			return
+		}
+
+		var req textSendRequest
+		dec := json.NewDecoder(bytes.NewReader(body))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid message JSON")
+			return
+		}
+
+		msg, err := svcs.TextMessages.Add(sess.Key(), "phone", req.Content)
+		if err != nil {
+			switch {
+			case errors.Is(err, textmsg.ErrEmptyContent):
+				writeError(w, http.StatusBadRequest, "empty message")
+			case errors.Is(err, textmsg.ErrContentTooLarge):
+				writeError(w, http.StatusRequestEntityTooLarge, "message exceeds 64 KiB")
+			case errors.Is(err, textmsg.ErrInvalidUTF8):
+				writeError(w, http.StatusBadRequest, "invalid UTF-8 content")
+			default:
+				writeError(w, http.StatusInternalServerError, "failed to save message")
+			}
+			return
+		}
+
+		writeJSON(w, http.StatusCreated, msg)
+	}
+}
+
+func handleTextMessageList(svcs *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess := sessionFrom(r)
+		if sess == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if svcs.TextMessages == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"messages": []textmsg.Message{}})
+			return
+		}
+
+		msgs := svcs.TextMessages.List(sess.Key())
+		writeJSON(w, http.StatusOK, map[string]any{"messages": msgs})
+	}
 }
