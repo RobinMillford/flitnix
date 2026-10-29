@@ -86,6 +86,10 @@ func handleGuestJoin(svcs *Services) http.HandlerFunc {
 				writeError(w, http.StatusUnauthorized, "guest room is not active")
 				return
 			}
+			if errors.Is(err, guest.ErrRoomFull) {
+				writeError(w, http.StatusTooManyRequests, "guest room capacity reached")
+				return
+			}
 			writeError(w, http.StatusInternalServerError, "failed to join guest room")
 			return
 		}
@@ -224,6 +228,10 @@ func handleGuestUploadDeclare(svcs *Services) http.HandlerFunc {
 		if err != nil {
 			if errors.Is(err, transfer.ErrInvalidFilename) || errors.Is(err, transfer.ErrInvalidUpload) {
 				writeError(w, http.StatusBadRequest, "invalid filename or size")
+				return
+			}
+			if errors.Is(err, transfer.ErrNoCapacity) {
+				writeError(w, http.StatusTooManyRequests, "upload capacity reached")
 				return
 			}
 			writeError(w, http.StatusInternalServerError, "failed to declare upload")

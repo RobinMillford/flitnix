@@ -86,4 +86,50 @@ func TestTextMessagingRoutes(t *testing.T) {
 	if len(listRes.Messages) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(listRes.Messages))
 	}
+
+	// 4. Message exceeding 64 KiB rejected -> 413
+	largeContent := make([]byte, textmsg.MaxContentBytes+10)
+	for i := range largeContent {
+		largeContent[i] = 'A'
+	}
+	sendLarge, _ := json.Marshal(map[string]string{
+		"content": string(largeContent),
+	})
+	reqLarge, _ := http.NewRequest("POST", ts.URL+"/api/text", bytes.NewReader(sendLarge))
+	reqLarge.Header.Set("Authorization", "Bearer "+sess.Token())
+	reqLarge.Header.Set("Content-Type", "application/json")
+	respLarge, err := http.DefaultClient.Do(reqLarge)
+	if err != nil {
+		t.Fatalf("POST large /api/text: %v", err)
+	}
+	respLarge.Body.Close()
+	if respLarge.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status for >64KiB = %d; want 413", respLarge.StatusCode)
+	}
+
+	// 5. Invalid UTF-8 rejected -> 400
+	rawBadJSON := []byte(`{"content":"hello ` + "\xff\xfe" + ` world"}`)
+	reqBadUTF, _ := http.NewRequest("POST", ts.URL+"/api/text", bytes.NewReader(rawBadJSON))
+	reqBadUTF.Header.Set("Authorization", "Bearer "+sess.Token())
+	reqBadUTF.Header.Set("Content-Type", "application/json")
+	respBadUTF, err := http.DefaultClient.Do(reqBadUTF)
+	if err != nil {
+		t.Fatalf("POST bad utf8 /api/text: %v", err)
+	}
+	respBadUTF.Body.Close()
+	if respBadUTF.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status for bad UTF-8 = %d; want 400", respBadUTF.StatusCode)
+	}
+
+	// 6. Unauthenticated request rejected -> 401
+	reqUnauth, _ := http.NewRequest("POST", ts.URL+"/api/text", bytes.NewReader(sendPayload))
+	reqUnauth.Header.Set("Content-Type", "application/json")
+	respUnauth, err := http.DefaultClient.Do(reqUnauth)
+	if err != nil {
+		t.Fatalf("POST unauth: %v", err)
+	}
+	respUnauth.Body.Close()
+	if respUnauth.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status for unauth = %d; want 401", respUnauth.StatusCode)
+	}
 }
