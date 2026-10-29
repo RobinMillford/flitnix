@@ -32,9 +32,10 @@ export function formatEta(seconds: number): string {
 }
 
 export function calcEta(done: number, total: number, speedBytesPerSec: number): string {
-  if (speedBytesPerSec <= 0 || done >= total) return ''
+  if (speedBytesPerSec <= 0 || done <= 0 || done >= total || total <= 0) return ''
   const remaining = total - done
   const sec = Math.round(remaining / speedBytesPerSec)
+  if (sec > 86400 * 7) return ''
   return formatEta(sec)
 }
 

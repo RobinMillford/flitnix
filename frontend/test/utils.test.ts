@@ -43,8 +43,9 @@ test('formatEta formats seconds into readable intervals', () => {
 test('calcEta calculates ETA from remaining bytes and speed', () => {
   assert.equal(calcEta(100, 100, 50), '') // already done
   assert.equal(calcEta(50, 100, 0), '') // speed 0
-  assert.equal(calcEta(0, 1000, 100), '10s') // 1000 B at 100 B/s = 10s
+  assert.equal(calcEta(0, 1000, 100), '') // done 0 (insufficient progress)
   assert.equal(calcEta(200, 1000, 100), '8s') // 800 B at 100 B/s = 8s
+  assert.equal(calcEta(1, 100000000000, 0.0001), '') // unrealistically large ETA omitted
 })
 
 test('fmtTime formats valid ISO timestamps and handles invalid gracefully', () => {

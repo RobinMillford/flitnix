@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"strings"
 	"time"
 
@@ -53,7 +54,7 @@ func RunDiagnostics(p Params) DiagnosticReport {
 		p.NetSource = netenv.DefaultSource()
 	}
 
-	// 1. Check network interfaces & adapter
+	// 1. Check network interfaces & adapter (adapter_presence)
 	views, err := netenv.Enumerate(p.NetSource)
 	if err != nil || len(views) == 0 {
 		report.Items = append(report.Items, DiagnosticItem{
@@ -89,7 +90,7 @@ func RunDiagnostics(p Params) DiagnosticReport {
 		}
 	}
 
-	// 2. Check local IPv4 validity
+	// 2. Check local IPv4 validity (ipv4_address)
 	targetIP := p.ActiveIP
 	if targetIP == "" && len(views) > 0 {
 		targetIP = views[0].IP
@@ -123,38 +124,46 @@ func RunDiagnostics(p Params) DiagnosticReport {
 		}
 	}
 
-	// 3. Check server listening status & port conflict
+	// Dynamic target port resolution from ServerAddr or fallback to 43821
+	port := 43821
+	if p.ServerAddr != "" {
+		if _, portStr, err := net.SplitHostPort(p.ServerAddr); err == nil {
+			if parsedPort, err := strconv.Atoi(portStr); err == nil && parsedPort > 0 {
+				port = parsedPort
+			}
+		}
+	}
+
+	// 3. Check server listening status & port conflict (port_available)
 	if !p.ServerRunning {
-		// Server not running currently
-		// Test if port 43821 is occupied by an external process
-		ln, err := net.Listen("tcp", "127.0.0.1:43821")
+		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 		if err != nil {
 			report.Items = append(report.Items, DiagnosticItem{
-				ID:          "port_status",
+				ID:          "port_available",
 				Title:       "Server Port Availability",
 				Status:      StatusFail,
-				Message:     "Port 43821 is already in use by another application.",
-				Remediation: "Close any conflicting software using port 43821 before starting Flitnix.",
+				Message:     fmt.Sprintf("Port %d is already in use by another application.", port),
+				Remediation: fmt.Sprintf("Close any conflicting software using port %d before starting Flitnix.", port),
 			})
 		} else {
 			_ = ln.Close()
 			report.Items = append(report.Items, DiagnosticItem{
-				ID:      "port_status",
+				ID:      "port_available",
 				Title:   "Server Port Availability",
 				Status:  StatusPass,
-				Message: "Port 43821 is available for transfer sessions.",
+				Message: fmt.Sprintf("Port %d is available for transfer sessions.", port),
 			})
 		}
 	} else {
 		report.Items = append(report.Items, DiagnosticItem{
-			ID:      "port_status",
+			ID:      "port_available",
 			Title:   "Server Port Availability",
 			Status:  StatusPass,
 			Message: fmt.Sprintf("Server is actively listening on %s.", p.ServerAddr),
 		})
 	}
 
-	// 4. Local endpoint health check (HTTP probe to /healthz)
+	// 4. Local endpoint health check (server_health)
 	if p.ServerRunning && p.ServerAddr != "" {
 		healthURL := fmt.Sprintf("http://%s/healthz", p.ServerAddr)
 		client := http.Client{Timeout: 2 * time.Second}
@@ -162,7 +171,7 @@ func RunDiagnostics(p Params) DiagnosticReport {
 		resp, err := client.Do(req)
 		if err != nil {
 			report.Items = append(report.Items, DiagnosticItem{
-				ID:          "http_probe",
+				ID:          "server_health",
 				Title:       "HTTP Health Probe",
 				Status:      StatusFail,
 				Message:     fmt.Sprintf("Failed to communicate with local HTTP server at %s: %v", healthURL, err),
@@ -172,14 +181,14 @@ func RunDiagnostics(p Params) DiagnosticReport {
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
 				report.Items = append(report.Items, DiagnosticItem{
-					ID:      "http_probe",
+					ID:      "server_health",
 					Title:   "HTTP Health Probe",
 					Status:  StatusPass,
 					Message: "HTTP server responds promptly to local health requests.",
 				})
 			} else {
 				report.Items = append(report.Items, DiagnosticItem{
-					ID:          "http_probe",
+					ID:          "server_health",
 					Title:       "HTTP Health Probe",
 					Status:      StatusWarn,
 					Message:     fmt.Sprintf("HTTP health probe returned status %d.", resp.StatusCode),
@@ -187,33 +196,104 @@ func RunDiagnostics(p Params) DiagnosticReport {
 				})
 			}
 		}
+	} else {
+		report.Items = append(report.Items, DiagnosticItem{
+			ID:      "server_health",
+			Title:   "HTTP Health Probe",
+			Status:  StatusPass,
+			Message: "Server is idle; start a session or guest room to begin listening.",
+		})
 	}
 
-	// 5. Network Context & Wi-Fi Client Isolation Warning
+	// 5. Network Context & Wi-Fi Client Isolation Notice (connection_medium)
 	isWiFi := false
+	wifiName := ""
 	if len(views) > 0 {
 		for _, v := range views {
 			if strings.EqualFold(v.Type, "Wi-Fi") {
 				isWiFi = true
+				if v.FriendlyName != "" && !strings.EqualFold(v.FriendlyName, "Wi-Fi") {
+					wifiName = v.FriendlyName
+				}
 				break
 			}
 		}
 	}
 
 	if isWiFi {
+		ssidNote := ""
+		if wifiName != "" {
+			ssidNote = fmt.Sprintf(" (%s)", wifiName)
+		}
 		report.Items = append(report.Items, DiagnosticItem{
-			ID:          "wifi_isolation",
-			Title:       "Wi-Fi Client Isolation Notice",
-			Status:      StatusWarn,
-			Message:     "Connected via Wi-Fi. Some public, university, or corporate routers enable 'Client Isolation' (AP Isolation).",
+			ID:          "connection_medium",
+			Title:       "Wi-Fi & Network Medium",
+			Status:      StatusPass,
+			Message:     fmt.Sprintf("Connected via Wi-Fi%s. Advisory: Public or guest Wi-Fi networks may enforce AP/Client Isolation.", ssidNote),
 			Remediation: "If your phone cannot load the QR page while connected to the same Wi-Fi, your router may be isolating devices. Connect both devices to a private home Wi-Fi or turn on your phone's personal hotspot.",
 		})
 	} else {
 		report.Items = append(report.Items, DiagnosticItem{
-			ID:      "wifi_isolation",
+			ID:      "connection_medium",
 			Title:   "Network Medium",
 			Status:  StatusPass,
-			Message: "Connected via Ethernet or local interface.",
+			Message: "Connected via Ethernet or wired interface.",
+		})
+	}
+
+	// 6. Host address binding reachability (host_reachability)
+	if p.ServerRunning && p.ServerAddr != "" {
+		host, _, err := net.SplitHostPort(p.ServerAddr)
+		if err != nil {
+			host = p.ServerAddr
+		}
+		matches := false
+		for _, v := range views {
+			if v.IP == host {
+				matches = true
+				break
+			}
+		}
+		if matches || host == "127.0.0.1" || host == "localhost" {
+			report.Items = append(report.Items, DiagnosticItem{
+				ID:      "host_reachability",
+				Title:   "Host Address Binding",
+				Status:  StatusPass,
+				Message: fmt.Sprintf("Server is bound to reachable local address %s.", host),
+			})
+		} else {
+			report.Items = append(report.Items, DiagnosticItem{
+				ID:          "host_reachability",
+				Title:       "Host Address Binding",
+				Status:      StatusWarn,
+				Message:     fmt.Sprintf("Server bound to %s, which does not match active interface IP %s.", host, p.ActiveIP),
+				Remediation: "Click 'Regenerate QR' to rebind to the active interface.",
+			})
+		}
+	} else {
+		report.Items = append(report.Items, DiagnosticItem{
+			ID:      "host_reachability",
+			Title:   "Host Address Binding",
+			Status:  StatusPass,
+			Message: "Host binding ready for session startup.",
+		})
+	}
+
+	// 7. Multi-homed routing guidance (multihomed_routing)
+	if len(views) > 1 {
+		report.Items = append(report.Items, DiagnosticItem{
+			ID:          "multihomed_routing",
+			Title:       "Multi-Homed Routing",
+			Status:      StatusWarn,
+			Message:     fmt.Sprintf("%d active network interfaces detected. Multiple active adapters (e.g. Wi-Fi and VPN) can cause phones to route to the wrong interface.", len(views)),
+			Remediation: "Ensure the phone connects to the same network interface shown on the desktop, or disconnect unnecessary VPN/secondary adapters.",
+		})
+	} else {
+		report.Items = append(report.Items, DiagnosticItem{
+			ID:      "multihomed_routing",
+			Title:   "Multi-Homed Routing",
+			Status:  StatusPass,
+			Message: "Single active network adapter detected; no routing ambiguity.",
 		})
 	}
 
