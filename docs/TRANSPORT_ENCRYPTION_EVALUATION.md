@@ -6,12 +6,15 @@ Flitnix's core design goal is **zero-friction local transfers**: a user scans a 
 
 ## 1. Measured Performance Comparison
 
+> [!NOTE]
+> **Methodology & Scope:** These numbers were collected in a controlled in-memory loopback microbenchmark using AES-128-GCM cipher suites on modern x86_64 hardware. They isolate the raw cryptographic framing and CPU symmetric encryption cost. This is NOT a physical Wi-Fi benchmark. On a physical Wi-Fi network (typically 25–80 MB/s), CPU encryption overhead is completely negligible compared to wireless channel limits. The primary differentiator and release gate consideration is user friction and browser security warnings, not network speed.
+
 | Transport Mode | Transfer Size | Handshake Latency | Transfer Duration | Throughput | Memory Allocations |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| **HTTP/1.1 (Plain Streaming)** | 100.0 MB | 0.51 ms | 25 ms | **4000.00 MB/s** | 0.15 MB |
-| **HTTPS (TLS 1.3 / AES-GCM)** | 100.0 MB | 1.71 ms | 57 ms | **1754.39 MB/s** | 0.42 MB |
+| **HTTP/1.1 (Plain Streaming)** | 100.0 MB | 1.08 ms | 46 ms | **2173.91 MB/s** | 0.15 MB |
+| **HTTPS (TLS 1.3 / AES-GCM)** | 100.0 MB | 1.82 ms | 145 ms | **689.66 MB/s** | 0.40 MB |
 
-*Observed CPU/crypto transfer duration overhead on modern x86_64 hardware: ~128.0%.*
+*Observed CPU/crypto transfer duration overhead on modern x86_64 hardware: ~215.2%.*
 
 ## 2. Browser Security Friction Analysis (The Zero-Install Dilemma)
 

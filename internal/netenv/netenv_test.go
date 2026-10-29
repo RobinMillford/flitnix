@@ -239,13 +239,18 @@ func TestTransferURL(t *testing.T) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 
-	gotV6, err := TransferURL("fe80::1", 43821, "my-token")
+	gotV6, err := TransferURL("2001:db8::1", 43821, "my-token")
 	if err != nil {
 		t.Fatalf("TransferURL IPv6: %v", err)
 	}
-	wantV6 := "http://[fe80::1]:43821/#my-token"
+	wantV6 := "http://[2001:db8::1]:43821/#my-token"
 	if gotV6 != wantV6 {
 		t.Fatalf("got %q, want %q", gotV6, wantV6)
+	}
+
+	// Link-local IPv6 must be rejected with clear scope error
+	if _, err := TransferURL("fe80::1", 43821, "my-token"); err == nil {
+		t.Fatal("expected link-local IPv6 to be rejected by TransferURL")
 	}
 
 	badTokens := []string{"", " ", "#tok", "a#b", "a b", "x\ny"}

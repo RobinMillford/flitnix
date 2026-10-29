@@ -87,3 +87,48 @@ func TestDevicesStoreLifecycle(t *testing.T) {
 		t.Fatalf("expected 0 devices after removal, got %d", len(store2.List()))
 	}
 }
+
+func TestVerifyAuthChallengeReplayAndExpiry(t *testing.T) {
+	store, err := NewStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dev, err := store.Add("Laptop", pub, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	nonce := "random-nonce-12345"
+	now := time.Now().UTC()
+	challenge := ChallengePayload(dev.ID, nonce, now)
+	sig := SignMessage(priv, challenge)
+
+	// First challenge validation passes
+	ok, err := store.VerifyAuthChallenge(dev.ID, nonce, now, sig, 1*time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("first challenge failed: ok=%v, err=%v", ok, err)
+	}
+
+	// Replay of same nonce is rejected
+	okReplay, errReplay := store.VerifyAuthChallenge(dev.ID, nonce, now, sig, 1*time.Minute)
+	if okReplay || errReplay != ErrReplayDetected {
+		t.Fatalf("expected ErrReplayDetected, got ok=%v, err=%v", okReplay, errReplay)
+	}
+
+	// Expired timestamp is rejected
+	expiredNonce := "nonce-expired-999"
+	oldTime := now.Add(-10 * time.Minute)
+	oldChallenge := ChallengePayload(dev.ID, expiredNonce, oldTime)
+	oldSig := SignMessage(priv, oldChallenge)
+
+	okExp, errExp := store.VerifyAuthChallenge(dev.ID, expiredNonce, oldTime, oldSig, 1*time.Minute)
+	if okExp || errExp != ErrChallengeExpired {
+		t.Fatalf("expected ErrChallengeExpired, got ok=%v, err=%v", okExp, errExp)
+	}
+}

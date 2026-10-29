@@ -376,6 +376,13 @@ func TransferURL(ip string, port int, token string) (string, error) {
 			return "", errors.New("netenv: the session token must be URL-safe with no fragment separators")
 		}
 	}
+	parsed, err := netip.ParseAddr(ip)
+	if err != nil {
+		return "", fmt.Errorf("netenv: %q is not an IP address: %w", ip, err)
+	}
+	if parsed.IsLinkLocalUnicast() {
+		return "", fmt.Errorf("netenv: IPv6 link-local address %s cannot be used for phone QR URLs (requires global or unique-local scope)", ip)
+	}
 	base, err := ListenAddr(ip, port)
 	if err != nil {
 		return "", err

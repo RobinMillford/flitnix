@@ -321,10 +321,14 @@ func runTransferTest(client *http.Client, serverURL, token string, transfers *tr
 func generateMarkdownReport(suite SuiteReport) string {
 	var buf bytes.Buffer
 	buf.WriteString("# Flitnix Transfer Performance Benchmark Report\n\n")
-	buf.WriteString(fmt.Sprintf("**Date:** %s  \n", suite.GeneratedAt.Format("2006-01-02 15:04:05 UTC")))
-	buf.WriteString(fmt.Sprintf("**Environment:** %s | %s  \n\n", suite.Platform, suite.GoVersion))
+	buf.WriteString(fmt.Sprintf("**Date:** %s<br>\n", suite.GeneratedAt.Format("2006-01-02 15:04:05 UTC")))
+	buf.WriteString(fmt.Sprintf("**Environment:** %s | %s<br>\n", suite.Platform, suite.GoVersion))
+	buf.WriteString("**Benchmark Mode:** Local Loopback TCP (`127.0.0.1`) on NVMe storage\n\n")
 
-	buf.WriteString("## 1. Measured Performance Results\n\n")
+	buf.WriteString("## 1. Measured Performance Results (Loopback Microbenchmark)\n\n")
+	buf.WriteString("> [!NOTE]\n")
+	buf.WriteString("> These measurements reflect local loopback TCP streaming against fast NVMe storage to isolate and verify Flitnix's chunking pipeline, lock-free progress callbacks, and inline cryptographic SHA-256 verification. Over a physical Wi-Fi network, throughput is governed by 802.11 RF channel capacity, router contention, and phone antenna capabilities (typically 25–80 MB/s).\n\n")
+
 	buf.WriteString("| Topology | Files | Data Volume | Duration | Throughput | Peak Heap | Integrity Pass |\n")
 	buf.WriteString("| :--- | :---: | :---: | :---: | :---: | :---: | :---: |\n")
 
@@ -333,7 +337,7 @@ func generateMarkdownReport(suite SuiteReport) string {
 			r.Topology, r.Description, r.FileCount, float64(r.TotalBytes)/(1024*1024), r.DurationMs, r.ThroughputMBs, r.PeakHeapAllocMB, r.IntegrityPass))
 	}
 
-	buf.WriteString("\n## 2. Architecture & Comparison Protocol vs LocalSend\n\n")
+	buf.WriteString("\n## 2. Architecture & Protocol Analysis vs LocalSend\n\n")
 	buf.WriteString("### Protocol Comparison\n\n")
 	buf.WriteString("| Dimension | Flitnix | LocalSend |\n")
 	buf.WriteString("| :--- | :--- | :--- |\n")
@@ -346,15 +350,25 @@ func generateMarkdownReport(suite SuiteReport) string {
 
 	buf.WriteString("### Performance Topology Analysis\n\n")
 	buf.WriteString("1. **Large Single File (500 MB):**\n")
-	buf.WriteString("   Flitnix achieves near line-rate disk I/O throughput because bytes stream directly from the HTTP connection socket into the file sink with an inline cryptographic SHA-256 hasher. Heap allocation remains strictly flat (~10-25 MB) regardless of transfer size.\n\n")
+	buf.WriteString("   Flitnix achieves line-rate NVMe disk throughput in loopback testing because bytes stream directly from the HTTP connection socket into the file sink with an inline cryptographic SHA-256 hasher. Heap allocation remains strictly flat (~0.7–2.5 MB) regardless of transfer size.\n\n")
 	buf.WriteString("2. **Many Small Files (1,000 files x 20 KB):**\n")
-	buf.WriteString("   Small file performance is dominated by HTTP connection turnaround and metadata verification roundtrips. Flitnix handles 1,000 files in sequential HTTP requests with deterministic sequencing and bounded memory.\n\n")
+	buf.WriteString("   Small file performance is dominated by HTTP connection turnaround and metadata verification roundtrips. Flitnix processes 1,000 files in sequential HTTP requests with deterministic sequencing and bounded memory.\n\n")
 	buf.WriteString("3. **Mixed Directory Hierarchy (111 files, 110 MB):**\n")
 	buf.WriteString("   Mixed topologies validate directory sanitization, path traversal defense, and interleaved small-file/large-file streams. In all cases, 100% SHA-256 byte integrity is verified.\n\n")
 
+	buf.WriteString("## 3. Real-World Network Benchmark Procedure\n\n")
+	buf.WriteString("To benchmark Flitnix over a physical local area network between two machines or a phone:\n")
+	buf.WriteString("1. **Desktop-to-Desktop Test:**\n")
+	buf.WriteString("   - On Machine A: Run `flitnix serve -addr 0.0.0.0:43821`\n")
+	buf.WriteString("   - On Machine B: Run `go run ./benchmarks/main.go -server http://<Machine-A-IP>:43821`\n")
+	buf.WriteString("2. **Physical Mobile Phone Test:**\n")
+	buf.WriteString("   - Start Flitnix on desktop.\n")
+	buf.WriteString("   - Scan QR code from mobile browser.\n")
+	buf.WriteString("   - Upload a test video (e.g. 200 MB), record elapsed seconds from transfer card timer, and verify matching SHA-256 hash.\n\n")
+
 	buf.WriteString("### Reproducibility\n\n")
 	buf.WriteString("Run the benchmark suite at any time via:\n")
-	buf.WriteString("```bash\ngo run ./benchmarks/main.go\n```\n")
+	buf.WriteString("```bash\n./benchmarks/run_benchmarks.sh\n```\n")
 
 	return buf.String()
 }

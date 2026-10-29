@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"errors"
 	"net"
@@ -343,5 +344,129 @@ func TestAppEventCollectionPlatform(t *testing.T) {
 	// 10. End room
 	if err := app.EndGuestRoom(); err != nil {
 		t.Fatalf("EndGuestRoom: %v", err)
+	}
+}
+
+func TestAddDroppedSourcesValidation(t *testing.T) {
+	app, err := NewApp()
+	if err != nil {
+		t.Fatalf("NewApp: %v", err)
+	}
+	defer app.shutdown(t.Context())
+
+	tmpDir := t.TempDir()
+
+	// 1. Valid file with Unicode and spaces
+	validFile := filepath.Join(tmpDir, "日本語 ドキュメント.pdf")
+	if err := os.WriteFile(validFile, []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Symlink to valid file
+	symlinkFile := filepath.Join(tmpDir, "link-to-doc.pdf")
+	if err := os.Symlink(validFile, symlinkFile); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. Nonexistent file
+	nonexistentFile := filepath.Join(tmpDir, "does-not-exist.bin")
+
+	// Call AddDroppedSources with all three
+	views, err := app.AddDroppedSources([]string{validFile, symlinkFile, nonexistentFile})
+	if err == nil {
+		t.Fatal("expected AddDroppedSources to report error for invalid sources")
+	}
+
+	// Valid file must be registered successfully despite failures of other inputs
+	if len(views) != 1 {
+		t.Fatalf("expected 1 valid view registered, got %d", len(views))
+	}
+	if views[0].Name != "日本語 ドキュメント.pdf" {
+		t.Fatalf("expected valid source name %q, got %q", "日本語 ドキュメント.pdf", views[0].Name)
+	}
+}
+
+func TestExportDuplicateNameDeduplication(t *testing.T) {
+	app, err := NewApp()
+	if err != nil {
+		t.Fatalf("NewApp: %v", err)
+	}
+	defer app.shutdown(t.Context())
+
+	tmpDir := t.TempDir()
+	roomFolder := filepath.Join(tmpDir, "export-room")
+	_ = os.MkdirAll(roomFolder, 0o755)
+
+	_, err = app.StartGuestRoomWithConfig(GuestRoomConfigView{
+		Title:           "Duplicate Test Room",
+		DestinationDir:  roomFolder,
+		DurationMinutes: 30,
+		CollisionPolicy: "preserve_both",
+	})
+	if err != nil {
+		t.Fatalf("StartGuestRoomWithConfig: %v", err)
+	}
+
+	activeRoom := app.guestMgr.ActiveRoom()
+	if activeRoom == nil {
+		t.Fatal("active room is nil")
+	}
+
+	g, err := activeRoom.Join("Tester")
+	if err != nil {
+		t.Fatalf("Join: %v", err)
+	}
+	_ = activeRoom.ApproveGuest(g.ID)
+
+	// Declare and upload file 1: "report.pdf"
+	content1 := []byte("first submission content")
+	up1, err := activeRoom.DeclareUpload(g.ID, "report.pdf", int64(len(content1)))
+	if err != nil {
+		t.Fatalf("DeclareUpload 1: %v", err)
+	}
+	_ = activeRoom.ApproveUpload(up1.ID)
+	if _, err := activeRoom.StreamUpload(up1.ID, bytes.NewReader(content1)); err != nil {
+		t.Fatalf("StreamUpload 1: %v", err)
+	}
+
+	// Declare and upload file 2: identical filename "report.pdf" under preserve_both
+	content2 := []byte("second submission content revised")
+	up2, err := activeRoom.DeclareUpload(g.ID, "report.pdf", int64(len(content2)))
+	if err != nil {
+		t.Fatalf("DeclareUpload 2: %v", err)
+	}
+	_ = activeRoom.ApproveUpload(up2.ID)
+	if _, err := activeRoom.StreamUpload(up2.ID, bytes.NewReader(content2)); err != nil {
+		t.Fatalf("StreamUpload 2: %v", err)
+	}
+
+	// Export to zip
+	zipPath := filepath.Join(tmpDir, "dedup-test.zip")
+	res, err := guest.ExportRoomToZip(activeRoom, zipPath)
+	if err != nil {
+		t.Fatalf("ExportRoomToZip failed: %v", err)
+	}
+	if res.TotalFiles != 2 {
+		t.Fatalf("expected 2 exported files, got %d", res.TotalFiles)
+	}
+
+	// Read and verify zip entries
+	zr, err := zip.OpenReader(zipPath)
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer zr.Close()
+
+	entryNames := make(map[string]bool)
+	for _, f := range zr.File {
+		if f.Name != "manifest.json" && f.Name != "manifest.csv" {
+			if entryNames[f.Name] {
+				t.Fatalf("duplicate entry path in zip archive: %q", f.Name)
+			}
+			entryNames[f.Name] = true
+		}
+	}
+	if len(entryNames) != 2 {
+		t.Fatalf("expected 2 distinct file entries in zip, got %d (%v)", len(entryNames), entryNames)
 	}
 }

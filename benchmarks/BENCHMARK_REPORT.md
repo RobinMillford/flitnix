@@ -1,17 +1,21 @@
 # Flitnix Transfer Performance Benchmark Report
 
-**Date:** 2026-10-29 05:42:11 UTC  
-**Environment:** linux/amd64 (16 CPUs) | go1.27.3  
+**Date:** 2026-10-29 05:58:48 UTC<br>
+**Environment:** linux/amd64 (16 CPUs) | go1.27.3<br>
+**Benchmark Mode:** Local Loopback TCP (`127.0.0.1`) on NVMe storage
 
-## 1. Measured Performance Results
+## 1. Measured Performance Results (Loopback Microbenchmark)
+
+> [!NOTE]
+> These measurements reflect local loopback TCP streaming against fast NVMe storage to isolate and verify Flitnix's chunking pipeline, lock-free progress callbacks, and inline cryptographic SHA-256 verification. Over a physical Wi-Fi network, throughput is governed by 802.11 RF channel capacity, router contention, and phone antenna capabilities (typically 25–80 MB/s).
 
 | Topology | Files | Data Volume | Duration | Throughput | Peak Heap | Integrity Pass |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Topology 1: Large File**<br><small>Single 500 MB file streaming transfer</small> | 1 | 500.00 MB | 526 ms | **950.57 MB/s** | 0.73 MB | true |
-| **Topology 2: Many Small Files**<br><small>1,000 files x 20 KB each (metadata & connection turnaround)</small> | 1000 | 19.53 MB | 428 ms | **45.63 MB/s** | 3.14 MB | true |
-| **Topology 3: Mixed Hierarchy**<br><small>111 mixed files (50 MB video, 10x5MB clips, 100x100KB documents)</small> | 111 | 109.77 MB | 153 ms | **717.42 MB/s** | 2.67 MB | true |
+| **Topology 1: Large File**<br><small>Single 500 MB file streaming transfer</small> | 1 | 500.00 MB | 866 ms | **577.37 MB/s** | 0.76 MB | true |
+| **Topology 2: Many Small Files**<br><small>1,000 files x 20 KB each (metadata & connection turnaround)</small> | 1000 | 19.53 MB | 705 ms | **27.70 MB/s** | 2.11 MB | true |
+| **Topology 3: Mixed Hierarchy**<br><small>111 mixed files (50 MB video, 10x5MB clips, 100x100KB documents)</small> | 111 | 109.77 MB | 297 ms | **369.58 MB/s** | 2.56 MB | true |
 
-## 2. Architecture & Comparison Protocol vs LocalSend
+## 2. Architecture & Protocol Analysis vs LocalSend
 
 ### Protocol Comparison
 
@@ -27,17 +31,28 @@
 ### Performance Topology Analysis
 
 1. **Large Single File (500 MB):**
-   Flitnix achieves near line-rate disk I/O throughput because bytes stream directly from the HTTP connection socket into the file sink with an inline cryptographic SHA-256 hasher. Heap allocation remains strictly flat (~10-25 MB) regardless of transfer size.
+   Flitnix achieves line-rate NVMe disk throughput in loopback testing because bytes stream directly from the HTTP connection socket into the file sink with an inline cryptographic SHA-256 hasher. Heap allocation remains strictly flat (~0.7–2.5 MB) regardless of transfer size.
 
 2. **Many Small Files (1,000 files x 20 KB):**
-   Small file performance is dominated by HTTP connection turnaround and metadata verification roundtrips. Flitnix handles 1,000 files in sequential HTTP requests with deterministic sequencing and bounded memory.
+   Small file performance is dominated by HTTP connection turnaround and metadata verification roundtrips. Flitnix processes 1,000 files in sequential HTTP requests with deterministic sequencing and bounded memory.
 
 3. **Mixed Directory Hierarchy (111 files, 110 MB):**
    Mixed topologies validate directory sanitization, path traversal defense, and interleaved small-file/large-file streams. In all cases, 100% SHA-256 byte integrity is verified.
+
+## 3. Real-World Network Benchmark Procedure
+
+To benchmark Flitnix over a physical local area network between two machines or a phone:
+1. **Desktop-to-Desktop Test:**
+   - On Machine A: Run `flitnix serve -addr 0.0.0.0:43821`
+   - On Machine B: Run `go run ./benchmarks/main.go -server http://<Machine-A-IP>:43821`
+2. **Physical Mobile Phone Test:**
+   - Start Flitnix on desktop.
+   - Scan QR code from mobile browser.
+   - Upload a test video (e.g. 200 MB), record elapsed seconds from transfer card timer, and verify matching SHA-256 hash.
 
 ### Reproducibility
 
 Run the benchmark suite at any time via:
 ```bash
-go run ./benchmarks/main.go
+./benchmarks/run_benchmarks.sh
 ```
