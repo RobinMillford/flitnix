@@ -185,6 +185,11 @@ func (r *Registry) AddFolder(path, sessionKey string) (SharedSource, error) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	for _, existing := range r.sources {
+		if existing.Kind == SourceKindFolder && existing.Path == root && existing.Session == sessionKey {
+			return existing, nil
+		}
+	}
 	if len(r.sources) >= registryMaxFiles {
 		return SharedSource{}, fmt.Errorf("%w: too many sources are shared", ErrNoCapacity)
 	}

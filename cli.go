@@ -10,7 +10,6 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -59,17 +58,10 @@ func handleCLI(args []string, stdout, stderr io.Writer) (bool, int, []string) {
 
 	default:
 		// Check if arguments are file or directory paths to be shared immediately
-		var initialShares []string
-		for _, arg := range args[1:] {
-			if strings.HasPrefix(arg, "-") {
-				continue
-			}
-			if absPath, err := filepath.Abs(arg); err == nil {
-				if _, err := os.Stat(absPath); err == nil {
-					initialShares = append(initialShares, absPath)
-				}
-			}
-		}
+		cwd, _ := os.Getwd()
+		initialShares := ExtractSharePaths(args[1:], cwd, func(raw string, err error) {
+			fmt.Fprintf(stderr, "flitnix: ignoring invalid path %q: %v\n", raw, err)
+		})
 		return false, 0, initialShares
 	}
 }
