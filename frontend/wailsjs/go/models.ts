@@ -529,6 +529,7 @@ export namespace main {
 	    state: string;
 	    written: number;
 	    speed: number;
+	    sha256?: string;
 	    reason?: string;
 
 	    static createFrom(source: any = {}) {
@@ -548,6 +549,7 @@ export namespace main {
 	        this.state = source["state"];
 	        this.written = source["written"];
 	        this.speed = source["speed"];
+	        this.sha256 = source["sha256"];
 	        this.reason = source["reason"];
 	    }
 

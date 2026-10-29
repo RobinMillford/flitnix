@@ -3,6 +3,8 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -916,19 +918,40 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 			return
 		}
 
-		info, err := os.Stat(sf.Path)
-		if err != nil || !info.Mode().IsRegular() {
-			writeError(w, http.StatusNotFound, "shared file no longer available")
-			return
-		}
-		f, err := os.Open(sf.Path)
+		f, err := openTrustedSource(sf.Path)
 		if err != nil {
 			writeError(w, http.StatusNotFound, "shared file no longer available")
 			return
 		}
 		defer f.Close()
 
+		info, err := f.Stat()
+		if err != nil || !info.Mode().IsRegular() {
+			writeError(w, http.StatusNotFound, "shared file no longer available")
+			return
+		}
+
 		size := info.Size()
+
+		// Pass 1: Compute the SHA-256 digest of the actual source file using a bounded-memory streaming read
+		hasher := sha256.New()
+		buf := make([]byte, downloadCopySize)
+		nPass1, err := io.CopyBuffer(hasher, f, buf)
+		if err != nil || nPass1 != size {
+			writeError(w, http.StatusGone, "shared file changed or unreadable")
+			return
+		}
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to rewind file stream")
+			return
+		}
+		reopenedInfo, err := f.Stat()
+		if err != nil || reopenedInfo.Size() != size || reopenedInfo.ModTime() != info.ModTime() {
+			writeError(w, http.StatusGone, "shared file changed during preparation")
+			return
+		}
+		expectedSHA256 := hex.EncodeToString(hasher.Sum(nil))
+
 		var downloadID string
 		if svcs.Downloads != nil {
 			dl, trackErr := svcs.Downloads.Start(sf.ID, sf.Name, sess.Key(), size)
@@ -944,6 +967,10 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 		w.Header().Set("Accept-Ranges", "none")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Content-Disposition", contentDisposition(sf.Name))
+		if digestHdr := transfer.FormatContentDigest(expectedSHA256); digestHdr != "" {
+			w.Header().Set("Content-Digest", digestHdr)
+		}
+		w.Header().Set("X-Content-SHA256", expectedSHA256)
 		w.WriteHeader(http.StatusOK)
 
 		// Pin for the streaming duration, then stream. Writes carry a
@@ -958,7 +985,7 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 			stall: stall,
 		}
 
-		buf := make([]byte, downloadCopySize)
+		streamHasher := sha256.New()
 		var written int64
 		for written < size {
 			// A direct download is an authenticated transfer, so a session
@@ -979,6 +1006,7 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 			}
 			n, rerr := f.Read(buf)
 			if n > 0 {
+				streamHasher.Write(buf[:n])
 				wn, werr := out.Write(buf[:n])
 				written += int64(wn)
 				if svcs.Downloads != nil {
@@ -994,7 +1022,7 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 			}
 			if rerr != nil {
 				if rerr == io.EOF && written == size {
-					return
+					break
 				}
 				// Short file (shrank mid-stream) or a disk read error:
 				// the headers already declared `size`, so abort the
@@ -1007,8 +1035,18 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 				return
 			}
 		}
+
+		actualSHA256 := hex.EncodeToString(streamHasher.Sum(nil))
+		if actualSHA256 != expectedSHA256 {
+			_ = forceClose(w, f)
+			if svcs.Downloads != nil {
+				svcs.Downloads.Fail(downloadID, "file checksum changed while it was being sent", written)
+			}
+			return
+		}
+
 		if svcs.Downloads != nil {
-			svcs.Downloads.Finish(downloadID, written)
+			svcs.Downloads.FinishWithDigest(downloadID, written, expectedSHA256)
 		}
 	}
 }
