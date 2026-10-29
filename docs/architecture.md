@@ -112,3 +112,13 @@ Reports categorize overall health as `PASS`, `WARNING`, or `FAIL` and provide on
   - **Streaming File Sink (`showSaveFilePicker`)**: In supported environments (such as Chromium desktops), the browser streams received chunks through `js-sha256` directly into the filesystem handle without in-memory buffering.
   - **Native Download Fallback (`iframe` / direct trigger)**: Standard mobile browsers on plain HTTP local networks do not support the File System Access API. Flitnix routes the download through the browser's native download manager to ensure reliable file saving without memory bloat. A dedicated **Download Integrity** card displays the expected SHA-256 hash with one-click copy, and provides a **Verify Downloaded File** button allowing the user to select the downloaded file from their Downloads folder for zero-install, bounded-memory verification via `File.stream()` (64 KiB chunks).
   - **Client Verification States**: The UI cleanly reports states: `waiting`, `downloading`, `verifying`, `verified`, `failed`, `unavailable`, and `canceled`.
+
+### 2.7 Multi-Interface & IPv6 Networking Subsystem (`internal/netenv`, `internal/server`)
+- **Address Family Support**:
+  - **IPv4**: Unicast LAN addresses (private RFC 1918 and routable LANs) fully supported.
+  - **IPv6 Global Unicast (`2000::/3`) & Unique-Local (`fc00::/7`)**: Fully supported for interface discovery, explicit TCP socket binding (`net.Listen`), session creation, and QR generation (`http://[<ipv6>]:43821/#<token>`).
+  - **IPv6 Link-Local (`fe80::/10`) Policy**: Explicitly unsupported for QR onboarding. Standard mobile web browsers (Safari, Chrome) do not reliably parse or route zone IDs (`%iface`) in URL authorities. Flitnix flags link-local candidates as unsuitable for QR pairing with clear guidance.
+- **Dual-Stack & Candidate Normalization**: Interfaces with both IPv4 and IPv6 addresses expose both candidates in the network picker. IPv4-mapped IPv6 addresses (`::ffff:x.x.x.x`) are unmapped and deduplicated to prevent phantom interfaces.
+- **Explicit Binding Security**: Flitnix binds strictly to the chosen candidate address (never `0.0.0.0` or `[::]`), preventing unintended exposure on secondary network adapters or VPN tunnels.
+- **Host & Origin Validation**: Bracketed IPv6 host headers (`[<ipv6>]:<port>`) are parsed and validated strictly against malformed brackets and DNS-rebinding attacks.
+- **Physical Network Verification Status**: Automated test suites cover IPv6 discovery, loopback binding, and bracketed HTTP security. Physical mobile phone verification over an actual IPv6-enabled Wi-Fi network requires a dual-stack router and mobile hardware.
