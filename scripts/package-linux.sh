@@ -46,11 +46,18 @@ echo "-> Building manual tar.gz archive..."
 TAR_STAGE="$(mktemp -d)"
 trap 'rm -rf "${TAR_STAGE}"' EXIT
 
-mkdir -p "${TAR_STAGE}/flitnix/bin" "${TAR_STAGE}/flitnix/share/applications" "${TAR_STAGE}/flitnix/share/icons"
+mkdir -p "${TAR_STAGE}/flitnix/bin" "${TAR_STAGE}/flitnix/share/applications" "${TAR_STAGE}/flitnix/share/icons" "${TAR_STAGE}/flitnix/share/nautilus/scripts" "${TAR_STAGE}/flitnix/share/kio/servicemenus"
 cp build/bin/flitnix "${TAR_STAGE}/flitnix/bin/"
 chmod 0755 "${TAR_STAGE}/flitnix/bin/flitnix"
 cp build/linux/flitnix.desktop "${TAR_STAGE}/flitnix/share/applications/"
 cp -r build/linux/icons/hicolor "${TAR_STAGE}/flitnix/share/icons/"
+if [ -f "build/linux/nautilus/Share with Flitnix" ]; then
+    cp "build/linux/nautilus/Share with Flitnix" "${TAR_STAGE}/flitnix/share/nautilus/scripts/"
+    chmod 0755 "${TAR_STAGE}/flitnix/share/nautilus/scripts/Share with Flitnix"
+fi
+if [ -f "build/linux/servicemenus/flitnix.desktop" ]; then
+    cp "build/linux/servicemenus/flitnix.desktop" "${TAR_STAGE}/flitnix/share/kio/servicemenus/"
+fi
 if [ -f LICENSE ]; then
     cp LICENSE "${TAR_STAGE}/flitnix/"
 fi
@@ -76,6 +83,16 @@ cp bin/flitnix "${PREFIX}/bin/flitnix"
 chmod 0755 "${PREFIX}/bin/flitnix"
 cp share/applications/flitnix.desktop "${PREFIX}/share/applications/flitnix.desktop"
 cp -r share/icons/hicolor "${PREFIX}/share/icons/"
+if [ -f "share/nautilus/scripts/Share with Flitnix" ]; then
+    NAUTILUS_USER_SCRIPTS="${XDG_DATA_HOME:-$HOME/.local/share}/nautilus/scripts"
+    mkdir -p "${NAUTILUS_USER_SCRIPTS}"
+    cp "share/nautilus/scripts/Share with Flitnix" "${NAUTILUS_USER_SCRIPTS}/Share with Flitnix"
+    chmod 0755 "${NAUTILUS_USER_SCRIPTS}/Share with Flitnix"
+fi
+if [ -f "share/kio/servicemenus/flitnix.desktop" ]; then
+    mkdir -p "${PREFIX}/share/kio/servicemenus"
+    cp "share/kio/servicemenus/flitnix.desktop" "${PREFIX}/share/kio/servicemenus/"
+fi
 
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "${PREFIX}/share/applications" || true

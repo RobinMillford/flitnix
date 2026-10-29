@@ -102,11 +102,32 @@ Section
     !insertmacro wails.associateFiles
     !insertmacro wails.associateCustomProtocols
 
+    # Windows Explorer context menu integration
+    # Files
+    WriteRegStr SHCTX "Software\Classes\*\shell\Flitnix" "" "Share with Flitnix"
+    WriteRegStr SHCTX "Software\Classes\*\shell\Flitnix" "Icon" '"$INSTDIR\${PRODUCT_EXECUTABLE}",0'
+    WriteRegStr SHCTX "Software\Classes\*\shell\Flitnix\command" "" '"$INSTDIR\${PRODUCT_EXECUTABLE}" "%1"'
+
+    # Folders / Directories
+    WriteRegStr SHCTX "Software\Classes\Directory\shell\Flitnix" "" "Share with Flitnix"
+    WriteRegStr SHCTX "Software\Classes\Directory\shell\Flitnix" "Icon" '"$INSTDIR\${PRODUCT_EXECUTABLE}",0'
+    WriteRegStr SHCTX "Software\Classes\Directory\shell\Flitnix\command" "" '"$INSTDIR\${PRODUCT_EXECUTABLE}" "%1"'
+
+    # Directory Background
+    WriteRegStr SHCTX "Software\Classes\Directory\Background\shell\Flitnix" "" "Share with Flitnix"
+    WriteRegStr SHCTX "Software\Classes\Directory\Background\shell\Flitnix" "Icon" '"$INSTDIR\${PRODUCT_EXECUTABLE}",0'
+    WriteRegStr SHCTX "Software\Classes\Directory\Background\shell\Flitnix\command" "" '"$INSTDIR\${PRODUCT_EXECUTABLE}" "%V"'
+
     !insertmacro wails.writeUninstaller
 SectionEnd
 
 Section "uninstall"
     !insertmacro wails.setShellContext
+
+    # Clean up Windows Explorer context menu integration
+    DeleteRegKey SHCTX "Software\Classes\*\shell\Flitnix"
+    DeleteRegKey SHCTX "Software\Classes\Directory\shell\Flitnix"
+    DeleteRegKey SHCTX "Software\Classes\Directory\Background\shell\Flitnix"
 
     RMDir /r "$AppData\${PRODUCT_EXECUTABLE}" # Remove the WebView2 DataPath
 

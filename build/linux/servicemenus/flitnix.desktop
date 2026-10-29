@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Service
+Name=Share with Flitnix
+ServiceTypes=KonqPopupMenu/Plugin
+MimeType=all/allfiles;inode/directory;
+Actions=ShareWithFlitnix;
+X-KDE-Priority=TopLevel
+X-KDE-Submenu=
+
+[Desktop Action ShareWithFlitnix]
+Name=Share with Flitnix
+Icon=flitnix
+Exec=flitnix %F
