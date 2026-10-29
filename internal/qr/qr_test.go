@@ -15,6 +15,14 @@ func TestPayload(t *testing.T) {
 	if want := "http://192.168.1.42:43821/#tok_v43"; got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
+
+	gotV6, err := Payload("http://[2001:db8::10]:43821", "tok_v43")
+	if err != nil {
+		t.Fatalf("Payload IPv6: %v", err)
+	}
+	if wantV6 := "http://[2001:db8::10]:43821/#tok_v43"; gotV6 != wantV6 {
+		t.Fatalf("got %q, want %q", gotV6, wantV6)
+	}
 }
 
 func TestPayloadRejectsInvalidInputs(t *testing.T) {

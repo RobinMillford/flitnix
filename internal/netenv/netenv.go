@@ -38,6 +38,7 @@ import (
 	"net"
 	"net/netip"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -47,10 +48,18 @@ import (
 type View struct {
 	// Name is the interface name as the OS reports it, e.g. "wlo1".
 	Name string `json:"name"`
-	// IP is the dotted-quad IPv4 address, e.g. "192.168.1.42".
+	// IP is the literal IP address string (e.g. "192.168.1.42" or "2001:db8::10").
 	IP string `json:"ip"`
-	// CIDR is the address with its prefix length, e.g. "192.168.1.42/24".
+	// CIDR is the address with its prefix length, e.g. "192.168.1.42/24" or "2001:db8::10/64".
 	CIDR string `json:"cidr"`
+	// Family is "IPv4" or "IPv6".
+	Family string `json:"family"`
+	// Scope indicates address reachability, e.g. "global", "unique-local", "private", "link-local".
+	Scope string `json:"scope,omitempty"`
+	// SuitableForQR indicates whether this candidate can be safely used for phone QR pairing.
+	SuitableForQR bool `json:"suitableForQR"`
+	// Warning explains why an address is unsuitable or notes special network routing conditions.
+	Warning string `json:"warning,omitempty"`
 	// FriendlyName is safe to show as the primary connection identity.
 	FriendlyName string `json:"friendlyName"`
 	// Type is a broad connection type such as Wi-Fi or Ethernet.
@@ -88,7 +97,7 @@ type Provider interface {
 // Errors surfaced for the three decision failures callers must handle.
 var (
 	// ErrNoCandidate means no interface address passed the filters.
-	ErrNoCandidate = errors.New("netenv: no usable local IPv4 interface found; connect to a local network first")
+	ErrNoCandidate = errors.New("netenv: no usable local IPv4 or IPv6 interface found; connect to a local network first")
 
 	// ErrAmbiguous means several interfaces passed; the user must choose.
 	ErrAmbiguous = errors.New("netenv: several usable network interfaces found; choose one")
@@ -177,11 +186,12 @@ func typeFromInterface(iface net.Interface) string {
 	return "Network"
 }
 
-// Enumerate returns every usable local IPv4 address, ordered
-// deterministically: by interface name, then by address value. Unusable
-// interfaces and addresses are filtered out; an address-listing failure
-// for one interface skips that interface rather than failing the whole
-// enumeration, because the remaining interfaces still matter.
+// Enumerate returns every usable local IPv4 and IPv6 unicast address, ordered
+// deterministically: by interface name, address family (IPv4 before IPv6),
+// then by address value. Unusable interfaces and addresses (such as loopback,
+// link-local, multicast, and carrier-grade NAT) are filtered out; an
+// address-listing failure for one interface skips that interface rather than
+// failing the whole enumeration, because the remaining interfaces still matter.
 func Enumerate(src Provider) ([]View, error) {
 	ifaces, err := src.InterfacesFor()
 	if err != nil {
@@ -199,22 +209,173 @@ func Enumerate(src Provider) ([]View, error) {
 		}
 		metadata := src.MetadataFor(iface)
 		var ifaceViews []View
+		seenIP := make(map[string]bool)
 		for _, addr := range addrs {
 			if v, ok := addressView(iface, addr); ok {
+				if seenIP[v.IP] {
+					continue
+				}
+				seenIP[v.IP] = true
 				v = withMetadata(v, metadata)
 				ifaceViews = append(ifaceViews, v)
 			}
 		}
-		sort.Slice(ifaceViews, func(i, j int) bool { return ifaceViews[i].IP < ifaceViews[j].IP })
+		sort.Slice(ifaceViews, func(i, j int) bool {
+			if ifaceViews[i].Family != ifaceViews[j].Family {
+				return ifaceViews[i].Family < ifaceViews[j].Family // "IPv4" < "IPv6"
+			}
+			return ifaceViews[i].IP < ifaceViews[j].IP
+		})
 		views = append(views, ifaceViews...)
 	}
 	sort.SliceStable(views, func(i, j int) bool {
 		if views[i].Name != views[j].Name {
 			return views[i].Name < views[j].Name
 		}
+		if views[i].Family != views[j].Family {
+			return views[i].Family < views[j].Family
+		}
 		return views[i].IP < views[j].IP
 	})
 	return views, nil
+}
+
+// InspectInterfaces returns views for all active interface addresses, including
+// unsuitable candidates (e.g. link-local IPv6, loopback), marked with
+// SuitableForQR = false and an explanatory Warning. This is used by the
+// Connection Doctor and UI diagnostics to explain why certain addresses
+// cannot be used for phone QR pairing.
+func InspectInterfaces(src Provider) ([]View, error) {
+	ifaces, err := src.InterfacesFor()
+	if err != nil {
+		return nil, fmt.Errorf("netenv: listing interfaces: %w", err)
+	}
+
+	var views []View
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		addrs, err := src.AddressesFor(iface)
+		if err != nil {
+			continue
+		}
+		metadata := src.MetadataFor(iface)
+		seenIP := make(map[string]bool)
+		for _, addr := range addrs {
+			v, valid := inspectAddress(iface, addr)
+			if !valid || seenIP[v.IP] {
+				continue
+			}
+			seenIP[v.IP] = true
+			v = withMetadata(v, metadata)
+			views = append(views, v)
+		}
+	}
+	return views, nil
+}
+
+// inspectAddress parses an address on an interface and classifies its suitability.
+func inspectAddress(iface net.Interface, addr net.Addr) (View, bool) {
+	var ip net.IP
+	switch a := addr.(type) {
+	case *net.IPNet:
+		if a != nil {
+			ip = a.IP
+		}
+	case *net.IPAddr:
+		if a != nil {
+			ip = a.IP
+		}
+	default:
+		return View{}, false
+	}
+	if ip == nil {
+		return View{}, false
+	}
+	parsed, ok := netip.AddrFromSlice(ip)
+	if !ok || !parsed.IsValid() {
+		return View{}, false
+	}
+	if parsed.Is4In6() {
+		parsed = parsed.Unmap()
+	}
+
+	cidrBits := 32
+	if parsed.Is6() {
+		cidrBits = 128
+	}
+	if ipn, isNet := addr.(*net.IPNet); isNet && ipn != nil {
+		if ones, total := ipn.Mask.Size(); total > 0 && ones >= 0 {
+			cidrBits = ones
+		}
+	}
+
+	ipStr := parsed.String()
+	family := "IPv4"
+	if parsed.Is6() {
+		family = "IPv6"
+	}
+
+	scope := "global"
+	suitable := true
+	warning := ""
+
+	switch {
+	case iface.Flags&net.FlagLoopback != 0 || parsed.IsLoopback():
+		suitable = false
+		scope = "loopback"
+		warning = "Loopback addresses only accept connections from this computer, not external phones."
+	case iface.Flags&net.FlagPointToPoint != 0:
+		suitable = false
+		scope = "point-to-point"
+		warning = "Point-to-point interfaces (VPN/dial-up) are not suitable for direct phone LAN transfer."
+	case parsed.IsUnspecified():
+		suitable = false
+		scope = "unspecified"
+		warning = "Unspecified addresses (0.0.0.0 or ::) cannot be reached by external devices."
+	case parsed.IsMulticast():
+		suitable = false
+		scope = "multicast"
+		warning = "Multicast addresses are not unicast host addresses."
+	case parsed.IsLinkLocalUnicast():
+		suitable = false
+		scope = "link-local"
+		warning = "Link-local IPv6 addresses cannot be used for phone QR pairing because browsers lack reliable interface scope handling."
+	case parsed.Is4():
+		for _, pfx := range unsuitableIPv4Prefixes {
+			if pfx.Contains(parsed) {
+				suitable = false
+				warning = "Address is in a reserved, documentation, or carrier-grade NAT range."
+				break
+			}
+		}
+		if parsed.IsPrivate() {
+			scope = "private"
+		}
+	case parsed.Is6():
+		for _, pfx := range unsuitableIPv6Prefixes {
+			if pfx.Contains(parsed) {
+				suitable = false
+				warning = "IPv6 address is in an unroutable, benchmarking, or transition range."
+				break
+			}
+		}
+		if ulaPrefix.Contains(parsed) {
+			scope = "unique-local"
+		}
+	}
+
+	return View{
+		Name:          iface.Name,
+		IP:            ipStr,
+		CIDR:          fmt.Sprintf("%s/%d", ipStr, cidrBits),
+		Family:        family,
+		Scope:         scope,
+		SuitableForQR: suitable,
+		Warning:       warning,
+		Active:        true,
+	}, true
 }
 
 // interfaceSuitable reports whether an interface may host the phone
@@ -233,7 +394,7 @@ func interfaceSuitable(iface net.Interface) bool {
 }
 
 // addressView converts one interface address into a View if it is a
-// suitable IPv4 unicast address; ok reports whether it was.
+// suitable IPv4 or IPv6 unicast address; ok reports whether it was.
 func addressView(iface net.Interface, addr net.Addr) (View, bool) {
 	var ip net.IP
 	switch a := addr.(type) {
@@ -248,44 +409,86 @@ func addressView(iface net.Interface, addr net.Addr) (View, bool) {
 	default:
 		return View{}, false
 	}
-	ip4 := ip.To4()
-	if ip4 == nil {
-		return View{}, false // an IPv6 (or malformed) address
+	if ip == nil {
+		return View{}, false
 	}
-	parsed := netip.AddrFrom4([4]byte(ip4))
+	parsed, ok := netip.AddrFromSlice(ip)
+	if !ok || !parsed.IsValid() {
+		return View{}, false
+	}
+	// Unmap IPv4-mapped IPv6 addresses (e.g. ::ffff:192.168.1.1) to avoid duplicate candidates
+	if parsed.Is4In6() {
+		parsed = parsed.Unmap()
+	}
 	if !suitableAddress(parsed) {
 		return View{}, false
 	}
+
 	cidrBits := 32
+	if parsed.Is6() {
+		cidrBits = 128
+	}
 	if ipn, isNet := addr.(*net.IPNet); isNet && ipn != nil {
-		if ones, total := ipn.Mask.Size(); total == 32 && ones >= 0 {
+		if ones, total := ipn.Mask.Size(); total > 0 && ones >= 0 {
 			cidrBits = ones
 		}
 	}
-	quad := ip4.String()
-	return View{Name: iface.Name, IP: quad, CIDR: fmt.Sprintf("%s/%d", quad, cidrBits)}, true
+
+	ipStr := parsed.String()
+	family := "IPv4"
+	scope := "global"
+	if parsed.Is6() {
+		family = "IPv6"
+		if ulaPrefix.Contains(parsed) {
+			scope = "unique-local"
+		}
+	} else if parsed.IsPrivate() {
+		scope = "private"
+	}
+
+	return View{
+		Name:          iface.Name,
+		IP:            ipStr,
+		CIDR:          fmt.Sprintf("%s/%d", ipStr, cidrBits),
+		Family:        family,
+		Scope:         scope,
+		SuitableForQR: true,
+	}, true
 }
 
-// suitableAddress reports whether the given (already IPv4) address is a
-// usable unicast LAN address.
+// ulaPrefix identifies IPv6 Unique Local Addresses (RFC 4193).
+var ulaPrefix = netip.MustParsePrefix("fc00::/7")
+
+// suitableAddress reports whether the given address is a usable LAN unicast address.
 func suitableAddress(ip netip.Addr) bool {
-	if !ip.IsValid() || !ip.Is4() {
+	if !ip.IsValid() {
 		return false
 	}
 	if ip.IsUnspecified() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsMulticast() {
 		return false
 	}
-	for _, pfx := range unsuitablePrefixes {
-		if pfx.Contains(ip) {
-			return false
+	if ip.Is4() {
+		for _, pfx := range unsuitableIPv4Prefixes {
+			if pfx.Contains(ip) {
+				return false
+			}
 		}
+		return true
 	}
-	return true
+	if ip.Is6() {
+		for _, pfx := range unsuitableIPv6Prefixes {
+			if pfx.Contains(ip) {
+				return false
+			}
+		}
+		return ip.IsGlobalUnicast() || ulaPrefix.Contains(ip)
+	}
+	return false
 }
 
-// unsuitablePrefixes are non-loopback IPv4 ranges that never make sense
+// unsuitableIPv4Prefixes are non-loopback IPv4 ranges that never make sense
 // for a phone-to-laptop LAN transfer session.
-var unsuitablePrefixes = []netip.Prefix{
+var unsuitableIPv4Prefixes = []netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),       // unspecified / this network
 	netip.MustParsePrefix("100.64.0.0/10"),   // carrier-grade NAT (and VPN overlays)
 	netip.MustParsePrefix("192.0.0.0/24"),    // IETF protocol assignments
@@ -296,6 +499,19 @@ var unsuitablePrefixes = []netip.Prefix{
 	netip.MustParsePrefix("224.0.0.0/4"),     // multicast
 	netip.MustParsePrefix("240.0.0.0/4"),     // reserved / broadcast block
 }
+
+// unsuitableIPv6Prefixes are non-loopback IPv6 ranges that never make sense
+// for a phone-to-laptop LAN transfer session.
+var unsuitableIPv6Prefixes = []netip.Prefix{
+	netip.MustParsePrefix("100::/64"),     // Discard-only address block (RFC 6666)
+	netip.MustParsePrefix("2001:2::/48"),  // BMWG benchmarking (RFC 5180)
+	netip.MustParsePrefix("2001:10::/28"), // ORCHIDv2 (RFC 7343)
+	netip.MustParsePrefix("2002::/16"),    // 6to4 transition (RFC 7526 deprecated)
+	netip.MustParsePrefix("2001::/32"),    // Teredo tunneling
+}
+
+// unsuitablePrefixes preserves backward-compatibility with older tests.
+var unsuitablePrefixes = unsuitableIPv4Prefixes
 
 // PickDefault chooses the default interface when the decision can be made
 // without the user: exactly one candidate. Zero candidates yield
@@ -309,7 +525,11 @@ func PickDefault(views []View) (View, error) {
 	default:
 		summary := make([]string, 0, len(views))
 		for _, v := range views {
-			summary = append(summary, v.Name+" ("+v.IP+")")
+			label := v.Name + " (" + v.IP + ")"
+			if v.Family != "" {
+				label = v.Name + " (" + v.Family + " " + v.IP + ")"
+			}
+			summary = append(summary, label)
 		}
 		return View{}, fmt.Errorf("%w: %s", ErrAmbiguous, strings.Join(summary, ", "))
 	}
@@ -320,9 +540,15 @@ func PickDefault(views []View) (View, error) {
 // session: a hotspot disconnect or DHCP address change invalidates the
 // previous choice and returns ErrGone.
 func InterfaceFor(src Provider, ip string) (View, error) {
-	target, err := netip.ParseAddr(ip)
+	rawIP := strings.TrimSpace(ip)
+	rawIP = strings.TrimPrefix(rawIP, "[")
+	rawIP = strings.TrimSuffix(rawIP, "]")
+	target, err := netip.ParseAddr(rawIP)
 	if err != nil {
 		return View{}, fmt.Errorf("netenv: %q is not an IP address: %w", ip, err)
+	}
+	if target.Is4In6() {
+		target = target.Unmap()
 	}
 	views, err := Enumerate(src)
 	if err != nil {
@@ -347,7 +573,10 @@ func ListenAddr(ip string, port int) (string, error) {
 	if port < 1 || port > 65535 {
 		return "", fmt.Errorf("netenv: port %d is out of range", port)
 	}
-	parsed, err := netip.ParseAddr(ip)
+	rawIP := strings.TrimSpace(ip)
+	rawIP = strings.TrimPrefix(rawIP, "[")
+	rawIP = strings.TrimSuffix(rawIP, "]")
+	parsed, err := netip.ParseAddr(rawIP)
 	if err != nil {
 		return "", fmt.Errorf("netenv: %q is not an IP address: %w", ip, err)
 	}
@@ -355,7 +584,7 @@ func ListenAddr(ip string, port int) (string, error) {
 		return "", fmt.Errorf("netenv: %q is not a plain IPv4 address", ip)
 	}
 	if parsed.Is4() || parsed.Is6() {
-		return net.JoinHostPort(parsed.String(), fmt.Sprint(port)), nil
+		return net.JoinHostPort(parsed.String(), strconv.Itoa(port)), nil
 	}
 	return "", fmt.Errorf("netenv: %q is not an IP address", ip)
 }
@@ -366,7 +595,7 @@ func ListenAddr(ip string, port int) (string, error) {
 //
 // The token rides the URL fragment only (never the query string), so it is
 // read locally by the phone and repeated in Authorization headers. The
-// host must be the Fedora machine's own address on that network.
+// host must be the machine's own address on that network.
 func TransferURL(ip string, port int, token string) (string, error) {
 	if strings.TrimSpace(token) == "" {
 		return "", errors.New("netenv: a session token is required for the QR URL")
@@ -376,7 +605,10 @@ func TransferURL(ip string, port int, token string) (string, error) {
 			return "", errors.New("netenv: the session token must be URL-safe with no fragment separators")
 		}
 	}
-	parsed, err := netip.ParseAddr(ip)
+	rawIP := strings.TrimSpace(ip)
+	rawIP = strings.TrimPrefix(rawIP, "[")
+	rawIP = strings.TrimSuffix(rawIP, "]")
+	parsed, err := netip.ParseAddr(rawIP)
 	if err != nil {
 		return "", fmt.Errorf("netenv: %q is not an IP address: %w", ip, err)
 	}
