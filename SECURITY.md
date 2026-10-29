@@ -30,7 +30,12 @@ Flitnix is designed for private, local network transfers between paired devices:
    - Text is treated as plain text without HTML interpretation. Safe URL detection strictly permits `http://` and `https://` protocols, preventing `javascript:` or data URI injection.
 5. **Path Traversal Protection**: Upload endpoints strictly sanitize incoming filenames to prevent path traversal (`../`) attacks outside the configured download directory.
 6. **Publication Reservation**: File publication uses two-phase atomic state management to prevent race conditions from compromising local filesystem state.
-7. **Local Plaintext HTTP Notice**: Transfers occur over plain HTTP across your trusted local network or hotspot. Connect only devices you control.
+7. **End-to-End Cryptographic File Integrity**:
+   - Inbound uploads from phones and guests calculate SHA-256 hashes inline and verify or record them on disk.
+   - Outbound single-file and folder ZIP downloads compute and verify SHA-256 digests transmitted via standard RFC 9530 `Content-Digest` headers (`sha-256=:<base64>:`).
+   - Multi-file ZIP archives are deterministically constructed across passes; if files on disk are mutated while streaming, the connection is instantly severed.
+   - Mobile browsers support bounded-memory SHA-256 verification via `File.stream()` without loading full files into device memory.
+8. **Local Plaintext HTTP Notice**: Transfers occur over plain HTTP across your trusted local network or hotspot. Connect only devices you control.
 
 ---
 
