@@ -341,9 +341,12 @@ func InterfaceFor(src Provider, ip string) (View, error) {
 }
 
 // ListenAddr renders the host:port string the HTTP server should bind.
-// The host must be an explicit IPv4 literal: binding to a name would
-// resolve (and possibly bind to) something other than the user's choice.
+// The host must be an explicit IPv4 or IPv6 literal (IPv6 addresses are
+// automatically formatted with brackets, e.g. [2001:db8::1]:43821).
 func ListenAddr(ip string, port int) (string, error) {
+	if port < 1 || port > 65535 {
+		return "", fmt.Errorf("netenv: port %d is out of range", port)
+	}
 	parsed, err := netip.ParseAddr(ip)
 	if err != nil {
 		return "", fmt.Errorf("netenv: %q is not an IP address: %w", ip, err)
@@ -351,13 +354,10 @@ func ListenAddr(ip string, port int) (string, error) {
 	if parsed.Is4In6() {
 		return "", fmt.Errorf("netenv: %q is not a plain IPv4 address", ip)
 	}
-	if !parsed.Is4() {
-		return "", fmt.Errorf("netenv: %q is not an IPv4 address", ip)
+	if parsed.Is4() || parsed.Is6() {
+		return net.JoinHostPort(parsed.String(), fmt.Sprint(port)), nil
 	}
-	if port < 1 || port > 65535 {
-		return "", fmt.Errorf("netenv: port %d is out of range", port)
-	}
-	return parsed.String() + ":" + fmt.Sprint(port), nil
+	return "", fmt.Errorf("netenv: %q is not an IP address", ip)
 }
 
 // TransferURL builds the QR-encoded session URL:

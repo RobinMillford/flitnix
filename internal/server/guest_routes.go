@@ -30,13 +30,20 @@ func guestTokenFromRequest(r *http.Request) string {
 
 func newGuestAPIMux(services *Services, stall time.Duration) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /guest-api/ping", handleDiagnosticsPing(services))
+	mux.HandleFunc("POST /guest-api/ping", handleDiagnosticsPing(services))
 	mux.HandleFunc("GET /guest-api/room-info", handleGuestRoomInfo(services))
 	mux.HandleFunc("POST /guest-api/join", handleGuestJoin(services))
 	mux.HandleFunc("GET /guest-api/status", handleGuestStatus(services))
 	mux.HandleFunc("POST /guest-api/uploads", handleGuestUploadDeclare(services))
 	mux.HandleFunc("GET /guest-api/uploads/{id}", handleGuestUploadStatus(services))
 	mux.HandleFunc("PUT /guest-api/uploads/{id}/content", handleGuestUploadContent(services, stall))
-	return mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if services != nil {
+			services.RecordContact("guest_api")
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 type guestRoomInfoResponse struct {

@@ -209,11 +209,15 @@ func TestListenAddr(t *testing.T) {
 	if err != nil || got != "10.42.0.8:43821" {
 		t.Fatalf("got %q err %v", got, err)
 	}
+	gotV6, err := ListenAddr("2001:db8::1", 43821)
+	if err != nil || gotV6 != "[2001:db8::1]:43821" {
+		t.Fatalf("IPv6 ListenAddr: got %q, want [2001:db8::1]:43821, err %v", gotV6, err)
+	}
 	for _, bad := range []struct {
 		ip   string
 		port int
 	}{
-		{"fe80::1", 43821},
+		{"not-an-ip", 43821},
 		{"::ffff:10.0.0.1", 43821},
 		{"10.0.0.1", 0},
 		{"10.0.0.1", 70000},
@@ -233,6 +237,15 @@ func TestTransferURL(t *testing.T) {
 	want := "http://192.168.1.42:43821/#abc-_43chars-token-value"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+
+	gotV6, err := TransferURL("fe80::1", 43821, "my-token")
+	if err != nil {
+		t.Fatalf("TransferURL IPv6: %v", err)
+	}
+	wantV6 := "http://[fe80::1]:43821/#my-token"
+	if gotV6 != wantV6 {
+		t.Fatalf("got %q, want %q", gotV6, wantV6)
 	}
 
 	badTokens := []string{"", " ", "#tok", "a#b", "a b", "x\ny"}

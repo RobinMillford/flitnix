@@ -18,6 +18,9 @@
     window.history.replaceState(null, "", window.location.pathname + window.location.search);
   }
 
+  // Handshake ping to verify phone-to-desktop reachability
+  fetch("/ping").catch(function () {});
+
   // DOM elements
   var statusCard = document.getElementById("status-card");
   var statusText = document.getElementById("status-text");

@@ -152,6 +152,7 @@ type UploadView struct {
 	State    string    `json:"state"`
 	Uploaded int64     `json:"uploaded"`
 	Speed    float64   `json:"speed"`
+	SHA256   string    `json:"sha256,omitempty"`
 	Reason   string    `json:"reason,omitempty"`
 }
 
@@ -236,6 +237,9 @@ type App struct {
 	textStore   *textmsg.Store
 	auditStore    *audit.Store
 	templateStore *guest.TemplateStore
+
+	phoneContactMu   sync.Mutex
+	lastPhoneContact *time.Time
 
 	// source supplies live network-interface state for the session
 	// address decisions; tests inject synthetic interfaces.
@@ -421,8 +425,9 @@ func (a *App) startServerLocked(listen string) error {
 			Downloads:    a.downloads,
 			GuestManager: a.guestMgr,
 			TextMessages: a.textStore,
-			Audit:        a.auditStore,
-			Diagnose:     a.logTransferDiagnostics,
+			Audit:          a.auditStore,
+			OnPhoneContact: a.recordPhoneContact,
+			Diagnose:       a.logTransferDiagnostics,
 		},
 	})
 	serveCtx, cancel := context.WithCancel(context.Background())
@@ -1172,6 +1177,7 @@ func uploadView(u transfer.Upload) UploadView {
 		State:    string(u.State),
 		Uploaded: u.Uploaded,
 		Speed:    u.Speed,
+		SHA256:   u.SHA256,
 		Reason:   u.Reason,
 	}
 }
@@ -1795,6 +1801,13 @@ func (a *App) ClearAuditHistory() error {
 
 // ---- Connection Doctor methods ----
 
+func (a *App) recordPhoneContact(source string) {
+	a.phoneContactMu.Lock()
+	now := time.Now()
+	a.lastPhoneContact = &now
+	a.phoneContactMu.Unlock()
+}
+
 func (a *App) RunConnectionDiagnostics() doctor.DiagnosticReport {
 	a.srvMu.Lock()
 	serverRunning := a.srv != nil
@@ -1821,12 +1834,17 @@ func (a *App) RunConnectionDiagnostics() doctor.DiagnosticReport {
 		}
 	}
 
+	a.phoneContactMu.Lock()
+	lastContact := a.lastPhoneContact
+	a.phoneContactMu.Unlock()
+
 	return doctor.RunDiagnostics(doctor.Params{
-		NetSource:     a.source,
-		ServerRunning: serverRunning,
-		ServerAddr:    serverAddr,
-		ActiveIP:      activeIP,
-		ActiveIface:   activeIface,
+		NetSource:        a.source,
+		ServerRunning:    serverRunning,
+		ServerAddr:       serverAddr,
+		ActiveIP:         activeIP,
+		ActiveIface:      activeIface,
+		LastPhoneContact: lastContact,
 	})
 }
 

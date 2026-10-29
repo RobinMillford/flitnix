@@ -63,6 +63,7 @@ func newRouter(services *Services, stall, downloadStall time.Duration, grants *D
 	mux := http.NewServeMux()
 	mux.HandleFunc("/{$}", serveHome(index))
 	mux.HandleFunc("/healthz", serveHealth)
+	mux.HandleFunc("/ping", handleDiagnosticsPing(services))
 	mux.HandleFunc("/static/", serveStatic(assetsRoot))
 
 	guestIndex, err := pageAssets.ReadFile("assets/guest.html")
@@ -85,7 +86,7 @@ func newRouter(services *Services, stall, downloadStall time.Duration, grants *D
 		// authentication; a token holder learns nothing about the
 		// endpoint set without a live session either way.
 		api := newAPIMux(services, stall, grants)
-		mux.Handle("/api/", requireSession(services.Sessions, api.ServeHTTP))
+		mux.Handle("/api/", requireSession(services, api.ServeHTTP))
 		mux.HandleFunc("GET /api/downloads/{id}/content", serveArchiveDownload(services, grants, downloadStall))
 
 		if services.GuestManager != nil {
@@ -118,7 +119,12 @@ func isAllowedHost(hostHeader string) bool {
 	if strings.EqualFold(h, "example.com") || strings.HasSuffix(strings.ToLower(h), ".example.com") || strings.HasSuffix(strings.ToLower(h), ".test") {
 		return true
 	}
-	if ip := net.ParseIP(h); ip != nil {
+	// Strip IPv6 zone index if present (e.g. fe80::1%eth0 or fe80::1%25eth0)
+	cleanIP := h
+	if zoneIdx := strings.Index(cleanIP, "%"); zoneIdx != -1 {
+		cleanIP = cleanIP[:zoneIdx]
+	}
+	if ip := net.ParseIP(cleanIP); ip != nil {
 		return true
 	}
 	return false
@@ -175,7 +181,22 @@ func newAPIMux(services *Services, stall time.Duration, grants *DownloadGrantSto
 	mux.HandleFunc("GET /api/download-progress/{id}", serveDownloadProgress(services, grants))
 	mux.HandleFunc("POST /api/text", handleTextMessageSend(services))
 	mux.HandleFunc("GET /api/text", handleTextMessageList(services))
+	mux.HandleFunc("GET /api/diagnostics/ping", handleDiagnosticsPing(services))
+	mux.HandleFunc("POST /api/diagnostics/ping", handleDiagnosticsPing(services))
 	return mux
+}
+
+func handleDiagnosticsPing(services *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if services != nil {
+			services.RecordContact("ping")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":    "ok",
+			"timestamp": time.Now().UTC().Format(time.RFC3339),
+		})
+	}
 }
 
 // ---- request authentication ----
@@ -193,7 +214,7 @@ type sessCtxKey struct{}
 // expired, revoked) answers 401 with a deliberately generic message so the
 // response never reveals why a token is dead. Only the authenticated handler
 // sees the session; failures here never log any token material.
-func requireSession(m *session.Manager, next http.HandlerFunc) http.Handler {
+func requireSession(svcs *Services, next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
 		auth = strings.TrimSpace(auth)
@@ -207,7 +228,7 @@ func requireSession(m *session.Manager, next http.HandlerFunc) http.Handler {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		sess, err := m.Validate(token)
+		sess, err := svcs.Sessions.Validate(token)
 		if err != nil {
 			// The message stays generic. The machine-readable code lets the
 			// phone page tell a session that really ended (expired or
@@ -217,6 +238,7 @@ func requireSession(m *session.Manager, next http.HandlerFunc) http.Handler {
 			writeUnauthorized(w, err)
 			return
 		}
+		svcs.RecordContact("api")
 		next(w, r.WithContext(context.WithValue(r.Context(), sessCtxKey{}, sess)))
 	})
 }

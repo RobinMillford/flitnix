@@ -48,6 +48,9 @@
       window.location.pathname + window.location.search);
   }
 
+  // Handshake ping to verify phone-to-desktop reachability
+  fetch("/ping").catch(function () {});
+
   // ------------------------------------------------------------------
   // Handles
   // ------------------------------------------------------------------
