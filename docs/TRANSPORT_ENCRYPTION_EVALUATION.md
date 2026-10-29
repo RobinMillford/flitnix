@@ -8,10 +8,10 @@ Flitnix's core design goal is **zero-friction local transfers**: a user scans a 
 
 | Transport Mode | Transfer Size | Handshake Latency | Transfer Duration | Throughput | Memory Allocations |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| **HTTP/1.1 (Plain Streaming)** | 100.0 MB | 0.66 ms | 25 ms | **4000.00 MB/s** | 0.15 MB |
-| **HTTPS (TLS 1.3 / AES-GCM)** | 100.0 MB | 1.05 ms | 50 ms | **2000.00 MB/s** | 0.48 MB |
+| **HTTP/1.1 (Plain Streaming)** | 100.0 MB | 0.51 ms | 25 ms | **4000.00 MB/s** | 0.15 MB |
+| **HTTPS (TLS 1.3 / AES-GCM)** | 100.0 MB | 1.71 ms | 57 ms | **1754.39 MB/s** | 0.42 MB |
 
-*Observed CPU/crypto transfer duration overhead on modern x86_64 hardware: ~100.0%.*
+*Observed CPU/crypto transfer duration overhead on modern x86_64 hardware: ~128.0%.*
 
 ## 2. Browser Security Friction Analysis (The Zero-Install Dilemma)
 
