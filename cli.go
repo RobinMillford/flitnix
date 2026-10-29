@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -13,6 +15,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/itsyamin/flitnix/internal/client"
 	"github.com/itsyamin/flitnix/internal/doctor"
 	"github.com/itsyamin/flitnix/internal/netenv"
 	"github.com/itsyamin/flitnix/internal/qr"
@@ -46,6 +49,10 @@ func handleCLI(args []string, stdout, stderr io.Writer) (bool, int, []string) {
 		code := runDoctorCLI(args[2:], stdout, stderr)
 		return true, code, nil
 
+	case "send":
+		code := runSendCLI(args[2:], stdout, stderr)
+		return true, code, nil
+
 	case "serve":
 		code := runServeCLI(args[2:], stdout, stderr)
 		return true, code, nil
@@ -76,10 +83,12 @@ func printHelp(out io.Writer) {
 	fmt.Fprintf(out, "Flitnix - Fast, private local file transfer between desktop and phone\n\n")
 	fmt.Fprintf(out, "Usage:\n")
 	fmt.Fprintf(out, "  flitnix [files or directories to share...]\n")
+	fmt.Fprintf(out, "  flitnix send [flags] <files or directories...>\n")
 	fmt.Fprintf(out, "  flitnix doctor [--json]\n")
 	fmt.Fprintf(out, "  flitnix serve [-addr <host:port>] [-dir <receive-dir>]\n")
 	fmt.Fprintf(out, "  flitnix version\n\n")
 	fmt.Fprintf(out, "Commands:\n")
+	fmt.Fprintf(out, "  send      Send files or directories to a recipient Flitnix instance\n")
 	fmt.Fprintf(out, "  doctor    Run Connection Doctor diagnostics and report network readiness\n")
 	fmt.Fprintf(out, "  serve     Run headless transfer server on loopback or network address\n")
 	fmt.Fprintf(out, "  version   Display version and architecture information\n")
@@ -153,12 +162,20 @@ func runServeCLI(args []string, stdout, stderr io.Writer) int {
 	reg := transfer.NewRegistry()
 	dls := transfer.NewDownloadRegistry()
 
+	pendingBatches := make(chan pendingServeBatch, 16)
+
 	svcs := &server.Services{
 		Sessions:    sessMgr,
 		Transfers:   transfers,
 		Coordinator: coord,
 		Registry:    reg,
 		Downloads:   dls,
+		OnBatchPending: func(sessionKey string, batch transfer.BatchView, remoteAddr string) {
+			select {
+			case pendingBatches <- pendingServeBatch{sessionKey: sessionKey, batch: batch, remoteAddr: remoteAddr}:
+			default:
+			}
+		},
 	}
 
 	srv := server.New(server.Config{
@@ -201,6 +218,9 @@ func runServeCLI(args []string, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintf(stdout, "\nPress Ctrl+C to stop.\n")
 
+		// Run headless terminal approval loop in background
+		go runServeApprovalLoop(ctx, pendingBatches, transfers, coord, os.Stdin, stdout)
+
 		serveErr := <-serving
 		sessMgr.Close()
 		if serveErr != nil {
@@ -209,5 +229,95 @@ func runServeCLI(args []string, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintln(stdout, "flitnix serve: stopped cleanly")
 		return 0
+	}
+}
+
+type pendingServeBatch struct {
+	sessionKey string
+	batch      transfer.BatchView
+	remoteAddr string
+}
+
+func runServeApprovalLoop(ctx context.Context, pending <-chan pendingServeBatch, transfers *transfer.Service, coord *transfer.Coordinator, in io.Reader, out io.Writer) {
+	scanner := bufio.NewScanner(in)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev, ok := <-pending:
+			if !ok {
+				return
+			}
+			// Check if batch is still pending
+			current, err := coord.GetBatch(ev.sessionKey, ev.batch.ID)
+			if err != nil || current.ApprovalState != transfer.ApprovalPending || current.State != transfer.BatchStatePending {
+				continue
+			}
+
+			remote := ev.remoteAddr
+			if h, _, splitErr := net.SplitHostPort(remote); splitErr == nil {
+				remote = h
+			}
+
+			name := ev.batch.RootName
+			if name == "" && len(ev.batch.Items) > 0 {
+				name = ev.batch.Items[0].DisplayName
+				if len(ev.batch.Items) > 1 {
+					name = fmt.Sprintf("%s (+%d more)", name, len(ev.batch.Items)-1)
+				}
+			}
+
+			fmt.Fprintf(out, "\n--> Incoming transfer request from %s:\n", remote)
+			fmt.Fprintf(out, "    Batch ID:    %s\n", ev.batch.ID)
+			fmt.Fprintf(out, "    Type:        %s\n", ev.batch.Kind)
+			fmt.Fprintf(out, "    Name:        %s\n", name)
+			fmt.Fprintf(out, "    Files:       %d item(s)\n", ev.batch.TotalItemCount)
+			fmt.Fprintf(out, "    Total size:  %s\n", client.FormatBytes(ev.batch.DeclaredTotalBytes))
+			fmt.Fprint(out, "Approve transfer? [y/N]: ")
+
+			var approved bool
+			if scanner.Scan() {
+				ans := strings.TrimSpace(scanner.Text())
+				if strings.EqualFold(ans, "y") || strings.EqualFold(ans, "yes") {
+					approved = true
+				}
+			}
+
+			// Execute decision
+			var contentIDs []string
+			for _, item := range ev.batch.Items {
+				if cid, err := coord.ItemContentID(ev.sessionKey, ev.batch.ID, item.ID); err == nil && cid != "" {
+					contentIDs = append(contentIDs, cid)
+				}
+			}
+
+			if approved {
+				failed := false
+				for _, cid := range contentIDs {
+					if _, err := transfers.Decide(cid, true); err != nil {
+						failed = true
+						break
+					}
+				}
+				if !failed {
+					if _, err := coord.ApproveBatch(ev.sessionKey, ev.batch.ID); err == nil {
+						fmt.Fprintf(out, "--> Batch %s approved.\n", ev.batch.ID)
+						continue
+					}
+				}
+				// If approval failed partway, cancel
+				for _, cid := range contentIDs {
+					_ = transfers.Cancel(cid)
+				}
+				_, _ = coord.CancelBatch(ev.sessionKey, ev.batch.ID)
+				fmt.Fprintf(out, "--> Batch %s approval failed.\n", ev.batch.ID)
+			} else {
+				for _, cid := range contentIDs {
+					_, _ = transfers.Decide(cid, false)
+				}
+				_, _ = coord.RejectBatch(ev.sessionKey, ev.batch.ID)
+				fmt.Fprintf(out, "--> Batch %s declined.\n", ev.batch.ID)
+			}
+		}
 	}
 }
