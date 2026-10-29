@@ -41,6 +41,7 @@ import (
 	"github.com/itsyamin/flitnix/internal/session"
 	"github.com/itsyamin/flitnix/internal/textmsg"
 	"github.com/itsyamin/flitnix/internal/transfer"
+	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -229,17 +230,19 @@ type BatchView struct {
 type App struct {
 	ctx context.Context
 
-	store       *transfer.Store
-	sessions    *session.Manager
-	transfers   *transfer.Service
-	coordinator *transfer.Coordinator
-	registry    *transfer.Registry
-	downloads   *transfer.DownloadRegistry
-	guestMgr    *guest.Manager
-	textStore   *textmsg.Store
+	store         *transfer.Store
+	sessions      *session.Manager
+	transfers     *transfer.Service
+	coordinator   *transfer.Coordinator
+	registry      *transfer.Registry
+	downloads     *transfer.DownloadRegistry
+	guestMgr      *guest.Manager
+	textStore     *textmsg.Store
 	auditStore    *audit.Store
 	templateStore *guest.TemplateStore
 	devicesStore  *devices.Store
+	startupMu     sync.Mutex
+	startupDone   bool
 	initialShares []string
 
 	phoneContactMu   sync.Mutex
@@ -340,9 +343,73 @@ func (a *App) releaseSession(key string) {
 // startup records the Wails runtime context so bound methods can call the
 // runtime (native file dialogs).
 func (a *App) startup(ctx context.Context) {
+	a.startupMu.Lock()
 	a.ctx = ctx
-	if len(a.initialShares) > 0 {
-		_, _ = a.AddDroppedSources(a.initialShares)
+	initial := a.initialShares
+	a.startupDone = true
+	a.startupMu.Unlock()
+
+	if len(initial) > 0 {
+		_, _ = a.AddDroppedSources(initial)
+	}
+}
+
+// onSecondInstanceLaunch is invoked when a second instance of Flitnix launches.
+// It extracts file and folder arguments from the second instance, normalizes them
+// relative to the second instance's working directory, queues them into the share
+// registry, and restores/shows the application window.
+func (a *App) onSecondInstanceLaunch(data options.SecondInstanceData) {
+	normPaths := ExtractSharePaths(data.Args, data.WorkingDirectory, func(raw string, err error) {
+		fmt.Fprintf(os.Stderr, "flitnix: second-instance invalid path %q: %v\n", raw, err)
+	})
+
+	if len(normPaths) > 0 {
+		a.startupMu.Lock()
+		if !a.startupDone {
+			a.initialShares = append(a.initialShares, normPaths...)
+			a.startupMu.Unlock()
+			a.bringToFront()
+			return
+		}
+		a.startupMu.Unlock()
+
+		_, _ = a.AddDroppedSources(normPaths)
+	}
+
+	a.bringToFront()
+}
+
+// onMacFileOpen is invoked when macOS opens files with the running application.
+func (a *App) onMacFileOpen(filePath string) {
+	normPaths := ExtractSharePaths([]string{filePath}, "", func(raw string, err error) {
+		fmt.Fprintf(os.Stderr, "flitnix: mac open-file invalid path %q: %v\n", raw, err)
+	})
+
+	if len(normPaths) > 0 {
+		a.startupMu.Lock()
+		if !a.startupDone {
+			a.initialShares = append(a.initialShares, normPaths...)
+			a.startupMu.Unlock()
+			a.bringToFront()
+			return
+		}
+		a.startupMu.Unlock()
+
+		_, _ = a.AddDroppedSources(normPaths)
+	}
+
+	a.bringToFront()
+}
+
+// bringToFront restores a minimized window and brings it to the foreground.
+func (a *App) bringToFront() {
+	a.startupMu.Lock()
+	ctx := a.ctx
+	a.startupMu.Unlock()
+
+	if ctx != nil && ctx.Value("frontend") != nil {
+		runtime.WindowUnminimise(ctx)
+		runtime.WindowShow(ctx)
 	}
 }
 
@@ -430,13 +497,13 @@ func (a *App) startServerLocked(listen string) error {
 	srv := server.New(server.Config{
 		ListenAddr: listen,
 		Services: &server.Services{
-			Sessions:     a.sessions,
-			Transfers:    a.transfers,
-			Coordinator:  a.coordinator,
-			Registry:     a.registry,
-			Downloads:    a.downloads,
-			GuestManager: a.guestMgr,
-			TextMessages: a.textStore,
+			Sessions:       a.sessions,
+			Transfers:      a.transfers,
+			Coordinator:    a.coordinator,
+			Registry:       a.registry,
+			Downloads:      a.downloads,
+			GuestManager:   a.guestMgr,
+			TextMessages:   a.textStore,
 			Audit:          a.auditStore,
 			OnPhoneContact: a.recordPhoneContact,
 			Diagnose:       a.logTransferDiagnostics,
@@ -1096,7 +1163,7 @@ func (a *App) PickFolderForSharing() (SharedSourceView, error) {
 }
 
 // AddDroppedSources registers native paths delivered by Wails file-drop
-// integration. Each path is handled independently so one invalid drop does
+// integration or external launches. Each path is handled independently so one invalid drop does
 // not remove or invalidate existing selections.
 func (a *App) AddDroppedSources(paths []string) ([]SharedSourceView, error) {
 	views := make([]SharedSourceView, 0, len(paths))

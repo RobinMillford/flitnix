@@ -8,6 +8,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 	"github.com/wailsapp/wails/v2/pkg/options/linux"
+	"github.com/wailsapp/wails/v2/pkg/options/mac"
 )
 
 //go:embed all:frontend/dist
@@ -48,8 +49,15 @@ func main() {
 		BackgroundColour: &options.RGBA{R: 27, G: 38, B: 54, A: 1},
 		DragAndDrop:      &options.DragAndDrop{EnableFileDrop: true},
 		Linux:            &linux.Options{Icon: appIcon},
-		OnStartup:        app.startup,
-		OnShutdown:       app.shutdown,
+		Mac: &mac.Options{
+			OnFileOpen: app.onMacFileOpen,
+		},
+		SingleInstanceLock: &options.SingleInstanceLock{
+			UniqueId:               "io.github.robinmillford.flitnix",
+			OnSecondInstanceLaunch: app.onSecondInstanceLaunch,
+		},
+		OnStartup:  app.startup,
+		OnShutdown: app.shutdown,
 		Bind: []interface{}{
 			app,
 		},
