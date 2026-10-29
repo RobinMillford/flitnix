@@ -1043,6 +1043,10 @@ export namespace netenv {
 	    name: string;
 	    ip: string;
 	    cidr: string;
+	    family: string;
+	    scope?: string;
+	    suitableForQR: boolean;
+	    warning?: string;
 	    friendlyName: string;
 	    type: string;
 	    metadataAvailable: boolean;
@@ -1059,6 +1063,10 @@ export namespace netenv {
 	        this.name = source["name"];
 	        this.ip = source["ip"];
 	        this.cidr = source["cidr"];
+	        this.family = source["family"];
+	        this.scope = source["scope"];
+	        this.suitableForQR = source["suitableForQR"];
+	        this.warning = source["warning"];
 	        this.friendlyName = source["friendlyName"];
 	        this.type = source["type"];
 	        this.metadataAvailable = source["metadataAvailable"];

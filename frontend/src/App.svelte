@@ -115,7 +115,12 @@
     if (key) setBusy(key, false)
   }
   function hostPort(): string {
-    return serverAddress || (activeAddress ? `${activeAddress}:${SESSION_PORT}` : `…:${SESSION_PORT}`)
+    if (serverAddress) return serverAddress
+    if (!activeAddress) return `…:${SESSION_PORT}`
+    if (activeAddress.includes(':') && !activeAddress.startsWith('[')) {
+      return `[${activeAddress}]:${SESSION_PORT}`
+    }
+    return `${activeAddress}:${SESSION_PORT}`
   }
 
   const refresh = createRefreshScheduler(
@@ -826,7 +831,12 @@
               <label for="interface">Choose a network</label>
               <select id="interface" bind:value={selectedIp} aria-label="Choose a network">
                 <option value="" disabled>Select a network…</option>
-                {#each interfaces as itf (itf.ip)}<option value={itf.ip}>{itf.friendlyName || `${itf.type || 'Network'} · Name unavailable`} · {itf.type || 'Network'}</option>{/each}
+                {#each interfaces as itf (itf.ip)}
+                  <option value={itf.ip} disabled={itf.suitableForQR === false}>
+                    {itf.friendlyName || `${itf.type || 'Network'} · Name unavailable`} · {itf.family || 'IPv4'} ({itf.ip})
+                    {#if itf.suitableForQR === false} — {itf.warning || 'Not suitable for phone QR'}{/if}
+                  </option>
+                {/each}
               </select>
               <button class="button ghost" on:click={refreshNetwork} disabled={loadingIfaces}>{loadingIfaces ? 'Refreshing…' : 'Rescan'}</button>
             </div>
@@ -834,7 +844,18 @@
           {#if currentNetwork}
             <details class="network-details">
               <summary>Network details</summary>
-              <dl><div><dt>Interface</dt><dd>{currentNetwork.name || 'Unavailable'}</dd></div><div><dt>IPv4 address</dt><dd>{currentNetwork.ip || 'Unavailable'}</dd></div><div><dt>Connection type</dt><dd>{currentNetwork.type || 'Network'}</dd></div><div><dt>Profile name</dt><dd>{currentNetwork.connectionName || 'Unavailable'}</dd></div><div><dt>Name source</dt><dd>{currentNetwork.friendlyNameSource || 'Unavailable'}</dd></div><div><dt>Metadata</dt><dd>{currentNetwork.metadataAvailable ? 'Available' : 'Name unavailable'}</dd></div></dl>
+              <dl>
+                <div><dt>Interface</dt><dd>{currentNetwork.name || 'Unavailable'}</dd></div>
+                <div><dt>Address family</dt><dd>{currentNetwork.family || 'IPv4'}</dd></div>
+                <div><dt>IP address</dt><dd>{currentNetwork.ip || 'Unavailable'}</dd></div>
+                <div><dt>Prefix / CIDR</dt><dd>{currentNetwork.cidr || 'Unavailable'}</dd></div>
+                <div><dt>Connection type</dt><dd>{currentNetwork.type || 'Network'}</dd></div>
+                <div><dt>Profile name</dt><dd>{currentNetwork.connectionName || 'Unavailable'}</dd></div>
+                <div><dt>Suitable for QR</dt><dd>{currentNetwork.suitableForQR !== false ? 'Yes (LAN reachable)' : 'No'}</dd></div>
+                {#if currentNetwork.warning}<div><dt>Notice</dt><dd>{currentNetwork.warning}</dd></div>{/if}
+                <div><dt>Name source</dt><dd>{currentNetwork.friendlyNameSource || 'Unavailable'}</dd></div>
+                <div><dt>Metadata</dt><dd>{currentNetwork.metadataAvailable ? 'Available' : 'Name unavailable'}</dd></div>
+              </dl>
             </details>
           {/if}
           {#if ifaceError}<p class="error-text">{ifaceError}</p>{/if}

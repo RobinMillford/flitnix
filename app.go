@@ -1287,7 +1287,11 @@ func (a *App) StartGuestRoomWithConfig(cfg GuestRoomConfigView) (GuestRoomView, 
 		if err != nil || len(ifaces) == 0 {
 			return GuestRoomView{}, errors.New("flitnix: no usable network interface found; connect to a network first")
 		}
-		listen = fmt.Sprintf("%s:%d", ifaces[0].IP, server.DefaultPort)
+		addr, err := netenv.ListenAddr(ifaces[0].IP, server.DefaultPort)
+		if err != nil {
+			return GuestRoomView{}, fmt.Errorf("flitnix: cannot form the guest room address: %w", err)
+		}
+		listen = addr
 	}
 
 	if err := a.ensureServer(listen); err != nil {
