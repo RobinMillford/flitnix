@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
@@ -101,35 +102,156 @@ func newRouter(services *Services, stall, downloadStall time.Duration, grants *D
 	return securityMiddleware(mux)
 }
 
+// parseHostPort safely parses an HTTP Host authority string into host and port.
+// It strictly validates square bracket formatting for IPv6 literals and rejects
+// malformed syntax (e.g. unclosed brackets, extra colons, invalid ports).
+func parseHostPort(raw string) (host string, port string, isBracketed bool, err error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", "", false, errors.New("empty host")
+	}
+
+	// Case 1: Bracketed host (IPv6 literal, e.g. [2001:db8::1] or [2001:db8::1]:43821)
+	if strings.HasPrefix(s, "[") {
+		closeIdx := strings.Index(s, "]")
+		if closeIdx == -1 {
+			return "", "", true, errors.New("missing closing bracket in host")
+		}
+		if strings.Count(s, "[") != 1 || strings.Count(s, "]") != 1 {
+			return "", "", true, errors.New("invalid bracket syntax in host")
+		}
+		inside := s[1:closeIdx]
+		if inside == "" {
+			return "", "", true, errors.New("empty bracketed host")
+		}
+		host = inside
+		remainder := s[closeIdx+1:]
+		if remainder != "" {
+			if !strings.HasPrefix(remainder, ":") {
+				return "", "", true, errors.New("unexpected characters after closing bracket")
+			}
+			portStr := remainder[1:]
+			if portStr == "" {
+				return "", "", true, errors.New("empty port after colon")
+			}
+			p, perr := strconv.Atoi(portStr)
+			if perr != nil || p < 1 || p > 65535 {
+				return "", "", true, fmt.Errorf("invalid port %q", portStr)
+			}
+			port = portStr
+		}
+		return host, port, true, nil
+	}
+
+	// Case 2: Unbracketed host. Must not contain rogue brackets.
+	if strings.ContainsAny(s, "[]") {
+		return "", "", false, errors.New("invalid bracket in unbracketed host")
+	}
+
+	// If it contains a colon, it could be IPv4 host:port or unbracketed IPv6
+	if strings.Contains(s, ":") {
+		h, p, splitErr := net.SplitHostPort(s)
+		if splitErr == nil {
+			if p != "" {
+				portNum, perr := strconv.Atoi(p)
+				if perr != nil || portNum < 1 || portNum > 65535 {
+					return "", "", false, fmt.Errorf("invalid port %q", p)
+				}
+			}
+			return h, p, false, nil
+		}
+		// If SplitHostPort fails, check if entire string is an unbracketed IPv6 literal
+		if addr, perr := netip.ParseAddr(s); perr == nil && addr.Is6() {
+			return s, "", false, nil
+		}
+		return "", "", false, splitErr
+	}
+
+	return s, "", false, nil
+}
+
 // isAllowedHost validates that the request Host header matches an IPv4/IPv6
 // address, localhost, or RFC 2606 test domains (for httptest). Any arbitrary
 // DNS hostname is rejected to prevent DNS rebinding attacks.
 func isAllowedHost(hostHeader string) bool {
-	host := strings.TrimSpace(hostHeader)
-	if host == "" {
+	host, _, isBracketed, err := parseHostPort(hostHeader)
+	if err != nil || host == "" {
 		return false
 	}
-	h, _, err := net.SplitHostPort(host)
-	if err != nil {
-		h = host
-	}
-	h = strings.TrimPrefix(h, "[")
-	h = strings.TrimSuffix(h, "]")
-	if strings.EqualFold(h, "localhost") || strings.HasSuffix(strings.ToLower(h), ".localhost") {
-		return true
-	}
-	if strings.EqualFold(h, "example.com") || strings.HasSuffix(strings.ToLower(h), ".example.com") || strings.HasSuffix(strings.ToLower(h), ".test") {
-		return true
-	}
+
 	// Strip IPv6 zone index if present (e.g. fe80::1%eth0 or fe80::1%25eth0)
-	cleanIP := h
-	if zoneIdx := strings.Index(cleanIP, "%"); zoneIdx != -1 {
-		cleanIP = cleanIP[:zoneIdx]
+	cleanHost := host
+	hasZone := false
+	if zoneIdx := strings.Index(cleanHost, "%"); zoneIdx != -1 {
+		hasZone = true
+		cleanHost = cleanHost[:zoneIdx]
 	}
-	if ip := net.ParseIP(cleanIP); ip != nil {
+
+	// Check if valid IP literal
+	if addr, perr := netip.ParseAddr(cleanHost); perr == nil {
+		if isBracketed && !addr.Is6() {
+			// RFC 3986 specifies brackets only for IPv6 literals
+			return false
+		}
+		if hasZone && !addr.Is6() {
+			// Zone identifier is only valid on IPv6
+			return false
+		}
 		return true
 	}
+
+	// Hostnames cannot be bracketed or contain zone identifiers
+	if isBracketed || hasZone {
+		return false
+	}
+
+	// Allowed test/local domain names for development and automated testing
+	lower := strings.ToLower(host)
+	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") {
+		return true
+	}
+	if lower == "example.com" || strings.HasSuffix(lower, ".example.com") || strings.HasSuffix(lower, ".test") {
+		return true
+	}
+
 	return false
+}
+
+// equalHostPort compares two Host authority strings (e.g. from Origin and Host headers),
+// accounting for IPv6 normalization, bracket syntax, and case-insensitivity.
+func equalHostPort(h1, h2 string) bool {
+	host1, port1, _, err1 := parseHostPort(h1)
+	host2, port2, _, err2 := parseHostPort(h2)
+	if err1 != nil || err2 != nil {
+		return strings.EqualFold(h1, h2)
+	}
+
+	if port1 != port2 {
+		return false
+	}
+
+	c1 := host1
+	if idx := strings.Index(c1, "%"); idx != -1 {
+		c1 = c1[:idx]
+	}
+	c2 := host2
+	if idx := strings.Index(c2, "%"); idx != -1 {
+		c2 = c2[:idx]
+	}
+
+	ip1, err1 := netip.ParseAddr(c1)
+	ip2, err2 := netip.ParseAddr(c2)
+	if err1 == nil && err2 == nil {
+		if ip1.Is4In6() {
+			ip1 = ip1.Unmap()
+		}
+		if ip2.Is4In6() {
+			ip2 = ip2.Unmap()
+		}
+		return ip1 == ip2
+	}
+
+	return strings.EqualFold(host1, host2)
 }
 
 // securityMiddleware rejects requests with untrusted Host headers (DNS rebinding)
@@ -153,7 +275,7 @@ func securityMiddleware(next http.Handler) http.Handler {
 					return
 				}
 				u, err := url.Parse(origin)
-				if err != nil || u.Host == "" || !strings.EqualFold(u.Host, r.Host) {
+				if err != nil || u.Host == "" || !equalHostPort(u.Host, r.Host) {
 					writeError(w, http.StatusForbidden, "cross-origin request forbidden")
 					return
 				}
