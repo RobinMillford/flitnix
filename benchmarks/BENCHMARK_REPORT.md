@@ -1,6 +1,6 @@
 # Flitnix Transfer Performance Benchmark Report
 
-**Date:** 2026-10-29 05:58:48 UTC<br>
+**Date:** 2026-10-29 07:10:16 UTC<br>
 **Environment:** linux/amd64 (16 CPUs) | go1.27.3<br>
 **Benchmark Mode:** Local Loopback TCP (`127.0.0.1`) on NVMe storage
 
@@ -11,9 +11,11 @@
 
 | Topology | Files | Data Volume | Duration | Throughput | Peak Heap | Integrity Pass |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Topology 1: Large File**<br><small>Single 500 MB file streaming transfer</small> | 1 | 500.00 MB | 866 ms | **577.37 MB/s** | 0.76 MB | true |
-| **Topology 2: Many Small Files**<br><small>1,000 files x 20 KB each (metadata & connection turnaround)</small> | 1000 | 19.53 MB | 705 ms | **27.70 MB/s** | 2.11 MB | true |
-| **Topology 3: Mixed Hierarchy**<br><small>111 mixed files (50 MB video, 10x5MB clips, 100x100KB documents)</small> | 111 | 109.77 MB | 297 ms | **369.58 MB/s** | 2.56 MB | true |
+| **Topology 1: Large File**<br><small>Single 500 MB file streaming transfer</small> | 1 | 500.00 MB | 440 ms | **1136.36 MB/s** | 0.74 MB | true |
+| **Topology 2: Many Small Files**<br><small>1,000 files x 20 KB each (metadata & connection turnaround)</small> | 1000 | 19.53 MB | 435 ms | **44.90 MB/s** | 2.69 MB | true |
+| **Topology 3: Mixed Hierarchy**<br><small>111 mixed files (50 MB video, 10x5MB clips, 100x100KB documents)</small> | 111 | 109.77 MB | 122 ms | **899.72 MB/s** | 2.38 MB | true |
+| **Topology 4: Outbound Single File Download**<br><small>500 MB file download with streaming RFC 9530 Content-Digest</small> | 1 | 500.00 MB | 666 ms | **750.75 MB/s** | 1.01 MB | true |
+| **Topology 5: Outbound Folder Archive Download**<br><small>111 files (110 MB) uncompressed ZIP download with deterministic two-pass Content-Digest</small> | 111 | 109.78 MB | 157 ms | **699.25 MB/s** | 1.34 MB | true |
 
 ## 2. Architecture & Protocol Analysis vs LocalSend
 
