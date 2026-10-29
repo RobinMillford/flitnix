@@ -56,6 +56,13 @@ func (m *Manager) Close() {
 }
 
 func (m *Manager) CreateRoom(destRoot string, duration time.Duration) (*Room, error) {
+	return m.CreateRoomWithConfig(RoomConfig{
+		DestinationRoot: destRoot,
+		Duration:        duration,
+	})
+}
+
+func (m *Manager) CreateRoomWithConfig(cfg RoomConfig) (*Room, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -63,7 +70,7 @@ func (m *Manager) CreateRoom(destRoot string, duration time.Duration) (*Room, er
 		m.activeRoom.End()
 	}
 
-	r, err := NewRoom(destRoot, duration)
+	r, err := NewRoomWithConfig(cfg)
 	if err != nil {
 		return nil, err
 	}

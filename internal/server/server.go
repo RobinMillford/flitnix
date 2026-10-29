@@ -63,6 +63,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/itsyamin/flitnix/internal/audit"
 	"github.com/itsyamin/flitnix/internal/guest"
 	"github.com/itsyamin/flitnix/internal/session"
 	"github.com/itsyamin/flitnix/internal/textmsg"
@@ -141,6 +142,7 @@ type Services struct {
 	Downloads    *transfer.DownloadRegistry
 	GuestManager *guest.Manager
 	TextMessages *textmsg.Store
+	Audit        *audit.Store
 
 	// Diagnose, when non-nil, receives low-volume transfer diagnostics at
 	// meaningful transitions: one line when an item is claimed, milestones

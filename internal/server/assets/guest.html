@@ -128,6 +128,13 @@
     <p class="tagline">Upload-only file drop to host desktop</p>
   </header>
 
+  <!-- Room Info Header (Title, Instructions, Deadline) -->
+  <section class="card" id="room-header-card" hidden style="margin-bottom: 1rem;">
+    <h2 id="room-header-title" style="margin: 0; font-size: 1.15rem; color: var(--text);"></h2>
+    <p id="room-header-desc" class="muted" style="margin: 0.35rem 0 0; font-size: 0.85rem; line-height: 1.4;"></p>
+    <div id="room-deadline-badge" class="badge badge--pending" style="margin-top: 0.6rem; display: inline-block;" hidden></div>
+  </section>
+
   <!-- Connection / Status Indicator -->
   <section class="status" id="status-card" data-state="checking">
     <span class="status__dot" aria-hidden="true"></span>
@@ -145,8 +152,14 @@
     <h2>Join Guest Drop Box</h2>
     <p>Enter your name or device model so the host knows who is uploading.</p>
     <form id="join-form">
+      <div class="input-group" id="roster-select-group" hidden>
+        <label for="participant-select" class="input-label">Select Your Name (Expected Participant)</label>
+        <select id="participant-select" class="text-input">
+          <option value="">-- Choose your name --</option>
+        </select>
+      </div>
       <div class="input-group">
-        <label for="nickname-input" class="input-label">Your Nickname (Optional)</label>
+        <label for="nickname-input" class="input-label" id="nickname-label">Your Nickname (Optional)</label>
         <input type="text" id="nickname-input" class="text-input" placeholder="e.g. Alex (Pixel 8)" maxlength="30" autocomplete="name">
       </div>
       <button type="submit" id="join-btn" class="btn-primary">Request to Join</button>
@@ -178,6 +191,13 @@
         <p style="margin: 0; font-weight: 500;">Tap to select files or drag & drop</p>
         <p class="muted" style="margin: 0.3rem 0 0; font-size: 0.85rem;">Photos, videos, documents of any size</p>
         <input type="file" id="file-selector" multiple hidden>
+      </div>
+
+      <!-- Submission Form Details (Dynamic Schema) -->
+      <div id="submission-form-card" class="card" style="margin-top: 1rem; border-color: var(--line); background: rgba(18, 37, 58, 0.3);" hidden>
+        <h3 style="margin-top: 0; font-size: 0.95rem;">Submission Information</h3>
+        <p class="muted" style="font-size: 0.8rem; margin: 0 0 0.5rem 0;">Please fill out the following fields for your submission:</p>
+        <div id="dynamic-form-fields"></div>
       </div>
 
       <!-- File Queue -->

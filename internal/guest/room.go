@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -65,7 +66,132 @@ var (
 	ErrUploadAlreadyDecided = errors.New("guest: upload request already decided")
 	ErrUnauthorized         = errors.New("guest: unauthorized")
 	ErrRoomFull             = errors.New("guest: room capacity reached")
+	ErrFileConflict         = errors.New("guest: file already exists and collision policy rejects overwrite")
 )
+
+type CollisionPolicy string
+
+const (
+	CollisionPreserveBoth CollisionPolicy = "preserve_both"
+	CollisionReject       CollisionPolicy = "reject"
+)
+
+type ParticipantStatus string
+
+const (
+	StatusNotJoined         ParticipantStatus = "not_joined"
+	StatusJoined            ParticipantStatus = "joined"
+	StatusAwaitingUpload    ParticipantStatus = "awaiting_upload"
+	StatusUploadRequested   ParticipantStatus = "upload_requested"
+	StatusAwaitingApproval  ParticipantStatus = "awaiting_approval"
+	StatusUploading         ParticipantStatus = "uploading"
+	StatusSubmitted         ParticipantStatus = "submitted"
+	StatusRejected          ParticipantStatus = "rejected"
+	StatusFailed            ParticipantStatus = "failed"
+	StatusCanceled          ParticipantStatus = "canceled"
+	StatusMissingAtDeadline ParticipantStatus = "missing_at_deadline"
+)
+
+type FormField struct {
+	ID        string   `json:"id"`
+	Label     string   `json:"label"`
+	Type      string   `json:"type"` // "text", "textarea", "select"
+	Required  bool     `json:"required"`
+	Options   []string `json:"options,omitempty"`
+	MaxLength int      `json:"maxLength,omitempty"`
+}
+
+type ExpectedParticipant struct {
+	ID              string            `json:"id"`
+	Identifier      string            `json:"identifier"`
+	Name            string            `json:"name"`
+	AssignedGuestID string            `json:"assignedGuestId,omitempty"`
+	Status          ParticipantStatus `json:"status"`
+	SubmissionCount int               `json:"submissionCount"`
+	LastActivity    time.Time         `json:"lastActivity,omitempty"`
+}
+
+type Preset struct {
+	ID              string          `json:"id"`
+	Name            string          `json:"name"`
+	Title           string          `json:"title"`
+	Description     string          `json:"description"`
+	DurationMinutes int             `json:"durationMinutes"`
+	CollisionPolicy CollisionPolicy `json:"collisionPolicy"`
+	FormSchema      []FormField     `json:"formSchema,omitempty"`
+}
+
+func DefaultPresets() []Preset {
+	return []Preset{
+		{
+			ID:              "classroom_assignment",
+			Name:            "Classroom Assignment",
+			Title:           "Classroom Assignment Submission",
+			Description:     "Submit your assignment files. Provide your student ID and notes.",
+			DurationMinutes: 120,
+			CollisionPolicy: CollisionPreserveBoth,
+			FormSchema: []FormField{
+				{ID: "student_id", Label: "Student ID", Type: "text", Required: true, MaxLength: 30},
+				{ID: "assignment_num", Label: "Assignment # / Topic", Type: "text", Required: true, MaxLength: 50},
+				{ID: "notes", Label: "Submission Notes", Type: "textarea", Required: false, MaxLength: 200},
+			},
+		},
+		{
+			ID:              "photo_collection",
+			Name:            "Photo Collection",
+			Title:           "Event Photo Collection",
+			Description:     "Upload full-resolution event photos and video clips.",
+			DurationMinutes: 180,
+			CollisionPolicy: CollisionPreserveBoth,
+			FormSchema: []FormField{
+				{ID: "caption", Label: "Caption / Group Name", Type: "text", Required: false, MaxLength: 100},
+			},
+		},
+		{
+			ID:              "meeting_documents",
+			Name:            "Meeting Documents",
+			Title:           "Meeting Document Drop",
+			Description:     "Drop meeting handouts, slide decks, and discussion notes.",
+			DurationMinutes: 90,
+			CollisionPolicy: CollisionPreserveBoth,
+			FormSchema: []FormField{
+				{ID: "presenter", Label: "Presenter / Author", Type: "text", Required: true, MaxLength: 50},
+				{ID: "agenda_item", Label: "Agenda Item", Type: "text", Required: false, MaxLength: 50},
+			},
+		},
+		{
+			ID:              "team_submission",
+			Name:            "Team Submission",
+			Title:           "Team Deliverable Submission",
+			Description:     "Upload final project deliverables and assets.",
+			DurationMinutes: 240,
+			CollisionPolicy: CollisionPreserveBoth,
+			FormSchema: []FormField{
+				{ID: "team_name", Label: "Team Name", Type: "text", Required: true, MaxLength: 50},
+				{ID: "deliverable_version", Label: "Deliverable Version", Type: "text", Required: false, MaxLength: 20},
+			},
+		},
+		{
+			ID:              "general_file_drop",
+			Name:            "General File Drop",
+			Title:           "Flitnix Guest Drop",
+			Description:     "Quick temporary drop box for general file collection.",
+			DurationMinutes: 60,
+			CollisionPolicy: CollisionPreserveBoth,
+		},
+	}
+}
+
+type RoomConfig struct {
+	DestinationRoot      string                `json:"destinationRoot"`
+	Duration             time.Duration         `json:"duration"`
+	Title                string                `json:"title"`
+	Description          string                `json:"description,omitempty"`
+	Deadline             *time.Time            `json:"deadline,omitempty"`
+	CollisionPolicy      CollisionPolicy       `json:"collisionPolicy"`
+	FormSchema           []FormField           `json:"formSchema,omitempty"`
+	ExpectedParticipants []ExpectedParticipant `json:"expectedParticipants,omitempty"`
+}
 
 const (
 	MaxGuestsPerRoom = 256
@@ -105,48 +231,58 @@ func SanitizeNickname(name string) (display string, slug string) {
 }
 
 type Guest struct {
-	ID        string     `json:"id"`
-	Nickname  string     `json:"nickname"`
-	SafeSlug  string     `json:"safeSlug"`
-	Token     string     `json:"-"`
-	TokenHash string     `json:"-"`
-	State     GuestState `json:"state"`
-	CreatedAt time.Time  `json:"createdAt"`
-	DecidedAt time.Time  `json:"decidedAt,omitempty"`
+	ID            string     `json:"id"`
+	Nickname      string     `json:"nickname"`
+	SafeSlug      string     `json:"safeSlug"`
+	ParticipantID string     `json:"participantId,omitempty"`
+	Token         string     `json:"-"`
+	TokenHash     string     `json:"-"`
+	State         GuestState `json:"state"`
+	CreatedAt     time.Time  `json:"createdAt"`
+	DecidedAt     time.Time  `json:"decidedAt,omitempty"`
 
 	store    *transfer.Store
 	transfer *transfer.Service
 }
 
 type UploadRequest struct {
-	ID               string      `json:"id"`
-	GuestID          string      `json:"guestId"`
-	GuestName        string      `json:"guestName"`
-	FileName         string      `json:"fileName"`
-	Size             int64       `json:"size"`
-	State            UploadState `json:"state"`
-	CreatedAt        time.Time   `json:"createdAt"`
-	DecidedAt        time.Time   `json:"decidedAt,omitempty"`
-	StartedAt        time.Time   `json:"startedAt,omitempty"`
-	CompletedAt      time.Time   `json:"completedAt,omitempty"`
-	Transferred      int64       `json:"transferred"`
-	Speed            float64     `json:"speed"`
-	SHA256           string      `json:"sha256,omitempty"`
-	Error            string      `json:"error,omitempty"`
+	ID               string            `json:"id"`
+	GuestID          string            `json:"guestId"`
+	GuestName        string            `json:"guestName"`
+	ParticipantID    string            `json:"participantId,omitempty"`
+	FileName         string            `json:"fileName"`
+	Size             int64             `json:"size"`
+	State            UploadState       `json:"state"`
+	CreatedAt        time.Time         `json:"createdAt"`
+	DecidedAt        time.Time         `json:"decidedAt,omitempty"`
+	StartedAt        time.Time         `json:"startedAt,omitempty"`
+	CompletedAt      time.Time         `json:"completedAt,omitempty"`
+	Transferred      int64             `json:"transferred"`
+	Speed            float64           `json:"speed"`
+	SHA256           string            `json:"sha256,omitempty"`
+	Error            string            `json:"error,omitempty"`
+	FormValues       map[string]string `json:"formValues,omitempty"`
 	internalUploadID string
 }
 
 type RoomView struct {
-	ID              string    `json:"id"`
-	Date            string    `json:"date"`
-	DestinationRoot string    `json:"destinationRoot"`
-	RoomFolder      string    `json:"roomFolder"`
-	State           RoomState `json:"state"`
-	DurationSeconds int       `json:"durationSeconds"`
-	CreatedAt       time.Time `json:"createdAt"`
-	ExpiresAt       time.Time `json:"expiresAt"`
-	InviteSecret    string    `json:"inviteSecret,omitempty"`
-	InviteURL       string    `json:"inviteUrl,omitempty"`
+	ID              string                `json:"id"`
+	Date            string                `json:"date"`
+	DestinationRoot string                `json:"destinationRoot"`
+	RoomFolder      string                `json:"roomFolder"`
+	Title           string                `json:"title"`
+	Description     string                `json:"description,omitempty"`
+	Deadline        *time.Time            `json:"deadline,omitempty"`
+	CollisionPolicy CollisionPolicy       `json:"collisionPolicy"`
+	State           RoomState             `json:"state"`
+	DurationSeconds int                   `json:"durationSeconds"`
+	CreatedAt       time.Time             `json:"createdAt"`
+	ExpiresAt       time.Time             `json:"expiresAt"`
+	InviteSecret    string                `json:"inviteSecret,omitempty"`
+	InviteURL       string                `json:"inviteUrl,omitempty"`
+	FormSchema      []FormField           `json:"formSchema,omitempty"`
+	Roster          []ExpectedParticipant `json:"roster,omitempty"`
+	HasRoster       bool                  `json:"hasRoster"`
 }
 
 type Room struct {
@@ -160,10 +296,23 @@ type Room struct {
 	ExpiresAt       time.Time
 	State           RoomState
 
+	Title           string
+	Description     string
+	Deadline        *time.Time
+	CollisionPolicy CollisionPolicy
+	FormSchema      []FormField
+
 	mu            sync.RWMutex
 	guests        map[string]*Guest
 	guestsByToken map[string]*Guest
 	uploads       map[string]*UploadRequest
+	roster        map[string]*ExpectedParticipant
+}
+
+func randomID() string {
+	b := make([]byte, 8)
+	_, _ = io.ReadFull(rand.Reader, b)
+	return hex.EncodeToString(b)
 }
 
 func randomHex(bytesLen int) (string, error) {
@@ -188,16 +337,24 @@ func hashToken(token string) string {
 }
 
 func NewRoom(destinationRoot string, duration time.Duration) (*Room, error) {
-	if destinationRoot == "" {
+	return NewRoomWithConfig(RoomConfig{
+		DestinationRoot: destinationRoot,
+		Duration:        duration,
+	})
+}
+
+func NewRoomWithConfig(cfg RoomConfig) (*Room, error) {
+	destRoot := cfg.DestinationRoot
+	if destRoot == "" {
 		home, err := os.UserHomeDir()
 		if err != nil || home == "" {
 			return nil, fmt.Errorf("guest: cannot resolve default home directory: %w", err)
 		}
-		destinationRoot = filepath.Join(home, "Downloads", "Flitnix")
+		destRoot = filepath.Join(home, "Downloads", "Flitnix")
 	}
-	absDest, err := filepath.Abs(destinationRoot)
+	absDest, err := filepath.Abs(destRoot)
 	if err != nil {
-		return nil, fmt.Errorf("guest: invalid destination root %q: %w", destinationRoot, err)
+		return nil, fmt.Errorf("guest: invalid destination root %q: %w", destRoot, err)
 	}
 
 	roomID, err := randomHex(6) // 12 characters
@@ -213,35 +370,75 @@ func NewRoom(destinationRoot string, duration time.Duration) (*Room, error) {
 	dateStr := now.Format("2006-01-02")
 	roomFolder := filepath.Join(absDest, "Flitnix Guest Drop", fmt.Sprintf("%s-%s", dateStr, roomID))
 
-	if duration <= 0 {
-		duration = 1 * time.Hour
+	dur := cfg.Duration
+	if dur <= 0 {
+		dur = 1 * time.Hour
 	}
 
-	return &Room{
+	title := strings.TrimSpace(cfg.Title)
+	if title == "" {
+		title = "Flitnix Guest Drop"
+	}
+
+	collisionPolicy := cfg.CollisionPolicy
+	if collisionPolicy == "" {
+		collisionPolicy = CollisionPreserveBoth
+	}
+
+	r := &Room{
 		ID:              roomID,
 		Date:            dateStr,
 		InviteSecret:    inviteSecret,
 		DestinationRoot: absDest,
 		RoomFolder:      roomFolder,
-		Duration:        duration,
+		Duration:        dur,
 		CreatedAt:       now,
-		ExpiresAt:       now.Add(duration),
+		ExpiresAt:       now.Add(dur),
 		State:           RoomActive,
+		Title:           title,
+		Description:     strings.TrimSpace(cfg.Description),
+		Deadline:        cfg.Deadline,
+		CollisionPolicy: collisionPolicy,
+		FormSchema:      cfg.FormSchema,
 		guests:          make(map[string]*Guest),
 		guestsByToken:   make(map[string]*Guest),
 		uploads:         make(map[string]*UploadRequest),
-	}, nil
+		roster:          make(map[string]*ExpectedParticipant),
+	}
+
+	for _, ep := range cfg.ExpectedParticipants {
+		if ep.ID == "" {
+			ep.ID = randomID()
+		}
+		if ep.Status == "" {
+			ep.Status = StatusNotJoined
+		}
+		pCopy := ep
+		r.roster[ep.ID] = &pCopy
+	}
+
+	return r, nil
 }
 
 func (r *Room) CheckExpiry() RoomState {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	now := time.Now()
+
+	// If deadline has passed, update unsubmitted roster participants
+	if r.Deadline != nil && now.After(*r.Deadline) {
+		for _, p := range r.roster {
+			if p.Status == StatusNotJoined || p.Status == StatusJoined || p.Status == StatusAwaitingUpload {
+				p.Status = StatusMissingAtDeadline
+			}
+		}
+	}
+
 	if r.State == RoomEnded || r.State == RoomExpired {
 		return r.State
 	}
 
-	now := time.Now()
 	if !now.Before(r.ExpiresAt) {
 		r.State = RoomExpired
 		r.revokeAllLocked("room expired")
@@ -265,16 +462,34 @@ func (r *Room) View() RoomView {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	roster := make([]ExpectedParticipant, 0, len(r.roster))
+	for _, p := range r.roster {
+		roster = append(roster, *p)
+	}
+	sort.Slice(roster, func(i, j int) bool {
+		return roster[i].Name < roster[j].Name
+	})
+
+	formSchema := make([]FormField, len(r.FormSchema))
+	copy(formSchema, r.FormSchema)
+
 	return RoomView{
 		ID:              r.ID,
 		Date:            r.Date,
 		DestinationRoot: r.DestinationRoot,
 		RoomFolder:      r.RoomFolder,
+		Title:           r.Title,
+		Description:     r.Description,
+		Deadline:        r.Deadline,
+		CollisionPolicy: r.CollisionPolicy,
 		State:           r.State,
 		DurationSeconds: int(r.Duration.Seconds()),
 		CreatedAt:       r.CreatedAt,
 		ExpiresAt:       r.ExpiresAt,
 		InviteSecret:    r.InviteSecret,
+		FormSchema:      formSchema,
+		Roster:          roster,
+		HasRoster:       len(r.roster) > 0,
 	}
 }
 
@@ -320,6 +535,10 @@ func (r *Room) ValidateInviteSecret(secret string) bool {
 }
 
 func (r *Room) Join(nickname string) (*Guest, error) {
+	return r.JoinWithParticipant(nickname, "")
+}
+
+func (r *Room) JoinWithParticipant(nickname, participantID string) (*Guest, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -328,6 +547,23 @@ func (r *Room) Join(nickname string) (*Guest, error) {
 	}
 	if len(r.guests) >= MaxGuestsPerRoom {
 		return nil, ErrRoomFull
+	}
+
+	disp, slug := SanitizeNickname(nickname)
+
+	if participantID != "" {
+		p, ok := r.roster[participantID]
+		if !ok {
+			return nil, errors.New("guest: expected participant not found")
+		}
+		if p.AssignedGuestID != "" {
+			if existingG, exists := r.guests[p.AssignedGuestID]; exists && existingG.State != GuestRevoked && existingG.State != GuestRejected {
+				return nil, errors.New("guest: participant identity is already in use")
+			}
+		}
+		if disp == "Guest" && p.Name != "" {
+			disp, slug = SanitizeNickname(p.Name)
+		}
 	}
 
 	guestID, err := randomHex(6)
@@ -339,15 +575,23 @@ func (r *Room) Join(nickname string) (*Guest, error) {
 		return nil, err
 	}
 
-	disp, slug := SanitizeNickname(nickname)
 	g := &Guest{
-		ID:        guestID,
-		Nickname:  disp,
-		SafeSlug:  slug,
-		Token:     token,
-		TokenHash: hashToken(token),
-		State:     GuestPending,
-		CreatedAt: time.Now(),
+		ID:            guestID,
+		Nickname:      disp,
+		SafeSlug:      slug,
+		ParticipantID: participantID,
+		Token:         token,
+		TokenHash:     hashToken(token),
+		State:         GuestPending,
+		CreatedAt:     time.Now(),
+	}
+
+	if participantID != "" {
+		if p, ok := r.roster[participantID]; ok {
+			p.AssignedGuestID = guestID
+			p.Status = StatusJoined
+			p.LastActivity = time.Now()
+		}
 	}
 
 	r.guests[g.ID] = g
@@ -417,6 +661,13 @@ func (r *Room) ApproveGuest(id string) error {
 	g.transfer = transfer.NewService(transfer.Config{Store: store})
 	g.State = GuestApproved
 	g.DecidedAt = time.Now()
+
+	if g.ParticipantID != "" {
+		if p, ok := r.roster[g.ParticipantID]; ok {
+			p.Status = StatusAwaitingUpload
+			p.LastActivity = time.Now()
+		}
+	}
 	return nil
 }
 
@@ -430,6 +681,13 @@ func (r *Room) RejectGuest(id string) error {
 	}
 	g.State = GuestRejected
 	g.DecidedAt = time.Now()
+
+	if g.ParticipantID != "" {
+		if p, ok := r.roster[g.ParticipantID]; ok {
+			p.Status = StatusRejected
+			p.LastActivity = time.Now()
+		}
+	}
 
 	for _, u := range r.uploads {
 		if u.GuestID == id && (u.State == UploadPendingApproval || u.State == UploadApproved || u.State == UploadUploading) {
@@ -451,6 +709,13 @@ func (r *Room) RevokeGuest(id string) error {
 	g.State = GuestRevoked
 	g.DecidedAt = time.Now()
 
+	if g.ParticipantID != "" {
+		if p, ok := r.roster[g.ParticipantID]; ok {
+			p.Status = StatusCanceled
+			p.LastActivity = time.Now()
+		}
+	}
+
 	if g.transfer != nil {
 		g.transfer.CancelSession("guest-" + g.ID)
 	}
@@ -465,6 +730,10 @@ func (r *Room) RevokeGuest(id string) error {
 }
 
 func (r *Room) DeclareUpload(guestID, fileName string, size int64) (*UploadRequest, error) {
+	return r.DeclareUploadWithMeta(guestID, fileName, size, nil)
+}
+
+func (r *Room) DeclareUploadWithMeta(guestID, fileName string, size int64, formValues map[string]string) (*UploadRequest, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -487,6 +756,43 @@ func (r *Room) DeclareUpload(guestID, fileName string, size int64) (*UploadReque
 		return nil, transfer.ErrInvalidUpload
 	}
 
+	// Validate form fields if schema configured
+	for _, field := range r.FormSchema {
+		val := strings.TrimSpace(formValues[field.ID])
+		if field.Required && val == "" {
+			return nil, fmt.Errorf("guest: form field %q is required", field.Label)
+		}
+		if field.MaxLength > 0 && len([]rune(val)) > field.MaxLength {
+			return nil, fmt.Errorf("guest: form field %q exceeds max length (%d)", field.Label, field.MaxLength)
+		}
+		if field.Type == "select" && len(field.Options) > 0 && val != "" {
+			valid := false
+			for _, opt := range field.Options {
+				if opt == val {
+					valid = true
+					break
+				}
+			}
+			if !valid {
+				return nil, fmt.Errorf("guest: invalid selection for %q", field.Label)
+			}
+		}
+	}
+
+	// Check CollisionReject policy
+	if r.CollisionPolicy == CollisionReject {
+		guestDir := filepath.Join(r.RoomFolder, fmt.Sprintf("%s-%s", g.ID, g.SafeSlug))
+		targetPath := filepath.Join(guestDir, sanitizedName)
+		if _, err := os.Stat(targetPath); err == nil {
+			return nil, ErrFileConflict
+		}
+		for _, existing := range r.uploads {
+			if existing.GuestID == guestID && existing.FileName == sanitizedName && existing.State != UploadFailed && existing.State != UploadCanceled && existing.State != UploadRejected {
+				return nil, ErrFileConflict
+			}
+		}
+	}
+
 	upID, err := randomHex(8)
 	if err != nil {
 		return nil, err
@@ -502,11 +808,20 @@ func (r *Room) DeclareUpload(guestID, fileName string, size int64) (*UploadReque
 		ID:               upID,
 		GuestID:          g.ID,
 		GuestName:        g.Nickname,
+		ParticipantID:    g.ParticipantID,
 		FileName:         sanitizedName,
 		Size:             size,
 		State:            UploadPendingApproval,
 		CreatedAt:        time.Now(),
+		FormValues:       formValues,
 		internalUploadID: internalUp.ID,
+	}
+
+	if g.ParticipantID != "" {
+		if p, ok := r.roster[g.ParticipantID]; ok {
+			p.Status = StatusUploadRequested
+			p.LastActivity = time.Now()
+		}
 	}
 
 	r.uploads[upID] = req
@@ -629,6 +944,12 @@ func (r *Room) StreamUpload(uploadID string, body io.Reader) (*transfer.ContentR
 	if err != nil {
 		u.State = UploadFailed
 		u.Error = err.Error()
+		if u.ParticipantID != "" {
+			if p, ok := r.roster[u.ParticipantID]; ok {
+				p.Status = StatusFailed
+				p.LastActivity = time.Now()
+			}
+		}
 		return nil, err
 	}
 
@@ -636,7 +957,107 @@ func (r *Room) StreamUpload(uploadID string, body io.Reader) (*transfer.ContentR
 	u.CompletedAt = time.Now()
 	u.Transferred = res.Written
 	u.SHA256 = res.SHA256
+
+	if u.ParticipantID != "" {
+		if p, ok := r.roster[u.ParticipantID]; ok {
+			p.SubmissionCount++
+			p.Status = StatusSubmitted
+			p.LastActivity = time.Now()
+		}
+	}
 	return &res, nil
+}
+
+func (r *Room) AddParticipant(name, identifier string) (*ExpectedParticipant, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, errors.New("guest: participant name is required")
+	}
+	id, err := randomHex(6)
+	if err != nil {
+		return nil, err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	p := &ExpectedParticipant{
+		ID:           id,
+		Identifier:   strings.TrimSpace(identifier),
+		Name:         name,
+		Status:       StatusNotJoined,
+		LastActivity: time.Now(),
+	}
+	r.roster[id] = p
+	return p, nil
+}
+
+func (r *Room) RemoveParticipant(id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, ok := r.roster[id]; !ok {
+		return errors.New("guest: participant not found")
+	}
+	delete(r.roster, id)
+	return nil
+}
+
+func (r *Room) UpdateParticipant(id, name, identifier string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	p, ok := r.roster[id]
+	if !ok {
+		return errors.New("guest: participant not found")
+	}
+	if name != "" {
+		p.Name = strings.TrimSpace(name)
+	}
+	if identifier != "" {
+		p.Identifier = strings.TrimSpace(identifier)
+	}
+	p.LastActivity = time.Now()
+	return nil
+}
+
+func (r *Room) GetRoster() []ExpectedParticipant {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	out := make([]ExpectedParticipant, 0, len(r.roster))
+	for _, p := range r.roster {
+		out = append(out, *p)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
+
+func (r *Room) LinkGuestToParticipant(guestID, participantID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	g, ok := r.guests[guestID]
+	if !ok {
+		return ErrGuestNotFound
+	}
+	p, ok := r.roster[participantID]
+	if !ok {
+		return errors.New("guest: participant not found")
+	}
+	p.AssignedGuestID = guestID
+	if p.SubmissionCount > 0 {
+		p.Status = StatusSubmitted
+	} else if g.State == GuestApproved {
+		p.Status = StatusAwaitingUpload
+	} else {
+		p.Status = StatusJoined
+	}
+	p.LastActivity = time.Now()
+	g.ParticipantID = participantID
+	return nil
 }
 
 func (r *Room) ListGuests() []Guest {

@@ -37,6 +37,17 @@
   var fileSelector = document.getElementById("file-selector");
   var queueEl = document.getElementById("upload-queue");
 
+  // Event & Collection metadata DOM elements
+  var roomHeaderCard = document.getElementById("room-header-card");
+  var roomHeaderTitle = document.getElementById("room-header-title");
+  var roomHeaderDesc = document.getElementById("room-header-desc");
+  var roomDeadlineBadge = document.getElementById("room-deadline-badge");
+  var rosterSelectGroup = document.getElementById("roster-select-group");
+  var participantSelect = document.getElementById("participant-select");
+  var submissionFormCard = document.getElementById("submission-form-card");
+  var dynamicFormFields = document.getElementById("dynamic-form-fields");
+  var roomInfo = null;
+
   function setStatus(state, msg) {
     if (statusCard) statusCard.dataset.state = state;
     if (statusText) statusText.textContent = msg;
@@ -70,11 +81,133 @@
     return (idx === 0 ? val.toFixed(0) : val.toFixed(1)) + " " + units[idx];
   }
 
+  function renderFormFields(schema) {
+    if (!dynamicFormFields) return;
+    dynamicFormFields.innerHTML = "";
+    if (!schema || schema.length === 0) {
+      if (submissionFormCard) submissionFormCard.hidden = true;
+      return;
+    }
+    if (submissionFormCard) submissionFormCard.hidden = false;
+
+    for (var i = 0; i < schema.length; i++) {
+      var field = schema[i];
+      var group = document.createElement("div");
+      group.className = "input-group";
+
+      var label = document.createElement("label");
+      label.className = "input-label";
+      label.htmlFor = "field-" + field.id;
+      label.textContent = field.label + (field.required ? " *" : "");
+      group.appendChild(label);
+
+      var inputEl;
+      if (field.type === "textarea") {
+        inputEl = document.createElement("textarea");
+        inputEl.rows = 3;
+      } else if (field.type === "select" && field.options && field.options.length > 0) {
+        inputEl = document.createElement("select");
+        var defOpt = document.createElement("option");
+        defOpt.value = "";
+        defOpt.textContent = "-- Select an option --";
+        inputEl.appendChild(defOpt);
+        for (var o = 0; o < field.options.length; o++) {
+          var opt = document.createElement("option");
+          opt.value = field.options[o];
+          opt.textContent = field.options[o];
+          inputEl.appendChild(opt);
+        }
+      } else {
+        inputEl = document.createElement("input");
+        inputEl.type = "text";
+      }
+
+      inputEl.id = "field-" + field.id;
+      inputEl.className = "text-input";
+      if (field.maxLength) inputEl.maxLength = field.maxLength;
+      if (field.required) inputEl.required = true;
+      group.appendChild(inputEl);
+      dynamicFormFields.appendChild(group);
+    }
+  }
+
+  function fetchRoomInfo() {
+    if (!inviteSecret) return;
+    fetch("/guest-api/room-info?secret=" + encodeURIComponent(inviteSecret))
+      .then(function (res) {
+        if (!res.ok) return null;
+        return res.json();
+      })
+      .then(function (info) {
+        if (!info) return;
+        roomInfo = info;
+
+        if (roomHeaderCard) {
+          if (info.title) {
+            roomHeaderCard.hidden = false;
+            if (roomHeaderTitle) roomHeaderTitle.textContent = info.title;
+            if (roomHeaderDesc) {
+              if (info.description) {
+                roomHeaderDesc.textContent = info.description;
+                roomHeaderDesc.hidden = false;
+              } else {
+                roomHeaderDesc.hidden = true;
+              }
+            }
+          }
+        }
+
+        if (info.deadline && roomDeadlineBadge) {
+          var dl = new Date(info.deadline);
+          var now = new Date();
+          var diffMs = dl - now;
+          if (diffMs > 0) {
+            var diffMins = Math.round(diffMs / 60000);
+            roomDeadlineBadge.textContent = "Deadline: " + dl.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + " (" + diffMins + "m remaining)";
+            roomDeadlineBadge.className = "badge badge--pending";
+          } else {
+            roomDeadlineBadge.textContent = "Deadline: Passed (" + dl.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ")";
+            roomDeadlineBadge.className = "badge badge--failed";
+          }
+          roomDeadlineBadge.hidden = false;
+        }
+
+        if (info.hasRoster && info.roster && info.roster.length > 0 && participantSelect && rosterSelectGroup) {
+          rosterSelectGroup.hidden = false;
+          while (participantSelect.options.length > 1) {
+            participantSelect.remove(1);
+          }
+          for (var pIdx = 0; pIdx < info.roster.length; pIdx++) {
+            var part = info.roster[pIdx];
+            var pOpt = document.createElement("option");
+            pOpt.value = part.id;
+            pOpt.textContent = part.name + (part.identifier ? " (" + part.identifier + ")" : "");
+            participantSelect.appendChild(pOpt);
+          }
+          participantSelect.addEventListener("change", function () {
+            var selectedIdx = participantSelect.selectedIndex;
+            if (selectedIdx > 0 && nicknameInput && !nicknameInput.value.trim()) {
+              var pName = info.roster[selectedIdx - 1].name;
+              nicknameInput.value = pName;
+            }
+          });
+        }
+
+        if (info.formSchema) {
+          renderFormFields(info.formSchema);
+        }
+      })
+      .catch(function () {
+        // Non-fatal if room-info fails
+      });
+  }
+
   // Initial routing
   if (!inviteSecret) {
     // Check if we already have an active guest cookie
     checkExistingSession();
   } else {
+    fetchRoomInfo();
     showJoinForm();
   }
 
@@ -108,13 +241,19 @@
       if (!inviteSecret) return;
 
       var nickname = nicknameInput ? nicknameInput.value.trim() : "";
+      var participantId = participantSelect ? participantSelect.value : "";
       if (joinBtn) joinBtn.disabled = true;
       setStatus("checking", "Sending join request…");
+
+      var reqBody = { secret: inviteSecret, nickname: nickname };
+      if (participantId) {
+        reqBody.participantId = participantId;
+      }
 
       fetch("/guest-api/join", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ secret: inviteSecret, nickname: nickname })
+        body: JSON.stringify(reqBody)
       })
         .then(function (res) {
           if (!res.ok) throw new Error("Join request failed (" + res.status + ")");
@@ -223,13 +362,46 @@
     });
   }
 
+  function getFormValues() {
+    var values = {};
+    if (!roomInfo || !roomInfo.formSchema) return values;
+    for (var i = 0; i < roomInfo.formSchema.length; i++) {
+      var field = roomInfo.formSchema[i];
+      var input = document.getElementById("field-" + field.id);
+      if (input) {
+        values[field.id] = input.value.trim();
+      }
+    }
+    return values;
+  }
+
+  function validateFormSchema() {
+    if (!roomInfo || !roomInfo.formSchema) return true;
+    for (var i = 0; i < roomInfo.formSchema.length; i++) {
+      var field = roomInfo.formSchema[i];
+      if (field.required) {
+        var input = document.getElementById("field-" + field.id);
+        if (!input || !input.value.trim()) {
+          alert("Please fill out the required field: " + field.label);
+          if (input) input.focus();
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
   function enqueueFiles(fileList) {
+    if (!validateFormSchema()) return;
+    var currentValues = getFormValues();
+
     for (var i = 0; i < fileList.length; i++) {
       var f = fileList[i];
       var job = {
         file: f,
         name: f.name,
         size: f.size,
+        formValues: currentValues,
         state: "queued", // queued, declaring, pending, approved, uploading, completed, rejected, failed
         uploadId: null,
         transferred: 0,
@@ -392,15 +564,23 @@
     job.state = "declaring";
     updateJobUI(job);
 
+    var payload = { name: job.name, size: job.size };
+    if (job.formValues && Object.keys(job.formValues).length > 0) {
+      payload.formValues = job.formValues;
+    }
+
     fetch("/guest-api/uploads", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "Authorization": guestToken ? "Bearer " + guestToken : ""
       },
-      body: JSON.stringify({ name: job.name, size: job.size })
+      body: JSON.stringify(payload)
     })
       .then(function (res) {
+        if (res.status === 409) {
+          throw new Error("File already exists. In this room, duplicate file names are rejected.");
+        }
         if (!res.ok) throw new Error("Upload declaration rejected (" + res.status + ")");
         return res.json();
       })

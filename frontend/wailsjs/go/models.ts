@@ -1,3 +1,105 @@
+export namespace audit {
+
+	export class Entry {
+	    id: string;
+	    // Go type: time
+	    timestamp: any;
+	    eventType: string;
+	    roomId?: string;
+	    guestId?: string;
+	    guestName?: string;
+	    fileName?: string;
+	    fileSize?: number;
+	    sha256?: string;
+	    outcome: string;
+	    details?: string;
+
+	    static createFrom(source: any = {}) {
+	        return new Entry(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.timestamp = this.convertValues(source["timestamp"], null);
+	        this.eventType = source["eventType"];
+	        this.roomId = source["roomId"];
+	        this.guestId = source["guestId"];
+	        this.guestName = source["guestName"];
+	        this.fileName = source["fileName"];
+	        this.fileSize = source["fileSize"];
+	        this.sha256 = source["sha256"];
+	        this.outcome = source["outcome"];
+	        this.details = source["details"];
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class Filter {
+	    roomId?: string;
+	    guestId?: string;
+	    eventType?: string;
+	    outcome?: string;
+	    // Go type: time
+	    since?: any;
+	    // Go type: time
+	    until?: any;
+	    limit?: number;
+	    offset?: number;
+
+	    static createFrom(source: any = {}) {
+	        return new Filter(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.roomId = source["roomId"];
+	        this.guestId = source["guestId"];
+	        this.eventType = source["eventType"];
+	        this.outcome = source["outcome"];
+	        this.since = this.convertValues(source["since"], null);
+	        this.until = this.convertValues(source["until"], null);
+	        this.limit = source["limit"];
+	        this.offset = source["offset"];
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+
+}
+
 export namespace doctor {
 
 	export class DiagnosticItem {
@@ -60,8 +162,222 @@ export namespace doctor {
 
 }
 
+export namespace guest {
+
+	export class ExpectedParticipant {
+	    id: string;
+	    identifier: string;
+	    name: string;
+	    assignedGuestId?: string;
+	    status: string;
+	    submissionCount: number;
+	    // Go type: time
+	    lastActivity?: any;
+
+	    static createFrom(source: any = {}) {
+	        return new ExpectedParticipant(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.identifier = source["identifier"];
+	        this.name = source["name"];
+	        this.assignedGuestId = source["assignedGuestId"];
+	        this.status = source["status"];
+	        this.submissionCount = source["submissionCount"];
+	        this.lastActivity = this.convertValues(source["lastActivity"], null);
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class ExportResult {
+	    targetPath: string;
+	    totalFiles: number;
+	    totalBytes: number;
+
+	    static createFrom(source: any = {}) {
+	        return new ExportResult(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.targetPath = source["targetPath"];
+	        this.totalFiles = source["totalFiles"];
+	        this.totalBytes = source["totalBytes"];
+	    }
+	}
+	export class FormField {
+	    id: string;
+	    label: string;
+	    type: string;
+	    required: boolean;
+	    options?: string[];
+	    maxLength?: number;
+
+	    static createFrom(source: any = {}) {
+	        return new FormField(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.label = source["label"];
+	        this.type = source["type"];
+	        this.required = source["required"];
+	        this.options = source["options"];
+	        this.maxLength = source["maxLength"];
+	    }
+	}
+	export class Preset {
+	    id: string;
+	    name: string;
+	    title: string;
+	    description: string;
+	    durationMinutes: number;
+	    collisionPolicy: string;
+	    formSchema?: FormField[];
+
+	    static createFrom(source: any = {}) {
+	        return new Preset(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.title = source["title"];
+	        this.description = source["description"];
+	        this.durationMinutes = source["durationMinutes"];
+	        this.collisionPolicy = source["collisionPolicy"];
+	        this.formSchema = this.convertValues(source["formSchema"], FormField);
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class Template {
+	    id: string;
+	    name: string;
+	    title: string;
+	    description?: string;
+	    durationMinutes: number;
+	    collisionPolicy: string;
+	    destinationRoot?: string;
+	    formSchema?: FormField[];
+	    expectedParticipants?: ExpectedParticipant[];
+	    version: number;
+	    // Go type: time
+	    createdAt: any;
+	    // Go type: time
+	    updatedAt: any;
+
+	    static createFrom(source: any = {}) {
+	        return new Template(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.title = source["title"];
+	        this.description = source["description"];
+	        this.durationMinutes = source["durationMinutes"];
+	        this.collisionPolicy = source["collisionPolicy"];
+	        this.destinationRoot = source["destinationRoot"];
+	        this.formSchema = this.convertValues(source["formSchema"], FormField);
+	        this.expectedParticipants = this.convertValues(source["expectedParticipants"], ExpectedParticipant);
+	        this.version = source["version"];
+	        this.createdAt = this.convertValues(source["createdAt"], null);
+	        this.updatedAt = this.convertValues(source["updatedAt"], null);
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+
+}
+
 export namespace main {
 
+	export class AuditListResult {
+	    entries: audit.Entry[];
+	    total: number;
+
+	    static createFrom(source: any = {}) {
+	        return new AuditListResult(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.entries = this.convertValues(source["entries"], audit.Entry);
+	        this.total = source["total"];
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class BatchItemView {
 	    id: string;
 	    batchId: string;
@@ -206,6 +522,50 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class GuestRoomConfigView {
+	    destinationDir: string;
+	    durationMinutes: number;
+	    title: string;
+	    description?: string;
+	    deadlineRFC3339?: string;
+	    collisionPolicy: string;
+	    formSchema?: guest.FormField[];
+	    expectedParticipants?: guest.ExpectedParticipant[];
+
+	    static createFrom(source: any = {}) {
+	        return new GuestRoomConfigView(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.destinationDir = source["destinationDir"];
+	        this.durationMinutes = source["durationMinutes"];
+	        this.title = source["title"];
+	        this.description = source["description"];
+	        this.deadlineRFC3339 = source["deadlineRFC3339"];
+	        this.collisionPolicy = source["collisionPolicy"];
+	        this.formSchema = this.convertValues(source["formSchema"], guest.FormField);
+	        this.expectedParticipants = this.convertValues(source["expectedParticipants"], guest.ExpectedParticipant);
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class GuestUploadView {
 	    id: string;
 	    guestId: string;
@@ -221,6 +581,7 @@ export namespace main {
 	    completedAt?: any;
 	    sha256?: string;
 	    error?: string;
+	    formValues?: Record<string, string>;
 
 	    static createFrom(source: any = {}) {
 	        return new GuestUploadView(source);
@@ -240,6 +601,7 @@ export namespace main {
 	        this.completedAt = this.convertValues(source["completedAt"], null);
 	        this.sha256 = source["sha256"];
 	        this.error = source["error"];
+	        this.formValues = source["formValues"];
 	    }
 
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -263,6 +625,7 @@ export namespace main {
 	export class GuestView {
 	    id: string;
 	    nickname: string;
+	    participantId?: string;
 	    state: string;
 	    // Go type: time
 	    createdAt: any;
@@ -275,6 +638,7 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
 	        this.nickname = source["nickname"];
+	        this.participantId = source["participantId"];
 	        this.state = source["state"];
 	        this.createdAt = this.convertValues(source["createdAt"], null);
 	    }
@@ -302,6 +666,11 @@ export namespace main {
 	    date: string;
 	    destinationRoot: string;
 	    roomFolder: string;
+	    title: string;
+	    description?: string;
+	    // Go type: time
+	    deadline?: any;
+	    collisionPolicy: string;
 	    state: string;
 	    durationSeconds: number;
 	    // Go type: time
@@ -311,6 +680,9 @@ export namespace main {
 	    inviteSecret?: string;
 	    inviteUrl?: string;
 	    qrDataUrl?: string;
+	    formSchema?: guest.FormField[];
+	    roster?: guest.ExpectedParticipant[];
+	    hasRoster: boolean;
 
 	    static createFrom(source: any = {}) {
 	        return new GuestRoomView(source);
@@ -322,6 +694,10 @@ export namespace main {
 	        this.date = source["date"];
 	        this.destinationRoot = source["destinationRoot"];
 	        this.roomFolder = source["roomFolder"];
+	        this.title = source["title"];
+	        this.description = source["description"];
+	        this.deadline = this.convertValues(source["deadline"], null);
+	        this.collisionPolicy = source["collisionPolicy"];
 	        this.state = source["state"];
 	        this.durationSeconds = source["durationSeconds"];
 	        this.createdAt = this.convertValues(source["createdAt"], null);
@@ -329,6 +705,9 @@ export namespace main {
 	        this.inviteSecret = source["inviteSecret"];
 	        this.inviteUrl = source["inviteUrl"];
 	        this.qrDataUrl = source["qrDataUrl"];
+	        this.formSchema = this.convertValues(source["formSchema"], guest.FormField);
+	        this.roster = this.convertValues(source["roster"], guest.ExpectedParticipant);
+	        this.hasRoster = source["hasRoster"];
 	    }
 
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -356,6 +735,7 @@ export namespace main {
 	    pendingUploads: GuestUploadView[];
 	    completedUploads: GuestUploadView[];
 	    recentUploads: GuestUploadView[];
+	    roster?: guest.ExpectedParticipant[];
 
 	    static createFrom(source: any = {}) {
 	        return new GuestRoomStateView(source);
@@ -369,6 +749,7 @@ export namespace main {
 	        this.pendingUploads = this.convertValues(source["pendingUploads"], GuestUploadView);
 	        this.completedUploads = this.convertValues(source["completedUploads"], GuestUploadView);
 	        this.recentUploads = this.convertValues(source["recentUploads"], GuestUploadView);
+	        this.roster = this.convertValues(source["roster"], guest.ExpectedParticipant);
 	    }
 
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
