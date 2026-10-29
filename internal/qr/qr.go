@@ -74,3 +74,13 @@ func PNG(payload string, size int) ([]byte, error) {
 	}
 	return png, nil
 }
+
+// Terminal renders payload as an ASCII/Unicode string suitable for terminal display.
+func Terminal(payload string) (string, error) {
+	code, err := qrcode.New(payload, qrcode.Low)
+	if err != nil {
+		return "", fmt.Errorf("qr: encoding payload: %w", err)
+	}
+	code.DisableBorder = false
+	return code.ToSmallString(false), nil
+}

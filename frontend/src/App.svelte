@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import type { main, netenv, doctor, guest, audit } from '../wailsjs/go/models'
+  import type { main, netenv, doctor, guest, audit, devices } from '../wailsjs/go/models'
   import { OnFileDrop, OnFileDropOff } from '../wailsjs/runtime/runtime.js'
   import logoUrl from './assets/images/logo-universal.png'
   import { createRefreshScheduler } from './refreshScheduler'
@@ -20,10 +20,13 @@
     ListGuestPresets, ListGuestTemplates, SaveGuestTemplate, DeleteGuestTemplate, DuplicateGuestTemplate, StartGuestRoomFromTemplate,
     AddExpectedParticipant, RemoveExpectedParticipant, UpdateExpectedParticipant,
     ListAuditEvents, ClearAuditHistory,
-    RunConnectionDiagnostics, SendTextMessage, ListTextMessages, ClearTextMessages
+    RunConnectionDiagnostics, SendTextMessage, ListTextMessages, ClearTextMessages,
+    ListTrustedDevices, RemoveTrustedDevice, SetDeviceAutoApprove
   } from '../wailsjs/go/main/App.js'
 
-  let activeTab: 'personal' | 'guest' | 'templates' | 'audit' = 'personal'
+  let activeTab: 'personal' | 'guest' | 'templates' | 'audit' | 'devices' = 'personal'
+  let trustedDevices: devices.Device[] = []
+  let loadingDevices = false
 
   // Personal transfer state
   let sessions: main.SessionView[] = []
@@ -496,6 +499,36 @@
     }
   }
 
+  async function loadTrustedDevices(): Promise<void> {
+    loadingDevices = true
+    try {
+      const res = await ListTrustedDevices()
+      trustedDevices = res ?? []
+    } catch (err) {
+      report(err)
+    } finally {
+      loadingDevices = false
+    }
+  }
+
+  async function toggleDeviceAutoApprove(id: string, currentVal: boolean): Promise<void> {
+    try {
+      await SetDeviceAutoApprove(id, !currentVal)
+      await loadTrustedDevices()
+    } catch (err) {
+      report(err)
+    }
+  }
+
+  async function removeDeviceAction(id: string): Promise<void> {
+    try {
+      await RemoveTrustedDevice(id)
+      await loadTrustedDevices()
+    } catch (err) {
+      report(err)
+    }
+  }
+
   async function endGuestRoomAction(): Promise<void> {
     const k = 'end-guest-room'
     if (isBusy(k)) return
@@ -630,9 +663,12 @@
   </header>
 
   <!-- Navigation bar with Tabs and Connection Doctor launcher -->
-  <nav class="nav-bar">
-    <div class="tab-list">
+  <nav class="nav-bar" aria-label="Main Navigation">
+    <div class="tab-list" role="tablist">
       <button
+        type="button"
+        role="tab"
+        aria-selected={activeTab === 'personal'}
         class="tab-btn"
         class:active={activeTab === 'personal'}
         on:click={() => activeTab = 'personal'}
@@ -644,6 +680,9 @@
       </button>
 
       <button
+        type="button"
+        role="tab"
+        aria-selected={activeTab === 'guest'}
         class="tab-btn"
         class:active={activeTab === 'guest'}
         on:click={() => activeTab = 'guest'}
@@ -655,6 +694,9 @@
       </button>
 
       <button
+        type="button"
+        role="tab"
+        aria-selected={activeTab === 'templates'}
         class="tab-btn"
         class:active={activeTab === 'templates'}
         on:click={() => { activeTab = 'templates'; loadTemplates(); }}
@@ -663,15 +705,32 @@
       </button>
 
       <button
+        type="button"
+        role="tab"
+        aria-selected={activeTab === 'audit'}
         class="tab-btn"
         class:active={activeTab === 'audit'}
         on:click={() => { activeTab = 'audit'; loadAuditLogs(); }}
       >
         <span>Audit History</span>
       </button>
+
+      <button
+        type="button"
+        role="tab"
+        aria-selected={activeTab === 'devices'}
+        class="tab-btn"
+        class:active={activeTab === 'devices'}
+        on:click={() => { activeTab = 'devices'; loadTrustedDevices(); }}
+      >
+        <span>Trusted Devices</span>
+        {#if trustedDevices.length > 0}
+          <span class="tab-badge">{trustedDevices.length}</span>
+        {/if}
+      </button>
     </div>
 
-    <button class="doctor-launch-btn" on:click={openDoctor}>
+    <button type="button" class="doctor-launch-btn" on:click={openDoctor} aria-label="Open Connection Doctor">
       <span class="doctor-dot" class:warn={doctorReport?.overallStatus === 'WARNING'} class:fail={doctorReport?.overallStatus === 'FAIL'}></span>
       <span>Connection Doctor</span>
     </button>
@@ -1528,6 +1587,79 @@
         </div>
       {:else}
         <div class="empty">No audit events match the current filter.</div>
+      {/if}
+    </section>
+
+  <!-- TAB 5: TRUSTED DEVICES -->
+  {:else if activeTab === 'devices'}
+    <section class="panel" aria-label="Trusted Devices">
+      <div class="section-heading">
+        <div>
+          <span class="eyebrow">Security & Pairing</span>
+          <h2>Cryptographically Trusted Devices</h2>
+        </div>
+        <button
+          type="button"
+          class="button secondary small"
+          on:click={loadTrustedDevices}
+          disabled={loadingDevices}
+        >
+          {loadingDevices ? 'Refreshing…' : '↻ Refresh'}
+        </button>
+      </div>
+      <p class="muted">
+        Devices paired via cryptographic Ed25519 keys. Paired devices can be granted automatic approval to bypass the manual transfer prompt.
+      </p>
+
+      {#if loadingDevices}
+        <div class="empty">Loading paired devices…</div>
+      {:else if trustedDevices.length > 0}
+        <div class="table-wrap" style="margin-top: 16px;">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Device Name</th>
+                <th>Fingerprint (ID)</th>
+                <th>Paired At</th>
+                <th>Last Seen</th>
+                <th>Auto-Approve</th>
+                <th style="text-align: right;">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each trustedDevices as dev (dev.id)}
+                <tr>
+                  <td><strong>{dev.name}</strong></td>
+                  <td><code>{dev.id.slice(0, 16)}…</code></td>
+                  <td style="font-size: 12px; color: var(--text-muted);">{fmtTime(dev.pairedAt)}</td>
+                  <td style="font-size: 12px; color: var(--text-muted);">{fmtTime(dev.lastSeen)}</td>
+                  <td>
+                    <button
+                      type="button"
+                      class="button ghost small"
+                      style="font-size: 11px; padding: 2px 8px;"
+                      on:click={() => toggleDeviceAutoApprove(dev.id, dev.autoApprove)}
+                    >
+                      {dev.autoApprove ? '✓ Enabled' : '○ Disabled'}
+                    </button>
+                  </td>
+                  <td style="text-align: right;">
+                    <button
+                      type="button"
+                      class="button ghost small"
+                      style="color: var(--danger-color, #e06c75);"
+                      on:click={() => removeDeviceAction(dev.id)}
+                    >
+                      Revoke
+                    </button>
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {:else}
+        <div class="empty">No trusted devices paired yet. Devices paired through connection authentication will appear here.</div>
       {/if}
     </section>
   {/if}

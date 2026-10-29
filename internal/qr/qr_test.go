@@ -86,3 +86,13 @@ func TestPNGRejectsImpossiblePayload(t *testing.T) {
 		t.Fatal("oversized payload must fail to encode")
 	}
 }
+
+func TestTerminal(t *testing.T) {
+	out, err := Terminal("http://192.168.1.50:43821/#abc123token")
+	if err != nil {
+		t.Fatalf("Terminal failed: %v", err)
+	}
+	if len(out) == 0 {
+		t.Fatal("Terminal output is empty")
+	}
+}
