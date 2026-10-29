@@ -31,6 +31,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/itsyamin/flitnix/internal/audit"
 	"github.com/itsyamin/flitnix/internal/doctor"
 	"github.com/itsyamin/flitnix/internal/guest"
 	"github.com/itsyamin/flitnix/internal/netenv"
@@ -61,48 +62,74 @@ type SessionView struct {
 }
 
 type GuestRoomView struct {
-	ID              string    `json:"id"`
-	Date            string    `json:"date"`
-	DestinationRoot string    `json:"destinationRoot"`
-	RoomFolder      string    `json:"roomFolder"`
-	State           string    `json:"state"`
-	DurationSeconds int       `json:"durationSeconds"`
-	CreatedAt       time.Time `json:"createdAt"`
-	ExpiresAt       time.Time `json:"expiresAt"`
-	InviteSecret    string    `json:"inviteSecret,omitempty"`
-	InviteURL       string    `json:"inviteUrl,omitempty"`
-	QRDataURL       string    `json:"qrDataUrl,omitempty"`
+	ID              string                      `json:"id"`
+	Date            string                      `json:"date"`
+	DestinationRoot string                      `json:"destinationRoot"`
+	RoomFolder      string                      `json:"roomFolder"`
+	Title           string                      `json:"title"`
+	Description     string                      `json:"description,omitempty"`
+	Deadline        *time.Time                  `json:"deadline,omitempty"`
+	CollisionPolicy string                      `json:"collisionPolicy"`
+	State           string                      `json:"state"`
+	DurationSeconds int                         `json:"durationSeconds"`
+	CreatedAt       time.Time                   `json:"createdAt"`
+	ExpiresAt       time.Time                   `json:"expiresAt"`
+	InviteSecret    string                      `json:"inviteSecret,omitempty"`
+	InviteURL       string                      `json:"inviteUrl,omitempty"`
+	QRDataURL       string                      `json:"qrDataUrl,omitempty"`
+	FormSchema      []guest.FormField           `json:"formSchema,omitempty"`
+	Roster          []guest.ExpectedParticipant `json:"roster,omitempty"`
+	HasRoster       bool                        `json:"hasRoster"`
+}
+
+type GuestRoomConfigView struct {
+	DestinationDir       string                      `json:"destinationDir"`
+	DurationMinutes      int                         `json:"durationMinutes"`
+	Title                string                      `json:"title"`
+	Description          string                      `json:"description,omitempty"`
+	DeadlineRFC3339      string                      `json:"deadlineRFC3339,omitempty"`
+	CollisionPolicy      string                      `json:"collisionPolicy"` // "preserve_both" or "reject"
+	FormSchema           []guest.FormField           `json:"formSchema,omitempty"`
+	ExpectedParticipants []guest.ExpectedParticipant `json:"expectedParticipants,omitempty"`
 }
 
 type GuestView struct {
-	ID        string    `json:"id"`
-	Nickname  string    `json:"nickname"`
-	State     string    `json:"state"`
-	CreatedAt time.Time `json:"createdAt"`
+	ID            string    `json:"id"`
+	Nickname      string    `json:"nickname"`
+	ParticipantID string    `json:"participantId,omitempty"`
+	State         string    `json:"state"`
+	CreatedAt     time.Time `json:"createdAt"`
 }
 
 type GuestUploadView struct {
-	ID          string    `json:"id"`
-	GuestID     string    `json:"guestId"`
-	GuestName   string    `json:"guestName"`
-	FileName    string    `json:"fileName"`
-	Size        int64     `json:"size"`
-	State       string    `json:"state"`
-	Transferred int64     `json:"transferred"`
-	Speed       float64   `json:"speed"`
-	CreatedAt   time.Time `json:"createdAt"`
-	CompletedAt time.Time `json:"completedAt,omitempty"`
-	SHA256      string    `json:"sha256,omitempty"`
-	Error       string    `json:"error,omitempty"`
+	ID          string            `json:"id"`
+	GuestID     string            `json:"guestId"`
+	GuestName   string            `json:"guestName"`
+	FileName    string            `json:"fileName"`
+	Size        int64             `json:"size"`
+	State       string            `json:"state"`
+	Transferred int64             `json:"transferred"`
+	Speed       float64           `json:"speed"`
+	CreatedAt   time.Time         `json:"createdAt"`
+	CompletedAt time.Time         `json:"completedAt,omitempty"`
+	SHA256      string            `json:"sha256,omitempty"`
+	Error       string            `json:"error,omitempty"`
+	FormValues  map[string]string `json:"formValues,omitempty"`
 }
 
 type GuestRoomStateView struct {
-	Room             *GuestRoomView    `json:"room"`
-	PendingGuests    []GuestView       `json:"pendingGuests"`
-	ApprovedGuests   []GuestView       `json:"approvedGuests"`
-	PendingUploads   []GuestUploadView `json:"pendingUploads"`
-	CompletedUploads []GuestUploadView `json:"completedUploads"`
-	RecentUploads    []GuestUploadView `json:"recentUploads"`
+	Room             *GuestRoomView              `json:"room"`
+	PendingGuests    []GuestView                 `json:"pendingGuests"`
+	ApprovedGuests   []GuestView                 `json:"approvedGuests"`
+	PendingUploads   []GuestUploadView           `json:"pendingUploads"`
+	CompletedUploads []GuestUploadView           `json:"completedUploads"`
+	RecentUploads    []GuestUploadView           `json:"recentUploads"`
+	Roster           []guest.ExpectedParticipant `json:"roster,omitempty"`
+}
+
+type AuditListResult struct {
+	Entries []audit.Entry `json:"entries"`
+	Total   int           `json:"total"`
 }
 
 type TextMessageView struct {
@@ -207,6 +234,8 @@ type App struct {
 	downloads   *transfer.DownloadRegistry
 	guestMgr    *guest.Manager
 	textStore   *textmsg.Store
+	auditStore    *audit.Store
+	templateStore *guest.TemplateStore
 
 	// source supplies live network-interface state for the session
 	// address decisions; tests inject synthetic interfaces.
@@ -223,6 +252,18 @@ type App struct {
 	serveDone   chan error
 }
 
+func resolveDataDir() string {
+	dir, err := os.UserConfigDir()
+	if err != nil || dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			return filepath.Join(os.TempDir(), "flitnix")
+		}
+		return filepath.Join(home, ".config", "flitnix")
+	}
+	return filepath.Join(dir, "flitnix")
+}
+
 // NewApp constructs the application: receive store on the default directory
 // (~/Downloads/Flitnix), a fresh session manager, transfer service and
 // shared-file registry. The HTTP server is not started here; it starts
@@ -233,15 +274,27 @@ func NewApp() (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	dataDir := resolveDataDir()
+	auditStore, err := audit.NewStore(filepath.Join(dataDir, "audit.jsonl"), 10000)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "flitnix: audit store initialization warning: %v\n", err)
+	}
+	templateStore, err := guest.NewTemplateStore(filepath.Join(dataDir, "templates.json"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "flitnix: template store initialization warning: %v\n", err)
+	}
+
 	a := &App{
-		store:       store,
-		transfers:   transfer.NewService(transfer.Config{Store: store}),
-		coordinator: transfer.NewCoordinator(transfer.CoordinatorConfig{}),
-		registry:    transfer.NewRegistry(),
-		downloads:   transfer.NewDownloadRegistry(),
-		guestMgr:    guest.NewManager(),
-		textStore:   textmsg.NewStore(),
-		source:      netenv.DefaultSource(),
+		store:         store,
+		transfers:     transfer.NewService(transfer.Config{Store: store}),
+		coordinator:   transfer.NewCoordinator(transfer.CoordinatorConfig{}),
+		registry:      transfer.NewRegistry(),
+		downloads:     transfer.NewDownloadRegistry(),
+		guestMgr:      guest.NewManager(),
+		textStore:     textmsg.NewStore(),
+		auditStore:    auditStore,
+		templateStore: templateStore,
+		source:        netenv.DefaultSource(),
 	}
 	a.sessions = session.NewManager(session.Config{OnExpire: a.releaseSession, OnEnd: a.logSessionEnd})
 	return a, nil
@@ -322,6 +375,9 @@ func (a *App) shutdown(ctx context.Context) {
 	a.sessions.Close()
 	a.registry.Clear()
 	a.guestMgr.Close()
+	if a.auditStore != nil {
+		a.auditStore.Close()
+	}
 	a.stopServer()
 }
 
@@ -365,6 +421,7 @@ func (a *App) startServerLocked(listen string) error {
 			Downloads:    a.downloads,
 			GuestManager: a.guestMgr,
 			TextMessages: a.textStore,
+			Audit:        a.auditStore,
 			Diagnose:     a.logTransferDiagnostics,
 		},
 	})
@@ -1188,8 +1245,16 @@ func downloadViews(list []transfer.Download) []DownloadView {
 // ---- Guest Drop Box methods ----
 
 func (a *App) StartGuestRoom(destinationDir string, durationMinutes int) (GuestRoomView, error) {
-	if destinationDir == "" {
-		destinationDir = a.store.Dir()
+	return a.StartGuestRoomWithConfig(GuestRoomConfigView{
+		DestinationDir:  destinationDir,
+		DurationMinutes: durationMinutes,
+		CollisionPolicy: "preserve_both",
+	})
+}
+
+func (a *App) StartGuestRoomWithConfig(cfg GuestRoomConfigView) (GuestRoomView, error) {
+	if cfg.DestinationDir == "" {
+		cfg.DestinationDir = a.store.Dir()
 	}
 
 	a.srvMu.Lock()
@@ -1211,14 +1276,45 @@ func (a *App) StartGuestRoom(destinationDir string, durationMinutes int) (GuestR
 		return GuestRoomView{}, err
 	}
 
-	duration := time.Duration(durationMinutes) * time.Minute
+	duration := time.Duration(cfg.DurationMinutes) * time.Minute
 	if duration <= 0 {
 		duration = 1 * time.Hour
 	}
 
-	room, err := a.guestMgr.CreateRoom(destinationDir, duration)
+	policy := guest.CollisionPolicy(cfg.CollisionPolicy)
+	if policy != guest.CollisionReject {
+		policy = guest.CollisionPreserveBoth
+	}
+
+	var deadline *time.Time
+	if cfg.DeadlineRFC3339 != "" {
+		parsed, err := time.Parse(time.RFC3339, cfg.DeadlineRFC3339)
+		if err == nil {
+			deadline = &parsed
+		}
+	}
+
+	room, err := a.guestMgr.CreateRoomWithConfig(guest.RoomConfig{
+		DestinationRoot:      cfg.DestinationDir,
+		Duration:             duration,
+		Title:                cfg.Title,
+		Description:          cfg.Description,
+		Deadline:             deadline,
+		CollisionPolicy:      policy,
+		FormSchema:           cfg.FormSchema,
+		ExpectedParticipants: cfg.ExpectedParticipants,
+	})
 	if err != nil {
 		return GuestRoomView{}, err
+	}
+
+	if a.auditStore != nil {
+		a.auditStore.Record(audit.Entry{
+			EventType: audit.EventRoomCreated,
+			RoomID:    room.ID,
+			Outcome:   audit.OutcomeSuccess,
+			Details:   fmt.Sprintf("title: %s, policy: %s", room.Title, room.CollisionPolicy),
+		})
 	}
 
 	a.srvMu.Lock()
@@ -1238,6 +1334,10 @@ func (a *App) StartGuestRoom(destinationDir string, durationMinutes int) (GuestR
 		Date:            v.Date,
 		DestinationRoot: v.DestinationRoot,
 		RoomFolder:      v.RoomFolder,
+		Title:           v.Title,
+		Description:     v.Description,
+		Deadline:        v.Deadline,
+		CollisionPolicy: string(v.CollisionPolicy),
 		State:           string(v.State),
 		DurationSeconds: v.DurationSeconds,
 		CreatedAt:       v.CreatedAt,
@@ -1245,6 +1345,9 @@ func (a *App) StartGuestRoom(destinationDir string, durationMinutes int) (GuestR
 		InviteSecret:    v.InviteSecret,
 		InviteURL:       inviteURL,
 		QRDataURL:       qrDataURL,
+		FormSchema:      v.FormSchema,
+		Roster:          v.Roster,
+		HasRoster:       v.HasRoster,
 	}, nil
 }
 
@@ -1277,6 +1380,10 @@ func (a *App) GetGuestRoomState() (GuestRoomStateView, error) {
 		Date:            rv.Date,
 		DestinationRoot: rv.DestinationRoot,
 		RoomFolder:      rv.RoomFolder,
+		Title:           rv.Title,
+		Description:     rv.Description,
+		Deadline:        rv.Deadline,
+		CollisionPolicy: string(rv.CollisionPolicy),
 		State:           string(rv.State),
 		DurationSeconds: rv.DurationSeconds,
 		CreatedAt:       rv.CreatedAt,
@@ -1284,16 +1391,20 @@ func (a *App) GetGuestRoomState() (GuestRoomStateView, error) {
 		InviteSecret:    rv.InviteSecret,
 		InviteURL:       inviteURL,
 		QRDataURL:       qrDataURL,
+		FormSchema:      rv.FormSchema,
+		Roster:          rv.Roster,
+		HasRoster:       rv.HasRoster,
 	}
 
 	var pendingGuests []GuestView
 	var approvedGuests []GuestView
 	for _, g := range room.ListGuests() {
 		gv := GuestView{
-			ID:        g.ID,
-			Nickname:  g.Nickname,
-			State:     string(g.State),
-			CreatedAt: g.CreatedAt,
+			ID:            g.ID,
+			Nickname:      g.Nickname,
+			ParticipantID: g.ParticipantID,
+			State:         string(g.State),
+			CreatedAt:     g.CreatedAt,
 		}
 		if g.State == guest.GuestPending {
 			pendingGuests = append(pendingGuests, gv)
@@ -1319,6 +1430,7 @@ func (a *App) GetGuestRoomState() (GuestRoomStateView, error) {
 			CompletedAt: u.CompletedAt,
 			SHA256:      u.SHA256,
 			Error:       u.Error,
+			FormValues:  u.FormValues,
 		}
 		recentUploads = append(recentUploads, uv)
 		if u.State == guest.UploadPendingApproval {
@@ -1339,6 +1451,7 @@ func (a *App) GetGuestRoomState() (GuestRoomStateView, error) {
 		PendingUploads:   pendingUploads,
 		CompletedUploads: completedUploads,
 		RecentUploads:    recentUploads,
+		Roster:           rv.Roster,
 	}, nil
 }
 
@@ -1347,7 +1460,16 @@ func (a *App) ApproveGuest(guestID string) error {
 	if room == nil {
 		return errors.New("flitnix: no active guest room")
 	}
-	return room.ApproveGuest(guestID)
+	err := room.ApproveGuest(guestID)
+	if err == nil && a.auditStore != nil {
+		a.auditStore.Record(audit.Entry{
+			EventType: audit.EventGuestApproved,
+			RoomID:    room.ID,
+			GuestID:   guestID,
+			Outcome:   audit.OutcomeSuccess,
+		})
+	}
+	return err
 }
 
 func (a *App) RejectGuest(guestID string) error {
@@ -1355,7 +1477,16 @@ func (a *App) RejectGuest(guestID string) error {
 	if room == nil {
 		return errors.New("flitnix: no active guest room")
 	}
-	return room.RejectGuest(guestID)
+	err := room.RejectGuest(guestID)
+	if err == nil && a.auditStore != nil {
+		a.auditStore.Record(audit.Entry{
+			EventType: audit.EventGuestRejected,
+			RoomID:    room.ID,
+			GuestID:   guestID,
+			Outcome:   audit.OutcomeRejected,
+		})
+	}
+	return err
 }
 
 func (a *App) RevokeGuest(guestID string) error {
@@ -1363,7 +1494,16 @@ func (a *App) RevokeGuest(guestID string) error {
 	if room == nil {
 		return errors.New("flitnix: no active guest room")
 	}
-	return room.RevokeGuest(guestID)
+	err := room.RevokeGuest(guestID)
+	if err == nil && a.auditStore != nil {
+		a.auditStore.Record(audit.Entry{
+			EventType: audit.EventGuestRevoked,
+			RoomID:    room.ID,
+			GuestID:   guestID,
+			Outcome:   audit.OutcomeCanceled,
+		})
+	}
+	return err
 }
 
 func (a *App) ApproveGuestUpload(uploadID string) error {
@@ -1371,7 +1511,16 @@ func (a *App) ApproveGuestUpload(uploadID string) error {
 	if room == nil {
 		return errors.New("flitnix: no active guest room")
 	}
-	return room.ApproveUpload(uploadID)
+	err := room.ApproveUpload(uploadID)
+	if err == nil && a.auditStore != nil {
+		a.auditStore.Record(audit.Entry{
+			EventType: audit.EventUploadApproved,
+			RoomID:    room.ID,
+			Details:   fmt.Sprintf("upload_id: %s", uploadID),
+			Outcome:   audit.OutcomeSuccess,
+		})
+	}
+	return err
 }
 
 func (a *App) RejectGuestUpload(uploadID string) error {
@@ -1379,7 +1528,16 @@ func (a *App) RejectGuestUpload(uploadID string) error {
 	if room == nil {
 		return errors.New("flitnix: no active guest room")
 	}
-	return room.RejectUpload(uploadID)
+	err := room.RejectUpload(uploadID)
+	if err == nil && a.auditStore != nil {
+		a.auditStore.Record(audit.Entry{
+			EventType: audit.EventUploadRejected,
+			RoomID:    room.ID,
+			Details:   fmt.Sprintf("upload_id: %s", uploadID),
+			Outcome:   audit.OutcomeRejected,
+		})
+	}
+	return err
 }
 
 func (a *App) isGuestRoomActive() bool {
@@ -1396,9 +1554,21 @@ func (a *App) isGuestRoomActive() bool {
 }
 
 func (a *App) EndGuestRoom() error {
+	room := a.guestMgr.ActiveRoom()
+	var roomID string
+	if room != nil {
+		roomID = room.ID
+	}
 	err := a.guestMgr.EndRoom()
 	if a.sessions.Len() == 0 {
 		a.stopServer()
+	}
+	if a.auditStore != nil && roomID != "" {
+		a.auditStore.Record(audit.Entry{
+			EventType: audit.EventRoomEnded,
+			RoomID:    roomID,
+			Outcome:   audit.OutcomeSuccess,
+		})
 	}
 	return err
 }
@@ -1440,6 +1610,187 @@ func (a *App) OpenGuestFolder() error {
 	folder := room.RoomFolder
 	_ = os.MkdirAll(folder, 0700)
 	return openFolderInOS(folder)
+}
+
+// ---- Expected Participants (Roster) methods ----
+
+func (a *App) AddExpectedParticipant(name, email, identifier string) error {
+	room := a.guestMgr.ActiveRoom()
+	if room == nil {
+		return errors.New("flitnix: no active guest room")
+	}
+	idVal := identifier
+	if idVal == "" {
+		idVal = email
+	}
+	_, err := room.AddParticipant(name, idVal)
+	return err
+}
+
+func (a *App) RemoveExpectedParticipant(participantID string) error {
+	room := a.guestMgr.ActiveRoom()
+	if room == nil {
+		return errors.New("flitnix: no active guest room")
+	}
+	return room.RemoveParticipant(participantID)
+}
+
+func (a *App) UpdateExpectedParticipant(participant guest.ExpectedParticipant) error {
+	room := a.guestMgr.ActiveRoom()
+	if room == nil {
+		return errors.New("flitnix: no active guest room")
+	}
+	return room.UpdateParticipant(participant.ID, participant.Name, participant.Identifier)
+}
+
+// ---- Guest Room Templates & Presets ----
+
+func (a *App) ListGuestPresets() []guest.Preset {
+	return guest.DefaultPresets()
+}
+
+func (a *App) ListGuestTemplates() []guest.Template {
+	if a.templateStore == nil {
+		return nil
+	}
+	return a.templateStore.List()
+}
+
+func (a *App) SaveGuestTemplate(t guest.Template) error {
+	if a.templateStore == nil {
+		return errors.New("flitnix: template store not initialized")
+	}
+	return a.templateStore.Save(t)
+}
+
+func (a *App) DeleteGuestTemplate(id string) error {
+	if a.templateStore == nil {
+		return errors.New("flitnix: template store not initialized")
+	}
+	return a.templateStore.Delete(id)
+}
+
+func (a *App) DuplicateGuestTemplate(id string, newName string) (guest.Template, error) {
+	if a.templateStore == nil {
+		return guest.Template{}, errors.New("flitnix: template store not initialized")
+	}
+	tpl, err := a.templateStore.Duplicate(id, newName)
+	if err != nil {
+		return guest.Template{}, err
+	}
+	return *tpl, nil
+}
+
+func (a *App) StartGuestRoomFromTemplate(templateID string, destinationOverride string) (GuestRoomView, error) {
+	if a.templateStore == nil {
+		return GuestRoomView{}, errors.New("flitnix: template store not initialized")
+	}
+	tpl, ok := a.templateStore.Get(templateID)
+	if !ok {
+		return GuestRoomView{}, errors.New("flitnix: template not found")
+	}
+	dest := tpl.DestinationRoot
+	if destinationOverride != "" {
+		dest = destinationOverride
+	}
+	return a.StartGuestRoomWithConfig(GuestRoomConfigView{
+		DestinationDir:       dest,
+		DurationMinutes:      tpl.DurationMinutes,
+		Title:                tpl.Title,
+		Description:          tpl.Description,
+		CollisionPolicy:      string(tpl.CollisionPolicy),
+		FormSchema:           tpl.FormSchema,
+		ExpectedParticipants: tpl.ExpectedParticipants,
+	})
+}
+
+// ---- Collection ZIP Export ----
+
+func (a *App) PickExportDestination() (string, error) {
+	room := a.guestMgr.ActiveRoom()
+	defaultName := "flitnix-submissions.zip"
+	if room != nil && room.Title != "" {
+		clean := strings.Map(func(r rune) rune {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+				return r
+			}
+			return '_'
+		}, room.Title)
+		clean = strings.Trim(clean, "_")
+		if clean != "" {
+			defaultName = fmt.Sprintf("%s-submissions.zip", clean)
+		}
+	}
+
+	if a.ctx == nil {
+		return filepath.Join(a.store.Dir(), defaultName), nil
+	}
+
+	target, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:           "Export Collection Archive",
+		DefaultFilename: defaultName,
+		Filters: []runtime.FileFilter{
+			{DisplayName: "ZIP Archives (*.zip)", Pattern: "*.zip"},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	return target, nil
+}
+
+func (a *App) ExportGuestCollection(targetZipPath string) (guest.ExportResult, error) {
+	room := a.guestMgr.ActiveRoom()
+	if room == nil {
+		return guest.ExportResult{}, errors.New("flitnix: no active guest room")
+	}
+	if targetZipPath == "" {
+		return guest.ExportResult{}, errors.New("flitnix: export target path cannot be empty")
+	}
+
+	res, err := guest.ExportRoomToZip(room, targetZipPath)
+	if err != nil {
+		if a.auditStore != nil {
+			a.auditStore.Record(audit.Entry{
+				EventType: audit.EventExportFailed,
+				RoomID:    room.ID,
+				Outcome:   audit.OutcomeFailed,
+				Details:   fmt.Sprintf("error: %s, target: %s", err.Error(), targetZipPath),
+			})
+		}
+		return guest.ExportResult{}, err
+	}
+
+	if a.auditStore != nil {
+		a.auditStore.Record(audit.Entry{
+			EventType: audit.EventExportCompleted,
+			RoomID:    room.ID,
+			Outcome:   audit.OutcomeSuccess,
+			Details:   fmt.Sprintf("target: %s, files: %d, bytes: %d", targetZipPath, res.TotalFiles, res.TotalBytes),
+		})
+	}
+
+	return *res, nil
+}
+
+// ---- Searchable Local Audit History ----
+
+func (a *App) ListAuditEvents(filter audit.Filter) (AuditListResult, error) {
+	if a.auditStore == nil {
+		return AuditListResult{}, nil
+	}
+	entries, total := a.auditStore.Query(filter)
+	return AuditListResult{
+		Entries: entries,
+		Total:   total,
+	}, nil
+}
+
+func (a *App) ClearAuditHistory() error {
+	if a.auditStore == nil {
+		return nil
+	}
+	return a.auditStore.Clear()
 }
 
 // ---- Connection Doctor methods ----

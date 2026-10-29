@@ -706,3 +706,109 @@ code { color: #a5f3fc; }
   .request-row { align-items: flex-start; flex-wrap: wrap; }
   .request-row .button-row { margin-top: 0; margin-left: 46px; }
 }
+
+/* Event collection, Roster, Templates, and Audit styles */
+.collection-meta-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: rgba(18, 37, 58, 0.4);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-top: 10px;
+}
+.meta-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+.meta-chip strong {
+  color: var(--text-main);
+}
+.status-pill {
+  display: inline-block;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 700;
+  text-transform: capitalize;
+}
+.status-pill.not_joined { background: rgba(148, 163, 184, 0.15); color: #94a3b8; }
+.status-pill.joined { background: rgba(59, 130, 246, 0.15); color: #60a5fa; }
+.status-pill.awaiting_upload { background: rgba(245, 158, 11, 0.15); color: #fbbf24; }
+.status-pill.uploading { background: rgba(34, 211, 238, 0.15); color: #22d3ee; }
+.status-pill.submitted { background: rgba(16, 185, 129, 0.15); color: #34d399; }
+.status-pill.missing_at_deadline { background: rgba(239, 68, 68, 0.15); color: #f87171; }
+.status-pill.success { background: rgba(16, 185, 129, 0.15); color: #34d399; }
+.status-pill.failed, .status-pill.rejected { background: rgba(239, 68, 68, 0.15); color: #f87171; }
+.status-pill.canceled { background: rgba(148, 163, 184, 0.15); color: #94a3b8; }
+.status-pill.info { background: rgba(34, 211, 238, 0.15); color: #22d3ee; }
+
+.table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-secondary);
+}
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  text-align: left;
+}
+.data-table th {
+  padding: 10px 12px;
+  background: rgba(13, 27, 42, 0.6);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.data-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  color: var(--text-main);
+}
+.data-table tr:last-child td {
+  border-bottom: none;
+}
+.template-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
+  margin-top: 14px;
+}
+.template-card {
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-secondary);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 12px;
+}
+.template-card h3 {
+  margin: 0;
+  font-size: 15px;
+  color: var(--text-main);
+}
+.template-card p {
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+.form-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.form-input-row input {
+  flex: 1;
+}

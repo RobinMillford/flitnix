@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/itsyamin/flitnix/internal/audit"
 	"github.com/itsyamin/flitnix/internal/guest"
 	"github.com/itsyamin/flitnix/internal/transfer"
 )
@@ -28,6 +30,7 @@ func guestTokenFromRequest(r *http.Request) string {
 
 func newGuestAPIMux(services *Services, stall time.Duration) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /guest-api/room-info", handleGuestRoomInfo(services))
 	mux.HandleFunc("POST /guest-api/join", handleGuestJoin(services))
 	mux.HandleFunc("GET /guest-api/status", handleGuestStatus(services))
 	mux.HandleFunc("POST /guest-api/uploads", handleGuestUploadDeclare(services))
@@ -36,9 +39,57 @@ func newGuestAPIMux(services *Services, stall time.Duration) http.Handler {
 	return mux
 }
 
+type guestRoomInfoResponse struct {
+	ID          string                      `json:"id"`
+	Title       string                      `json:"title"`
+	Description string                      `json:"description,omitempty"`
+	Deadline    *time.Time                  `json:"deadline,omitempty"`
+	ExpiresAt   time.Time                   `json:"expiresAt"`
+	FormSchema  []guest.FormField           `json:"formSchema,omitempty"`
+	Roster      []guest.ExpectedParticipant `json:"roster,omitempty"`
+	HasRoster   bool                        `json:"hasRoster"`
+}
+
+func handleGuestRoomInfo(svcs *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if svcs.GuestManager == nil {
+			writeError(w, http.StatusNotFound, "guest room service unavailable")
+			return
+		}
+
+		room := svcs.GuestManager.ActiveRoom()
+		if room == nil {
+			writeError(w, http.StatusUnauthorized, "no active guest room")
+			return
+		}
+
+		secret := strings.TrimSpace(r.URL.Query().Get("secret"))
+		if secret == "" {
+			secret = strings.TrimSpace(r.Header.Get("X-Guest-Secret"))
+		}
+		if !room.ValidateInviteSecret(secret) {
+			writeError(w, http.StatusUnauthorized, "invalid invitation secret")
+			return
+		}
+
+		v := room.View()
+		writeJSON(w, http.StatusOK, guestRoomInfoResponse{
+			ID:          v.ID,
+			Title:       v.Title,
+			Description: v.Description,
+			Deadline:    v.Deadline,
+			ExpiresAt:   v.ExpiresAt,
+			FormSchema:  v.FormSchema,
+			Roster:      v.Roster,
+			HasRoster:   v.HasRoster,
+		})
+	}
+}
+
 type guestJoinRequest struct {
-	Secret   string `json:"secret"`
-	Nickname string `json:"nickname"`
+	Secret        string `json:"secret"`
+	Nickname      string `json:"nickname"`
+	ParticipantID string `json:"participantId,omitempty"`
 }
 
 type guestJoinResponse struct {
@@ -80,7 +131,12 @@ func handleGuestJoin(svcs *Services) http.HandlerFunc {
 			return
 		}
 
-		g, err := room.Join(req.Nickname)
+		var g *guest.Guest
+		if req.ParticipantID != "" {
+			g, err = room.JoinWithParticipant(req.Nickname, req.ParticipantID)
+		} else {
+			g, err = room.Join(req.Nickname)
+		}
 		if err != nil {
 			if errors.Is(err, guest.ErrRoomInactive) {
 				writeError(w, http.StatusUnauthorized, "guest room is not active")
@@ -90,8 +146,19 @@ func handleGuestJoin(svcs *Services) http.HandlerFunc {
 				writeError(w, http.StatusTooManyRequests, "guest room capacity reached")
 				return
 			}
-			writeError(w, http.StatusInternalServerError, "failed to join guest room")
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
+		}
+
+		if svcs.Audit != nil {
+			svcs.Audit.Record(audit.Entry{
+				EventType: audit.EventGuestJoined,
+				RoomID:    room.ID,
+				GuestID:   g.ID,
+				GuestName: g.Nickname,
+				Outcome:   audit.OutcomeSuccess,
+				Details:   fmt.Sprintf("Guest %s requested entry", g.Nickname),
+			})
 		}
 
 		// Set HttpOnly cookie
@@ -171,19 +238,21 @@ func handleGuestStatus(svcs *Services) http.HandlerFunc {
 }
 
 type guestUploadDeclareRequest struct {
-	Name string `json:"name"`
-	Size int64  `json:"size"`
+	Name       string            `json:"name"`
+	Size       int64             `json:"size"`
+	FormValues map[string]string `json:"formValues,omitempty"`
 }
 
 type guestUploadResponse struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Size        int64  `json:"size"`
-	State       string `json:"state"`
-	Uploaded    int64  `json:"uploaded,omitempty"`
-	Speed       float64`json:"speed,omitempty"`
-	Error       string `json:"error,omitempty"`
-	SHA256      string `json:"sha256,omitempty"`
+	ID       string            `json:"id"`
+	Name     string            `json:"name"`
+	Size     int64             `json:"size"`
+	State    string            `json:"state"`
+	Uploaded int64             `json:"uploaded,omitempty"`
+	Speed    float64           `json:"speed,omitempty"`
+	Error    string            `json:"error,omitempty"`
+	SHA256   string            `json:"sha256,omitempty"`
+	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
 func handleGuestUploadDeclare(svcs *Services) http.HandlerFunc {
@@ -224,25 +293,43 @@ func handleGuestUploadDeclare(svcs *Services) http.HandlerFunc {
 			return
 		}
 
-		up, err := room.DeclareUpload(g.ID, meta.Name, meta.Size)
+		up, err := room.DeclareUploadWithMeta(g.ID, meta.Name, meta.Size, meta.FormValues)
 		if err != nil {
 			if errors.Is(err, transfer.ErrInvalidFilename) || errors.Is(err, transfer.ErrInvalidUpload) {
 				writeError(w, http.StatusBadRequest, "invalid filename or size")
+				return
+			}
+			if errors.Is(err, guest.ErrFileConflict) {
+				writeError(w, http.StatusConflict, "a file with this name already exists in your submission")
 				return
 			}
 			if errors.Is(err, transfer.ErrNoCapacity) {
 				writeError(w, http.StatusTooManyRequests, "upload capacity reached")
 				return
 			}
-			writeError(w, http.StatusInternalServerError, "failed to declare upload")
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
+		if svcs.Audit != nil {
+			svcs.Audit.Record(audit.Entry{
+				EventType: audit.EventUploadDeclared,
+				RoomID:    room.ID,
+				GuestID:   g.ID,
+				GuestName: g.Nickname,
+				FileName:  up.FileName,
+				FileSize:  up.Size,
+				Outcome:   audit.OutcomeSuccess,
+				Details:   fmt.Sprintf("Upload declared: %s (%d bytes)", up.FileName, up.Size),
+			})
+		}
+
 		writeJSON(w, http.StatusCreated, guestUploadResponse{
-			ID:    up.ID,
-			Name:  up.FileName,
-			Size:  up.Size,
-			State: string(up.State),
+			ID:       up.ID,
+			Name:     up.FileName,
+			Size:     up.Size,
+			State:    string(up.State),
+			Metadata: up.FormValues,
 		})
 	}
 }
@@ -329,8 +416,33 @@ func handleGuestUploadContent(svcs *Services, stall time.Duration) http.HandlerF
 
 		res, err := room.StreamUpload(uploadID, body)
 		if err != nil {
+			if svcs.Audit != nil {
+				svcs.Audit.Record(audit.Entry{
+					EventType: audit.EventUploadFailed,
+					RoomID:    room.ID,
+					GuestID:   g.ID,
+					GuestName: g.Nickname,
+					FileName:  up.FileName,
+					Outcome:   audit.OutcomeFailed,
+					Details:   fmt.Sprintf("Upload failed: %v", err),
+				})
+			}
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
+		}
+
+		if svcs.Audit != nil {
+			svcs.Audit.Record(audit.Entry{
+				EventType: audit.EventUploadCompleted,
+				RoomID:    room.ID,
+				GuestID:   g.ID,
+				GuestName: g.Nickname,
+				FileName:  up.FileName,
+				FileSize:  res.Written,
+				SHA256:    res.SHA256,
+				Outcome:   audit.OutcomeSuccess,
+				Details:   fmt.Sprintf("Upload completed: %s (%d bytes)", up.FileName, res.Written),
+			})
 		}
 
 		writeJSON(w, http.StatusOK, uploadResultJSON{

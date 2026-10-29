@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import type { main, netenv, doctor } from '../wailsjs/go/models'
+  import type { main, netenv, doctor, guest, audit } from '../wailsjs/go/models'
   import { OnFileDrop, OnFileDropOff } from '../wailsjs/runtime/runtime.js'
   import logoUrl from './assets/images/logo-universal.png'
   import { createRefreshScheduler } from './refreshScheduler'
@@ -14,12 +14,16 @@
     PickFilesForSharing, PickFolderForSharing, AddDroppedSources,
     ListSharedFiles, ListSharedSources, RevokeSharedFile, RevokeSharedSource, ReceiveDirectory,
     ListNetworkInterfaces, SessionQR, ServerAddress,
-    StartGuestRoom, GetGuestRoomState, ApproveGuest, RejectGuest, RevokeGuest,
+    StartGuestRoom, StartGuestRoomWithConfig, GetGuestRoomState, ApproveGuest, RejectGuest, RevokeGuest,
     ApproveGuestUpload, RejectGuestUpload, EndGuestRoom, PickGuestDestination, OpenGuestFolder,
+    PickExportDestination, ExportGuestCollection,
+    ListGuestPresets, ListGuestTemplates, SaveGuestTemplate, DeleteGuestTemplate, DuplicateGuestTemplate, StartGuestRoomFromTemplate,
+    AddExpectedParticipant, RemoveExpectedParticipant, UpdateExpectedParticipant,
+    ListAuditEvents, ClearAuditHistory,
     RunConnectionDiagnostics, SendTextMessage, ListTextMessages, ClearTextMessages
   } from '../wailsjs/go/main/App.js'
 
-  let activeTab: 'personal' | 'guest' = 'personal'
+  let activeTab: 'personal' | 'guest' | 'templates' | 'audit' = 'personal'
 
   // Personal transfer state
   let sessions: main.SessionView[] = []
@@ -56,12 +60,34 @@
   let textInput = ''
   let sendingText = false
 
-  // Guest Drop Box state
+  // Guest Drop Box & Event Collection state
   let guestRoomState: main.GuestRoomStateView | null = null
   let guestStarting = false
   let guestDestDir = ''
   let guestDurationMinutes = 60
   let guestCopiedLink = false
+  let presets: guest.Preset[] = []
+  let selectedPresetId = ''
+  let guestTitle = 'Classroom Assignment'
+  let guestDescription = 'Submit your assignment files. Provide your student ID and notes.'
+  let guestCollisionPolicy: 'preserve_both' | 'reject' = 'preserve_both'
+  let guestFormSchema: guest.FormField[] = []
+  let newParticipantName = ''
+  let newParticipantIdentifier = ''
+  let addingParticipant = false
+  let exporting = false
+  let exportSuccessMsg = ''
+
+  // Templates state
+  let templates: guest.Template[] = []
+  let loadingTemplates = false
+
+  // Audit Log state
+  let auditEntries: audit.Entry[] = []
+  let auditTotal = 0
+  let auditLoading = false
+  let auditFilterType = ''
+  let auditFilterOutcome = ''
 
   // Connection Doctor state
   let doctorOpen = false
@@ -320,16 +346,153 @@
     }
   }
 
+  async function loadPresets(): Promise<void> {
+    try {
+      presets = await ListGuestPresets()
+      if (presets && presets.length > 0 && !selectedPresetId) {
+        applyPreset(presets[0])
+      }
+    } catch (err) {
+      console.error('Failed to load presets:', err)
+    }
+  }
+
+  function applyPreset(p: guest.Preset) {
+    selectedPresetId = p.id
+    guestTitle = p.title || p.name
+    guestDescription = p.description || ''
+    guestDurationMinutes = p.durationMinutes || 60
+    guestCollisionPolicy = (p.collisionPolicy as 'preserve_both' | 'reject') || 'preserve_both'
+    guestFormSchema = p.formSchema || []
+  }
+
   async function startGuestRoomAction(): Promise<void> {
     if (guestStarting) return
     guestStarting = true
     try {
-      await StartGuestRoom(guestDestDir, guestDurationMinutes)
+      await StartGuestRoomWithConfig({
+        destinationDir: guestDestDir,
+        durationMinutes: guestDurationMinutes,
+        title: guestTitle,
+        description: guestDescription,
+        collisionPolicy: guestCollisionPolicy,
+        formSchema: guestFormSchema,
+        expectedParticipants: []
+      } as any)
       refresh()
     } catch (err) {
       report(err)
     } finally {
       guestStarting = false
+    }
+  }
+
+  async function addParticipantAction(): Promise<void> {
+    if (!newParticipantName.trim() || addingParticipant) return
+    addingParticipant = true
+    try {
+      await AddExpectedParticipant(newParticipantName.trim(), '', newParticipantIdentifier.trim())
+      newParticipantName = ''
+      newParticipantIdentifier = ''
+      refresh()
+    } catch (err) {
+      report(err)
+    } finally {
+      addingParticipant = false
+    }
+  }
+
+  async function removeParticipantAction(id: string): Promise<void> {
+    try {
+      await RemoveExpectedParticipant(id)
+      refresh()
+    } catch (err) {
+      report(err)
+    }
+  }
+
+  async function exportCollectionAction(): Promise<void> {
+    if (exporting) return
+    try {
+      const targetPath = await PickExportDestination()
+      if (!targetPath) return
+      exporting = true
+      exportSuccessMsg = ''
+      const res = await ExportGuestCollection(targetPath)
+      exportSuccessMsg = `Exported ${res.totalFiles} files (${formatBytes(res.totalBytes)})`
+      setTimeout(() => { exportSuccessMsg = '' }, 5000)
+    } catch (err) {
+      report(err)
+    } finally {
+      exporting = false
+    }
+  }
+
+  async function loadTemplates(): Promise<void> {
+    loadingTemplates = true
+    try {
+      templates = await ListGuestTemplates()
+    } catch (err) {
+      report(err)
+    } finally {
+      loadingTemplates = false
+    }
+  }
+
+  async function startFromTemplateAction(tplId: string): Promise<void> {
+    try {
+      await StartGuestRoomFromTemplate(tplId, guestDestDir)
+      activeTab = 'guest'
+      refresh()
+    } catch (err) {
+      report(err)
+    }
+  }
+
+  async function duplicateTemplateAction(tplId: string, currentName: string): Promise<void> {
+    const newName = prompt('Enter a name for the duplicated template:', `${currentName} (Copy)`)
+    if (!newName) return
+    try {
+      await DuplicateGuestTemplate(tplId, newName)
+      await loadTemplates()
+    } catch (err) {
+      report(err)
+    }
+  }
+
+  async function deleteTemplateAction(tplId: string): Promise<void> {
+    if (!confirm('Are you sure you want to delete this template?')) return
+    try {
+      await DeleteGuestTemplate(tplId)
+      await loadTemplates()
+    } catch (err) {
+      report(err)
+    }
+  }
+
+  async function loadAuditLogs(): Promise<void> {
+    auditLoading = true
+    try {
+      const filter: any = { limit: 100, offset: 0 }
+      if (auditFilterType) filter.eventType = auditFilterType
+      if (auditFilterOutcome) filter.outcome = auditFilterOutcome
+      const res = await ListAuditEvents(filter)
+      auditEntries = res.entries || []
+      auditTotal = res.total || 0
+    } catch (err) {
+      report(err)
+    } finally {
+      auditLoading = false
+    }
+  }
+
+  async function clearAuditAction(): Promise<void> {
+    if (!confirm('Are you sure you want to clear the local audit log history? This cannot be undone.')) return
+    try {
+      await ClearAuditHistory()
+      await loadAuditLogs()
+    } catch (err) {
+      report(err)
     }
   }
 
@@ -441,6 +604,8 @@
   onMount(() => {
     refresh()
     refreshNetwork()
+    loadPresets()
+    loadTemplates()
     const id = setInterval(refresh, 800)
     OnFileDrop(handleDrop, true)
     return () => {
@@ -487,6 +652,22 @@
         {#if guestPendingCount > 0}
           <span class="tab-badge">{guestPendingCount}</span>
         {/if}
+      </button>
+
+      <button
+        class="tab-btn"
+        class:active={activeTab === 'templates'}
+        on:click={() => { activeTab = 'templates'; loadTemplates(); }}
+      >
+        <span>Templates</span>
+      </button>
+
+      <button
+        class="tab-btn"
+        class:active={activeTab === 'audit'}
+        on:click={() => { activeTab = 'audit'; loadAuditLogs(); }}
+      >
+        <span>Audit History</span>
       </button>
     </div>
 
@@ -817,6 +998,67 @@
         </p>
 
         <div style="margin-top: 18px; display: grid; gap: 16px;">
+          <!-- Presets -->
+          <div>
+            <span class="connection-label">Collection Presets</span>
+            <div class="guest-presets" style="margin-top: 6px;">
+              {#each presets as p (p.id)}
+                <button
+                  class="guest-preset-btn"
+                  class:active={selectedPresetId === p.id}
+                  on:click={() => applyPreset(p)}
+                >
+                  {p.name}
+                </button>
+              {/each}
+            </div>
+          </div>
+
+          <!-- Title and Description -->
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+            <div>
+              <label for="room-title-input" class="connection-label">Collection Title</label>
+              <input
+                id="room-title-input"
+                type="text"
+                class="text-input"
+                style="width: 100%; margin-top: 4px;"
+                bind:value={guestTitle}
+                placeholder="e.g. Classroom Assignment Submission"
+              />
+            </div>
+            <div>
+              <label for="room-policy-select" class="connection-label">Collision Policy</label>
+              <select
+                id="room-policy-select"
+                class="text-input"
+                style="width: 100%; margin-top: 4px;"
+                bind:value={guestCollisionPolicy}
+              >
+                <option value="preserve_both">Preserve Both (auto-number variants: file (1).ext)</option>
+                <option value="reject">Strict Reject (reject duplicate file names)</option>
+              </select>
+            </div>
+          </div>
+
+          <div>
+            <label for="room-desc-input" class="connection-label">Instructions / Guidelines for Guests</label>
+            <textarea
+              id="room-desc-input"
+              class="text-input"
+              style="width: 100%; margin-top: 4px; resize: vertical;"
+              rows="2"
+              bind:value={guestDescription}
+              placeholder="Instructions displayed on guest phones..."
+            ></textarea>
+          </div>
+
+          {#if guestFormSchema && guestFormSchema.length > 0}
+            <div class="meta-chip">
+              <span>Configured Submission Fields: <strong>{guestFormSchema.map(f => f.label + (f.required ? ' *' : '')).join(', ')}</strong></span>
+            </div>
+          {/if}
+
           <div>
             <span class="connection-label">Destination Folder</span>
             <div style="display: flex; align-items: center; gap: 12px; margin-top: 6px;">
@@ -830,10 +1072,10 @@
 
           <div>
             <span class="connection-label">Room Duration Presets</span>
-            <div class="guest-presets">
+            <div class="guest-presets" style="margin-top: 6px;">
               <button class="guest-preset-btn" class:active={guestDurationMinutes === 15} on:click={() => guestDurationMinutes = 15}>15 Minutes</button>
               <button class="guest-preset-btn" class:active={guestDurationMinutes === 30} on:click={() => guestDurationMinutes = 30}>30 Minutes</button>
-              <button class="guest-preset-btn" class:active={guestDurationMinutes === 60} on:click={() => guestDurationMinutes = 60}>1 Hour (Standard)</button>
+              <button class="guest-preset-btn" class:active={guestDurationMinutes === 60} on:click={() => guestDurationMinutes = 60}>1 Hour</button>
               <button class="guest-preset-btn" class:active={guestDurationMinutes === 120} on:click={() => guestDurationMinutes = 120}>2 Hours</button>
               <button class="guest-preset-btn" class:active={guestDurationMinutes === 240} on:click={() => guestDurationMinutes = 240}>4 Hours</button>
             </div>
@@ -852,7 +1094,7 @@
         <div class="section-heading">
           <div>
             <span class="eyebrow accent">Active Room · {guestRoomState.room.id}</span>
-            <h2>Guest Drop Box Dashboard</h2>
+            <h2>{guestRoomState.room.title || 'Guest Drop Box'}</h2>
           </div>
           <div style="display: flex; align-items: center; gap: 10px;">
             <span class="pill" style="border-color: var(--teal); color: #7ff0df;">
@@ -864,7 +1106,26 @@
           </div>
         </div>
 
-        <div class="guest-room-active-grid">
+        {#if guestRoomState.room.description}
+          <p class="muted" style="margin-top: 4px;">{guestRoomState.room.description}</p>
+        {/if}
+
+        <div class="collection-meta-bar">
+          <span class="meta-chip">Collision Policy: <strong>{guestRoomState.room.collisionPolicy === 'reject' ? 'Strict Reject' : 'Preserve Both'}</strong></span>
+          {#if guestRoomState.room.deadline}
+            <span class="meta-chip">Deadline: <strong>{fmtTime(guestRoomState.room.deadline)}</strong></span>
+          {/if}
+          <div style="margin-left: auto; display: flex; align-items: center; gap: 10px;">
+            <button class="button primary small" on:click={exportCollectionAction} disabled={exporting}>
+              {exporting ? 'Exporting ZIP…' : 'Export Collection (ZIP)'}
+            </button>
+            {#if exportSuccessMsg}
+              <span style="color: #34d399; font-size: 12px; font-weight: 600;">{exportSuccessMsg}</span>
+            {/if}
+          </div>
+        </div>
+
+        <div class="guest-room-active-grid" style="margin-top: 14px;">
           <div class="guest-qr-card">
             {#if guestRoomState.room.qrDataUrl}
               <img class="guest-qr-img" src={guestRoomState.room.qrDataUrl} alt="Guest Drop Box QR Code" />
@@ -891,8 +1152,86 @@
         </div>
       </section>
 
+      <!-- Roster / Expected Participants Section -->
+      <section class="panel workflow" style="margin-top: 14px;">
+        <div class="section-heading">
+          <div>
+            <span class="eyebrow blue">Submission Tracking</span>
+            <h2>Expected Participants Roster</h2>
+          </div>
+          <span class="count">{guestRoomState.roster?.length ?? 0}</span>
+        </div>
+
+        <!-- Add Participant Row -->
+        <div class="form-input-row" style="margin: 10px 0 14px;">
+          <input
+            type="text"
+            class="text-input"
+            bind:value={newParticipantName}
+            placeholder="Participant Name (e.g. John Doe)"
+          />
+          <input
+            type="text"
+            class="text-input"
+            bind:value={newParticipantIdentifier}
+            placeholder="Identifier / Email (e.g. CS101-042)"
+          />
+          <button
+            class="button secondary small"
+            on:click={addParticipantAction}
+            disabled={!newParticipantName.trim() || addingParticipant}
+          >
+            {addingParticipant ? 'Adding…' : 'Add to Roster'}
+          </button>
+        </div>
+
+        {#if guestRoomState.roster && guestRoomState.roster.length > 0}
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Participant</th>
+                  <th>Identifier</th>
+                  <th>Status</th>
+                  <th>Files Submitted</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each guestRoomState.roster as p (p.id)}
+                  <tr>
+                    <td><strong>{p.name}</strong></td>
+                    <td><code>{p.identifier || '—'}</code></td>
+                    <td>
+                      <span class="status-pill {p.status}">
+                        {p.status.replace(/_/g, ' ')}
+                      </span>
+                    </td>
+                    <td>{p.submissionCount} file{p.submissionCount === 1 ? '' : 's'}</td>
+                    <td>
+                      <button
+                        class="button ghost small"
+                        style="color: var(--danger); padding: 2px 6px;"
+                        on:click={() => removeParticipantAction(p.id)}
+                        aria-label="Remove participant"
+                      >
+                        Remove
+                      </button>
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {:else}
+          <div class="empty compact">
+            No expected participants pre-loaded. Guests can still join anonymously or with custom nicknames.
+          </div>
+        {/if}
+      </section>
+
       <!-- Guest Approval Queues Grid -->
-      <div class="guest-subsections">
+      <div class="guest-subsections" style="margin-top: 14px;">
         <!-- Section 1: Guest Requests -->
         <section class="panel workflow">
           <div class="section-heading">
@@ -960,6 +1299,13 @@
                 <div>
                   <strong>{up.fileName}</strong>
                   <span>{formatBytes(up.size)} · from {up.guestName || 'Guest'} · {fmtTime(up.createdAt)}</span>
+                  {#if up.formValues && Object.keys(up.formValues).length > 0}
+                    <div style="margin-top: 4px; font-size: 11.5px; color: var(--accent);">
+                      {#each Object.entries(up.formValues) as [k, v]}
+                        <span style="margin-right: 8px;">{k}: <strong>{v}</strong></span>
+                      {/each}
+                    </div>
+                  {/if}
                 </div>
                 <div class="button-row" style="margin-top: 0;">
                   <button class="button primary small" on:click={() => approveGuestUploadAction(up.id)} disabled={isBusy(`approve-guest-upload:${up.id}`)}>Accept</button>
@@ -987,6 +1333,19 @@
                         {up.guestName || 'Guest'} · {formatBytes(up.transferred)} of {formatBytes(up.size)}
                         {#if up.state === 'uploading' && up.speed > 0} · {speed(up.speed)}{/if}
                       </span>
+                      {#if up.sha256}
+                        <div style="margin-top: 2px;">
+                          <button
+                            type="button"
+                            class="button ghost small"
+                            style="padding: 2px 4px; font-size: 11px; font-family: monospace; color: var(--text-muted);"
+                            title="Click to copy SHA256 hash"
+                            on:click={() => copyTextToClipboard(up.sha256 || '')}
+                          >
+                            SHA256: {up.sha256.slice(0, 12)}…
+                          </button>
+                        </div>
+                      {/if}
                     </div>
                     <span class="badge {up.state}">{up.state}</span>
                   </div>
@@ -1005,6 +1364,144 @@
         </section>
       </div>
     {/if}
+
+  <!-- TAB 3: TEMPLATES -->
+  {:else if activeTab === 'templates'}
+    <section class="panel">
+      <div class="section-heading">
+        <div>
+          <span class="eyebrow accent">Reusable Schemas</span>
+          <h2>Collection Templates & Presets</h2>
+        </div>
+        <span class="count">{templates.length}</span>
+      </div>
+      <p class="muted">
+        Save room settings, submission forms, and rosters as templates to quickly launch recurring collection drop boxes.
+      </p>
+
+      {#if loadingTemplates}
+        <div class="empty">Loading saved templates…</div>
+      {:else if templates.length > 0}
+        <div class="template-grid">
+          {#each templates as tpl (tpl.id)}
+            <div class="template-card">
+              <div>
+                <h3>{tpl.name}</h3>
+                <p>{tpl.description || 'No description provided.'}</p>
+                <div style="margin-top: 10px; display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-secondary);">
+                  <span>Duration: <strong>{tpl.durationMinutes} min</strong></span>
+                  <span>Collision Policy: <strong>{tpl.collisionPolicy === 'reject' ? 'Strict Reject' : 'Preserve Both'}</strong></span>
+                  {#if tpl.formSchema && tpl.formSchema.length > 0}
+                    <span>Form Fields: <strong>{tpl.formSchema.length} configured</strong></span>
+                  {/if}
+                  {#if tpl.expectedParticipants && tpl.expectedParticipants.length > 0}
+                    <span>Roster: <strong>{tpl.expectedParticipants.length} participants</strong></span>
+                  {/if}
+                </div>
+              </div>
+              <div class="button-row" style="margin-top: 12px;">
+                <button class="button primary small" on:click={() => startFromTemplateAction(tpl.id)}>
+                  Start Room
+                </button>
+                <button class="button secondary small" on:click={() => duplicateTemplateAction(tpl.id, tpl.name)}>
+                  Duplicate
+                </button>
+                <button class="button ghost small" style="color: var(--danger);" on:click={() => deleteTemplateAction(tpl.id)}>
+                  Delete
+                </button>
+              </div>
+            </div>
+          {/each}
+        </div>
+      {:else}
+        <div class="empty">No saved templates yet.</div>
+      {/if}
+    </section>
+
+  <!-- TAB 4: AUDIT HISTORY -->
+  {:else if activeTab === 'audit'}
+    <section class="panel">
+      <div class="section-heading">
+        <div>
+          <span class="eyebrow accent">Searchable Local Audit Log</span>
+          <h2>Transfer & Collection History</h2>
+        </div>
+        <div style="display: flex; gap: 10px; align-items: center;">
+          <button class="button secondary small" on:click={loadAuditLogs} disabled={auditLoading}>
+            {auditLoading ? 'Loading…' : 'Refresh'}
+          </button>
+          <button class="button danger small" on:click={clearAuditAction}>
+            Clear History
+          </button>
+        </div>
+      </div>
+      <p class="muted">
+        Append-only local JSONL audit trail. Network tokens and private transfer contents are never recorded.
+      </p>
+
+      <div style="display: flex; gap: 12px; margin: 14px 0;" class="form-input-row">
+        <select class="text-input" bind:value={auditFilterType} on:change={loadAuditLogs} style="max-width: 200px;">
+          <option value="">All Event Types</option>
+          <option value="room_created">Room Created</option>
+          <option value="room_ended">Room Ended</option>
+          <option value="guest_joined">Guest Joined</option>
+          <option value="guest_approved">Guest Approved</option>
+          <option value="upload_declared">Upload Declared</option>
+          <option value="upload_approved">Upload Approved</option>
+          <option value="upload_completed">Upload Completed</option>
+          <option value="export_completed">Export Completed</option>
+        </select>
+
+        <select class="text-input" bind:value={auditFilterOutcome} on:change={loadAuditLogs} style="max-width: 160px;">
+          <option value="">All Outcomes</option>
+          <option value="success">Success</option>
+          <option value="rejected">Rejected</option>
+          <option value="failed">Failed</option>
+          <option value="info">Info</option>
+        </select>
+        <span class="muted" style="margin-left: auto; font-size: 13px;">Showing {auditEntries.length} of {auditTotal} total events</span>
+      </div>
+
+      {#if auditLoading}
+        <div class="empty">Loading audit events…</div>
+      {:else if auditEntries.length > 0}
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Timestamp</th>
+                <th>Event Type</th>
+                <th>Room ID</th>
+                <th>Guest</th>
+                <th>Outcome</th>
+                <th>Details</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each auditEntries as entry (entry.id)}
+                <tr>
+                  <td style="white-space: nowrap; font-size: 12px; color: var(--text-muted);">{fmtTime(entry.timestamp)}</td>
+                  <td><strong>{entry.eventType}</strong></td>
+                  <td><code>{entry.roomId || '—'}</code></td>
+                  <td>{entry.guestName || entry.guestId || '—'}</td>
+                  <td>
+                    <span class="status-pill {entry.outcome}">
+                      {entry.outcome}
+                    </span>
+                  </td>
+                  <td style="font-size: 12px; word-break: break-all;">
+                    {entry.fileName ? `${entry.fileName} (${formatBytes(entry.fileSize || 0)}) ` : ''}
+                    {entry.details || ''}
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {:else}
+        <div class="empty">No audit events match the current filter.</div>
+      {/if}
+    </section>
   {/if}
 
   {#if receiveDir}

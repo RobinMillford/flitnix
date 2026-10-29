@@ -1,10 +1,16 @@
 package main
 
 import (
+	"bytes"
+	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/itsyamin/flitnix/internal/audit"
 	"github.com/itsyamin/flitnix/internal/doctor"
+	"github.com/itsyamin/flitnix/internal/guest"
 	"github.com/itsyamin/flitnix/internal/netenv"
 )
 
@@ -178,5 +184,164 @@ func TestAppQuickTextTransfer(t *testing.T) {
 	}
 	if len(app.ListTextMessages(sess.Key())) != 0 {
 		t.Fatal("expected empty messages after clear")
+	}
+}
+
+func TestAppEventCollectionPlatform(t *testing.T) {
+	app, err := NewApp()
+	if err != nil {
+		t.Fatalf("NewApp: %v", err)
+	}
+	defer app.shutdown(t.Context())
+
+	iface := net.Interface{Index: 1, Name: "wlo1", Flags: net.FlagUp | net.FlagBroadcast}
+	_, ipnet, _ := net.ParseCIDR("192.168.1.50/24")
+	app.source = &mockAppNetSource{
+		ifaces: []net.Interface{iface},
+		addrs:  map[string][]net.Addr{"wlo1": {ipnet}},
+	}
+
+	tmpDir := t.TempDir()
+	listen := "127.0.0.78:43821"
+	if err := app.ensureServer(listen); err != nil {
+		t.Fatalf("ensureServer: %v", err)
+	}
+
+	// 1. Presets validation
+	presets := app.ListGuestPresets()
+	if len(presets) < 5 {
+		t.Fatalf("expected at least 5 default presets, got %d", len(presets))
+	}
+
+	// 2. Templates CRUD
+	tpl := guest.Template{
+		ID:              "tpl-midterm",
+		Name:            "Midterm Exam Template",
+		Title:           "Midterm Code Drop",
+		DurationMinutes: 90,
+		CollisionPolicy: guest.CollisionReject,
+		FormSchema: []guest.FormField{
+			{ID: "student_id", Label: "Student ID", Type: "text", Required: true},
+		},
+	}
+	if err := app.SaveGuestTemplate(tpl); err != nil {
+		t.Fatalf("SaveGuestTemplate: %v", err)
+	}
+	tpls := app.ListGuestTemplates()
+	found := false
+	for _, item := range tpls {
+		if item.ID == "tpl-midterm" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("saved template not found in listing")
+	}
+
+	dup, err := app.DuplicateGuestTemplate("tpl-midterm", "Midterm Exam (Copy)")
+	if err != nil || dup.Name != "Midterm Exam (Copy)" {
+		t.Fatalf("DuplicateGuestTemplate failed: %v", err)
+	}
+
+	// 3. Start room with config
+	roomView, err := app.StartGuestRoomWithConfig(GuestRoomConfigView{
+		DestinationDir:  filepath.Join(tmpDir, "submissions"),
+		DurationMinutes: 60,
+		Title:           "Midterm Submissions",
+		CollisionPolicy: "reject",
+		FormSchema:      tpl.FormSchema,
+	})
+	if err != nil {
+		t.Fatalf("StartGuestRoomWithConfig: %v", err)
+	}
+	if roomView.CollisionPolicy != "reject" || roomView.Title != "Midterm Submissions" {
+		t.Fatalf("unexpected room view: %+v", roomView)
+	}
+
+	// 4. Expected participants roster
+	if err := app.AddExpectedParticipant("Alice Smith", "asmith@example.com", "CS-101"); err != nil {
+		t.Fatalf("AddExpectedParticipant: %v", err)
+	}
+
+	state, err := app.GetGuestRoomState()
+	if err != nil {
+		t.Fatalf("GetGuestRoomState: %v", err)
+	}
+	if len(state.Roster) != 1 || state.Roster[0].Name != "Alice Smith" {
+		t.Fatalf("expected roster item for Alice Smith, got %+v", state.Roster)
+	}
+	aliceParticipantID := state.Roster[0].ID
+
+	// 5. Alice joins using participant ID
+	activeRoom := app.guestMgr.ActiveRoom()
+	g, err := activeRoom.JoinWithParticipant("Alice", aliceParticipantID)
+	if err != nil {
+		t.Fatalf("JoinWithParticipant: %v", err)
+	}
+	if err := app.ApproveGuest(g.ID); err != nil {
+		t.Fatalf("ApproveGuest: %v", err)
+	}
+
+	// 6. Upload file with form values
+	content := []byte("function solve() { return 42; }\n")
+	up, err := activeRoom.DeclareUploadWithMeta(g.ID, "solution.js", int64(len(content)), map[string]string{
+		"student_id": "CS-101",
+	})
+	if err != nil {
+		t.Fatalf("DeclareUploadWithMeta: %v", err)
+	}
+	if err := app.ApproveGuestUpload(up.ID); err != nil {
+		t.Fatalf("ApproveGuestUpload: %v", err)
+	}
+
+	if _, err := activeRoom.StreamUpload(up.ID, bytes.NewReader(content)); err != nil {
+		t.Fatalf("StreamUpload: %v", err)
+	}
+
+	state, _ = app.GetGuestRoomState()
+	if len(state.CompletedUploads) != 1 {
+		t.Fatalf("expected 1 completed upload, got %d", len(state.CompletedUploads))
+	}
+	// Alice status should now be submitted
+	for _, p := range state.Roster {
+		if p.ID == aliceParticipantID && p.Status != guest.StatusSubmitted {
+			t.Fatalf("expected Alice status to be submitted, got %s", p.Status)
+		}
+	}
+
+	// 7. Verify collision reject policy: uploading another file named "solution.js" must fail
+	_, err = activeRoom.DeclareUploadWithMeta(g.ID, "solution.js", int64(len(content)), map[string]string{
+		"student_id": "CS-101",
+	})
+	if !errors.Is(err, guest.ErrFileConflict) {
+		t.Fatalf("expected ErrFileConflict for duplicate file under CollisionReject, got %v", err)
+	}
+
+	// 8. Export collection to ZIP
+	zipPath := filepath.Join(tmpDir, "final-export.zip")
+	exportRes, err := app.ExportGuestCollection(zipPath)
+	if err != nil {
+		t.Fatalf("ExportGuestCollection: %v", err)
+	}
+	if exportRes.TotalFiles != 1 || exportRes.TotalBytes != int64(len(content)) {
+		t.Fatalf("unexpected export result: %+v", exportRes)
+	}
+	if _, err := os.Stat(zipPath); err != nil {
+		t.Fatalf("exported zip file does not exist: %v", err)
+	}
+
+	// 9. Query audit history
+	auditRes, err := app.ListAuditEvents(audit.Filter{RoomID: roomView.ID})
+	if err != nil {
+		t.Fatalf("ListAuditEvents: %v", err)
+	}
+	if auditRes.Total < 3 {
+		t.Fatalf("expected at least 3 audit entries for room, got %d", auditRes.Total)
+	}
+
+	// 10. End room
+	if err := app.EndGuestRoom(); err != nil {
+		t.Fatalf("EndGuestRoom: %v", err)
 	}
 }

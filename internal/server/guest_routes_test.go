@@ -454,3 +454,136 @@ func TestGuestRoomCapacityLimit(t *testing.T) {
 		t.Fatalf("expected 429 Too Many Requests on full room, got %d", resp.StatusCode)
 	}
 }
+
+func TestGuestRoomInfoAndMetadata(t *testing.T) {
+	ts, _, room, _ := setupTestGuestServer(t)
+
+	// Add roster participant and form schema
+	p, err := room.AddParticipant("Alice Smith", "student_01")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. GET /guest-api/room-info with bad secret -> 401
+	respBad, err := http.Get(ts.URL + "/guest-api/room-info?secret=bad-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	respBad.Body.Close()
+	if respBad.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized for bad secret, got %d", respBad.StatusCode)
+	}
+
+	// 2. GET /guest-api/room-info with valid secret -> 200
+	respGood, err := http.Get(ts.URL + "/guest-api/room-info?secret=" + room.InviteSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer respGood.Body.Close()
+	if respGood.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK for room info, got %d", respGood.StatusCode)
+	}
+
+	var info guestRoomInfoResponse
+	if err := json.NewDecoder(respGood.Body).Decode(&info); err != nil {
+		t.Fatal(err)
+	}
+	if info.ID != room.ID || !info.HasRoster || len(info.Roster) != 1 {
+		t.Fatalf("unexpected room info: %+v", info)
+	}
+
+	// 3. Join linking to participant
+	joinData, _ := json.Marshal(map[string]string{
+		"secret":        room.InviteSecret,
+		"nickname":      "Alice",
+		"participantId": p.ID,
+	})
+	respJoin, err := http.Post(ts.URL+"/guest-api/join", "application/json", bytes.NewReader(joinData))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer respJoin.Body.Close()
+	if respJoin.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 Created on join, got %d", respJoin.StatusCode)
+	}
+
+	var joinRes guestJoinResponse
+	_ = json.NewDecoder(respJoin.Body).Decode(&joinRes)
+
+	// 4. Verify participant state linked
+	_ = room.ApproveGuest(joinRes.GuestID)
+	roster := room.GetRoster()
+	if roster[0].Status != guest.StatusAwaitingUpload || roster[0].AssignedGuestID != joinRes.GuestID {
+		t.Fatalf("unexpected participant status: %+v", roster[0])
+	}
+}
+
+func TestGuestCollisionPolicyHTTP(t *testing.T) {
+	tmpDir := t.TempDir()
+	guestMgr := guest.NewManager()
+	t.Cleanup(guestMgr.Close)
+
+	room, err := guestMgr.CreateRoomWithConfig(guest.RoomConfig{
+		DestinationRoot: tmpDir,
+		Duration:        1 * time.Hour,
+		CollisionPolicy: guest.CollisionReject,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store, _ := transfer.NewStore(transfer.StoreConfig{Dir: tmpDir})
+	services := &Services{
+		Sessions:     session.NewManager(session.Config{}),
+		Transfers:    transfer.NewService(transfer.Config{Store: store}),
+		Downloads:    transfer.NewDownloadRegistry(),
+		GuestManager: guestMgr,
+	}
+
+	grants := newGrantStore(services.Downloads)
+	handler := newRouter(services, 5*time.Second, 5*time.Second, grants)
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+
+	// Join guest
+	joinData, _ := json.Marshal(map[string]string{
+		"secret":   room.InviteSecret,
+		"nickname": "Alice",
+	})
+	respJoin, err := http.Post(ts.URL+"/guest-api/join", "application/json", bytes.NewReader(joinData))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var joinRes guestJoinResponse
+	_ = json.NewDecoder(respJoin.Body).Decode(&joinRes)
+	respJoin.Body.Close()
+
+	_ = room.ApproveGuest(joinRes.GuestID)
+
+	// Declare first upload
+	meta1, _ := json.Marshal(map[string]any{"name": "file.txt", "size": 10})
+	req1, _ := http.NewRequest("POST", ts.URL+"/guest-api/uploads", bytes.NewReader(meta1))
+	req1.Header.Set("Authorization", "Bearer "+joinRes.Token)
+	req1.Header.Set("Content-Type", "application/json")
+	resp1, err := http.DefaultClient.Do(req1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp1.Body.Close()
+	if resp1.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 for first upload, got %d", resp1.StatusCode)
+	}
+
+	// Declare second upload with same name under CollisionReject -> 409 Conflict
+	req2, _ := http.NewRequest("POST", ts.URL+"/guest-api/uploads", bytes.NewReader(meta1))
+	req2.Header.Set("Authorization", "Bearer "+joinRes.Token)
+	req2.Header.Set("Content-Type", "application/json")
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict for duplicate file, got %d", resp2.StatusCode)
+	}
+}

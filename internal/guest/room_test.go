@@ -2,6 +2,7 @@ package guest
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -255,5 +256,126 @@ func TestUnapprovedGuestCannotUpload(t *testing.T) {
 	_, err = room.DeclareUpload(guest.ID, "malicious.sh", 100)
 	if err != ErrGuestNotApproved {
 		t.Fatalf("expected ErrGuestNotApproved after rejection, got %v", err)
+	}
+}
+
+func TestCollisionPolicyReject(t *testing.T) {
+	tmpDir := t.TempDir()
+	room, err := NewRoomWithConfig(RoomConfig{
+		DestinationRoot: tmpDir,
+		Duration:        1 * time.Hour,
+		CollisionPolicy: CollisionReject,
+	})
+	if err != nil {
+		t.Fatalf("NewRoomWithConfig: %v", err)
+	}
+
+	g, err := room.Join("Alice")
+	if err != nil {
+		t.Fatalf("Join: %v", err)
+	}
+	_ = room.ApproveGuest(g.ID)
+
+	content := []byte("first upload")
+	up1, err := room.DeclareUpload(g.ID, "essay.pdf", int64(len(content)))
+	if err != nil {
+		t.Fatalf("DeclareUpload 1: %v", err)
+	}
+	_ = room.ApproveUpload(up1.ID)
+	_, err = room.StreamUpload(up1.ID, bytes.NewReader(content))
+	if err != nil {
+		t.Fatalf("StreamUpload: %v", err)
+	}
+
+	// Now try declaring another file with the exact same name under CollisionReject
+	_, err = room.DeclareUpload(g.ID, "essay.pdf", int64(len(content)))
+	if !errors.Is(err, ErrFileConflict) {
+		t.Fatalf("expected ErrFileConflict, got %v", err)
+	}
+}
+
+func TestFormValidation(t *testing.T) {
+	tmpDir := t.TempDir()
+	room, err := NewRoomWithConfig(RoomConfig{
+		DestinationRoot: tmpDir,
+		Duration:        1 * time.Hour,
+		FormSchema: []FormField{
+			{ID: "student_id", Label: "Student ID", Type: "text", Required: true, MaxLength: 10},
+			{ID: "category", Label: "Category", Type: "select", Required: false, Options: []string{"Essay", "Code", "Slides"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewRoomWithConfig: %v", err)
+	}
+
+	g, _ := room.Join("Alice")
+	_ = room.ApproveGuest(g.ID)
+
+	// 1. Missing required field -> error
+	_, err = room.DeclareUploadWithMeta(g.ID, "doc.pdf", 10, map[string]string{
+		"student_id": "",
+	})
+	if err == nil || !strings.Contains(err.Error(), "required") {
+		t.Fatalf("expected required field error, got %v", err)
+	}
+
+	// 2. Exceeding max length -> error
+	_, err = room.DeclareUploadWithMeta(g.ID, "doc.pdf", 10, map[string]string{
+		"student_id": "123456789012345",
+	})
+	if err == nil || !strings.Contains(err.Error(), "exceeds max length") {
+		t.Fatalf("expected max length error, got %v", err)
+	}
+
+	// 3. Invalid select option -> error
+	_, err = room.DeclareUploadWithMeta(g.ID, "doc.pdf", 10, map[string]string{
+		"student_id": "ST123",
+		"category":   "MaliciousOption",
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid selection") {
+		t.Fatalf("expected invalid selection error, got %v", err)
+	}
+
+	// 4. Valid values -> success
+	up, err := room.DeclareUploadWithMeta(g.ID, "doc.pdf", 10, map[string]string{
+		"student_id": "ST123",
+		"category":   "Essay",
+	})
+	if err != nil {
+		t.Fatalf("valid form declare failed: %v", err)
+	}
+	if up.FormValues["student_id"] != "ST123" {
+		t.Fatalf("form values not preserved: %+v", up.FormValues)
+	}
+}
+
+func TestRosterTrackingAndDeadline(t *testing.T) {
+	tmpDir := t.TempDir()
+	pastDeadline := time.Now().Add(-1 * time.Minute)
+	room, err := NewRoomWithConfig(RoomConfig{
+		DestinationRoot: tmpDir,
+		Duration:        1 * time.Hour,
+		Deadline:        &pastDeadline,
+		ExpectedParticipants: []ExpectedParticipant{
+			{Name: "Charlie Brown", Identifier: "cb_01"},
+			{Name: "Diana Prince", Identifier: "dp_02"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewRoomWithConfig: %v", err)
+	}
+
+	roster := room.GetRoster()
+	if len(roster) != 2 {
+		t.Fatalf("expected 2 participants, got %d", len(roster))
+	}
+
+	// CheckExpiry updates status to missing_at_deadline if past deadline and unsubmitted
+	room.CheckExpiry()
+	rosterAfter := room.GetRoster()
+	for _, p := range rosterAfter {
+		if p.Status != StatusMissingAtDeadline {
+			t.Fatalf("expected StatusMissingAtDeadline, got %s for %s", p.Status, p.Name)
+		}
 	}
 }

@@ -6,6 +6,10 @@ export function AddDroppedSources(arg1) {
   return window['go']['main']['App']['AddDroppedSources'](arg1);
 }
 
+export function AddExpectedParticipant(arg1, arg2, arg3) {
+  return window['go']['main']['App']['AddExpectedParticipant'](arg1, arg2, arg3);
+}
+
 export function ApproveBatch(arg1) {
   return window['go']['main']['App']['ApproveBatch'](arg1);
 }
@@ -30,8 +34,20 @@ export function CancelUpload(arg1) {
   return window['go']['main']['App']['CancelUpload'](arg1);
 }
 
+export function ClearAuditHistory() {
+  return window['go']['main']['App']['ClearAuditHistory']();
+}
+
 export function ClearTextMessages(arg1) {
   return window['go']['main']['App']['ClearTextMessages'](arg1);
+}
+
+export function DeleteGuestTemplate(arg1) {
+  return window['go']['main']['App']['DeleteGuestTemplate'](arg1);
+}
+
+export function DuplicateGuestTemplate(arg1, arg2) {
+  return window['go']['main']['App']['DuplicateGuestTemplate'](arg1, arg2);
 }
 
 export function EndGuestRoom() {
@@ -42,6 +58,10 @@ export function EndSession(arg1) {
   return window['go']['main']['App']['EndSession'](arg1);
 }
 
+export function ExportGuestCollection(arg1) {
+  return window['go']['main']['App']['ExportGuestCollection'](arg1);
+}
+
 export function GetBatch(arg1) {
   return window['go']['main']['App']['GetBatch'](arg1);
 }
@@ -50,8 +70,20 @@ export function GetGuestRoomState() {
   return window['go']['main']['App']['GetGuestRoomState']();
 }
 
+export function ListAuditEvents(arg1) {
+  return window['go']['main']['App']['ListAuditEvents'](arg1);
+}
+
 export function ListBatches() {
   return window['go']['main']['App']['ListBatches']();
+}
+
+export function ListGuestPresets() {
+  return window['go']['main']['App']['ListGuestPresets']();
+}
+
+export function ListGuestTemplates() {
+  return window['go']['main']['App']['ListGuestTemplates']();
 }
 
 export function ListNetworkInterfaces() {
@@ -84,6 +116,10 @@ export function ListTextMessages(arg1) {
 
 export function OpenGuestFolder() {
   return window['go']['main']['App']['OpenGuestFolder']();
+}
+
+export function PickExportDestination() {
+  return window['go']['main']['App']['PickExportDestination']();
 }
 
 export function PickFilesForSharing() {
@@ -126,6 +162,10 @@ export function RejectUpload(arg1) {
   return window['go']['main']['App']['RejectUpload'](arg1);
 }
 
+export function RemoveExpectedParticipant(arg1) {
+  return window['go']['main']['App']['RemoveExpectedParticipant'](arg1);
+}
+
 export function RevokeGuest(arg1) {
   return window['go']['main']['App']['RevokeGuest'](arg1);
 }
@@ -140,6 +180,10 @@ export function RevokeSharedSource(arg1) {
 
 export function RunConnectionDiagnostics() {
   return window['go']['main']['App']['RunConnectionDiagnostics']();
+}
+
+export function SaveGuestTemplate(arg1) {
+  return window['go']['main']['App']['SaveGuestTemplate'](arg1);
 }
 
 export function SendTextMessage(arg1, arg2) {
@@ -158,6 +202,18 @@ export function StartGuestRoom(arg1, arg2) {
   return window['go']['main']['App']['StartGuestRoom'](arg1, arg2);
 }
 
+export function StartGuestRoomFromTemplate(arg1, arg2) {
+  return window['go']['main']['App']['StartGuestRoomFromTemplate'](arg1, arg2);
+}
+
+export function StartGuestRoomWithConfig(arg1) {
+  return window['go']['main']['App']['StartGuestRoomWithConfig'](arg1);
+}
+
 export function StartSession(arg1) {
   return window['go']['main']['App']['StartSession'](arg1);
+}
+
+export function UpdateExpectedParticipant(arg1) {
+  return window['go']['main']['App']['UpdateExpectedParticipant'](arg1);
 }
