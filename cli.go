@@ -283,6 +283,13 @@ func runServeApprovalLoop(ctx context.Context, pending <-chan pendingServeBatch,
 				}
 			}
 
+			// Re-verify batch state after waiting for user input. If the sender canceled or timed out, do not approve.
+			current, err = coord.GetBatch(ev.sessionKey, ev.batch.ID)
+			if err != nil || current.ApprovalState != transfer.ApprovalPending || current.State != transfer.BatchStatePending {
+				fmt.Fprintf(out, "--> Batch %s was canceled or expired while waiting for approval.\n", ev.batch.ID)
+				continue
+			}
+
 			// Execute decision
 			var contentIDs []string
 			for _, item := range ev.batch.Items {

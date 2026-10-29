@@ -100,7 +100,37 @@ test_send_unreachable() {
 }
 run_test "flitnix send to unreachable host exits with code 3" test_send_unreachable
 
-# 7. Existing commands still work
+# 7. Security notice emitted when token is in CLI arguments
+test_send_security_notice() {
+    tmp_file=$(mktemp)
+    echo "test" > "${tmp_file}"
+    trap "rm -f ${tmp_file}" RETURN
+    set +e
+    output=$("${BIN_PATH}" send --to "http://127.0.0.1:49999/#dummy-token" "${tmp_file}" 2>&1)
+    set -e
+    echo "${output}" | grep -q "Pairing token passed via command-line arguments" || return 1
+}
+run_test "flitnix send emits security notice for token in CLI arguments" test_send_security_notice
+
+# 8. flitnix send --token - accepts token via standard input
+test_send_token_stdin() {
+    tmp_file=$(mktemp)
+    echo "test" > "${tmp_file}"
+    trap "rm -f ${tmp_file}" RETURN
+    set +e
+    output=$(echo "secret-token-from-stdin" | "${BIN_PATH}" send --to "http://127.0.0.1:49999" --token - "${tmp_file}" 2>&1)
+    status=$?
+    set -e
+    [ ${status} -eq 3 ] || return 1
+    # Notice should NOT be emitted when token was read from stdin
+    if echo "${output}" | grep -q "Pairing token passed via command-line arguments"; then
+        return 1
+    fi
+    echo "${output}" | grep -q "cannot reach recipient" || return 1
+}
+run_test "flitnix send --token - reads token from stdin without warning" test_send_token_stdin
+
+# 9. Existing commands still work
 test_existing_commands() {
     "${BIN_PATH}" version > /dev/null || return 1
     "${BIN_PATH}" --version > /dev/null || return 1
