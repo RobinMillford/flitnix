@@ -260,6 +260,7 @@ type UploadRequest struct {
 	Transferred      int64             `json:"transferred"`
 	Speed            float64           `json:"speed"`
 	SHA256           string            `json:"sha256,omitempty"`
+	PublishedPath    string            `json:"publishedPath,omitempty"`
 	Error            string            `json:"error,omitempty"`
 	FormValues       map[string]string `json:"formValues,omitempty"`
 	internalUploadID string
@@ -931,17 +932,17 @@ func (r *Room) StreamUpload(uploadID string, body io.Reader) (*transfer.ContentR
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if u.State == UploadCanceled {
-		return nil, fmt.Errorf("%w: upload canceled", transfer.ErrCanceled)
-	}
-
-	if r.State == RoomEnded || r.State == RoomExpired {
-		u.State = UploadCanceled
-		u.Error = "room ended during transfer"
-		return nil, ErrRoomEnded
-	}
-
 	if err != nil {
+		if errors.Is(err, transfer.ErrCanceled) || u.State == UploadCanceled {
+			u.State = UploadCanceled
+			u.Error = "upload canceled"
+			return nil, fmt.Errorf("%w: upload canceled", transfer.ErrCanceled)
+		}
+		if r.State == RoomEnded || r.State == RoomExpired {
+			u.State = UploadCanceled
+			u.Error = "room ended during transfer"
+			return nil, ErrRoomEnded
+		}
 		u.State = UploadFailed
 		u.Error = err.Error()
 		if u.ParticipantID != "" {
@@ -953,10 +954,12 @@ func (r *Room) StreamUpload(uploadID string, body io.Reader) (*transfer.ContentR
 		return nil, err
 	}
 
+	// File was committed to disk; preserve completed state
 	u.State = UploadCompleted
 	u.CompletedAt = time.Now()
 	u.Transferred = res.Written
 	u.SHA256 = res.SHA256
+	u.PublishedPath = res.Path
 
 	if u.ParticipantID != "" {
 		if p, ok := r.roster[u.ParticipantID]; ok {

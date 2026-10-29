@@ -136,10 +136,14 @@ func ExportRoomToZip(room *Room, destZipPath string) (*ExportResult, error) {
 		Submissions: make([]ManifestItem, 0, len(toExport)),
 	}
 
+	usedZipPaths := make(map[string]int)
 	var totalBytes int64
 	for _, item := range toExport {
-		guestDir := filepath.Join(roomFolder, fmt.Sprintf("%s-%s", item.guest.ID, item.guest.SafeSlug))
-		srcPath := filepath.Join(guestDir, item.up.FileName)
+		srcPath := item.up.PublishedPath
+		if srcPath == "" {
+			guestDir := filepath.Join(roomFolder, fmt.Sprintf("%s-%s", item.guest.ID, item.guest.SafeSlug))
+			srcPath = filepath.Join(guestDir, item.up.FileName)
+		}
 
 		info, err := os.Stat(srcPath)
 		if err != nil {
@@ -158,6 +162,16 @@ func ExportRoomToZip(room *Room, destZipPath string) (*ExportResult, error) {
 		}
 		folderName = sanitizeZipPath(folderName)
 		exportedEntryPath := sanitizeZipPath(filepath.Join(folderName, item.up.FileName))
+
+		// Resolve duplicate archive entry paths
+		if count, exists := usedZipPaths[exportedEntryPath]; exists {
+			usedZipPaths[exportedEntryPath] = count + 1
+			ext := filepath.Ext(exportedEntryPath)
+			baseNoExt := strings.TrimSuffix(exportedEntryPath, ext)
+			exportedEntryPath = fmt.Sprintf("%s (%d)%s", baseNoExt, count+1, ext)
+		} else {
+			usedZipPaths[exportedEntryPath] = 1
+		}
 
 		f, err := os.Open(srcPath)
 		if err != nil {

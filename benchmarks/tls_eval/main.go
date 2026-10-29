@@ -181,6 +181,8 @@ func generateReport(results []TLSBenchmarkResult) string {
 	buf.WriteString("Flitnix's core design goal is **zero-friction local transfers**: a user scans a desktop QR code with a standard mobile camera and immediately accesses the web interface without installing any application. This evaluation rigorously analyzes the performance, security, and user-experience trade-offs between Flitnix's current HTTP streaming transport and prototype local TLS (HTTPS).\n\n")
 
 	buf.WriteString("## 1. Measured Performance Comparison\n\n")
+	buf.WriteString("> [!NOTE]\n")
+	buf.WriteString("> **Methodology & Scope:** These numbers were collected in a controlled in-memory loopback microbenchmark using AES-128-GCM cipher suites on modern x86_64 hardware. They isolate the raw cryptographic framing and CPU symmetric encryption cost. This is NOT a physical Wi-Fi benchmark. On a physical Wi-Fi network (typically 25–80 MB/s), CPU encryption overhead is completely negligible compared to wireless channel limits. The primary differentiator and release gate consideration is user friction and browser security warnings, not network speed.\n\n")
 	buf.WriteString("| Transport Mode | Transfer Size | Handshake Latency | Transfer Duration | Throughput | Memory Allocations |\n")
 	buf.WriteString("| :--- | :---: | :---: | :---: | :---: | :---: |\n")
 	for _, r := range results {

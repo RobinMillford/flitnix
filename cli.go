@@ -188,6 +188,11 @@ func runServeCLI(args []string, stdout, stderr io.Writer) int {
 		transferURL := srv.URL() + "/#" + sess.Token()
 		qrTerm, _ := qr.Terminal(transferURL)
 		fmt.Fprintf(stdout, "Flitnix Headless Server Active\n")
+		if !strings.HasPrefix(*addr, "127.") && !strings.HasPrefix(*addr, "localhost") && !strings.HasPrefix(*addr, "[::1]") {
+			fmt.Fprintf(stdout, "Notice: Server is bound to %s (accessible across the local area network).\n", *addr)
+		} else {
+			fmt.Fprintf(stdout, "Notice: Server is bound to loopback %s (local testing only).\n", *addr)
+		}
 		fmt.Fprintf(stdout, "Serving on: %s\n", srv.URL())
 		fmt.Fprintf(stdout, "Receive dir: %s\n", store.Dir())
 		fmt.Fprintf(stdout, "Transfer URL: %s\n\n", transferURL)
@@ -196,8 +201,10 @@ func runServeCLI(args []string, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintf(stdout, "\nPress Ctrl+C to stop.\n")
 
-		if err := <-serving; err != nil {
-			fmt.Fprintf(stderr, "flitnix serve: %v\n", err)
+		serveErr := <-serving
+		sessMgr.Close()
+		if serveErr != nil {
+			fmt.Fprintf(stderr, "flitnix serve: %v\n", serveErr)
 			return 1
 		}
 		fmt.Fprintln(stdout, "flitnix serve: stopped cleanly")

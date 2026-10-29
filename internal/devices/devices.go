@@ -15,9 +15,11 @@ import (
 )
 
 var (
-	ErrDeviceNotFound  = errors.New("devices: device not found")
-	ErrInvalidKey      = errors.New("devices: invalid ed25519 public key")
+	ErrDeviceNotFound   = errors.New("devices: device not found")
+	ErrInvalidKey       = errors.New("devices: invalid ed25519 public key")
 	ErrInvalidSignature = errors.New("devices: invalid signature")
+	ErrReplayDetected   = errors.New("devices: authentication challenge replay detected")
+	ErrChallengeExpired = errors.New("devices: authentication challenge timestamp expired or clock skew")
 )
 
 // Device represents a cryptographically paired personal device.
@@ -32,20 +34,23 @@ type Device struct {
 
 // Store manages persistent trusted devices.
 type Store struct {
-	mu       sync.RWMutex
-	filePath string
-	devices  map[string]Device
+	mu         sync.RWMutex
+	filePath   string
+	devices    map[string]Device
+	noncesMu   sync.Mutex
+	usedNonces map[string]time.Time
 }
 
 // NewStore initializes a persistent Store from the specified JSON file path.
 func NewStore(filePath string) (*Store, error) {
 	s := &Store{
-		filePath: filePath,
-		devices:  make(map[string]Device),
+		filePath:   filePath,
+		devices:    make(map[string]Device),
+		usedNonces: make(map[string]time.Time),
 	}
 
 	if filePath != "" {
-		if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(filePath), 0o700); err != nil {
 			return nil, fmt.Errorf("devices: failed to create directory: %w", err)
 		}
 		if data, err := os.ReadFile(filePath); err == nil && len(data) > 0 {
@@ -208,6 +213,58 @@ func (s *Store) saveLocked() error {
 		return err
 	}
 	return os.Rename(tmpPath, s.filePath)
+}
+
+// ChallengePayload builds a deterministic challenge message for device authentication.
+func ChallengePayload(deviceID, nonce string, timestamp time.Time) []byte {
+	return []byte(fmt.Sprintf("flitnix-auth-v1:%s:%d:%s", deviceID, timestamp.Unix(), nonce))
+}
+
+// VerifyAuthChallenge verifies an Ed25519 signature over a time-bound challenge and prevents replay attacks.
+func (s *Store) VerifyAuthChallenge(deviceID, nonce string, timestamp time.Time, signatureHex string, maxDrift time.Duration) (bool, error) {
+	if nonce == "" {
+		return false, errors.New("devices: empty nonce")
+	}
+	if maxDrift <= 0 {
+		maxDrift = 2 * time.Minute
+	}
+
+	now := time.Now().UTC()
+	diff := now.Sub(timestamp)
+	if diff < 0 {
+		diff = -diff
+	}
+	if diff > maxDrift {
+		return false, ErrChallengeExpired
+	}
+
+	s.noncesMu.Lock()
+	if s.usedNonces == nil {
+		s.usedNonces = make(map[string]time.Time)
+	}
+	cutoff := now.Add(-2 * maxDrift)
+	for n, t := range s.usedNonces {
+		if t.Before(cutoff) {
+			delete(s.usedNonces, n)
+		}
+	}
+	if _, exists := s.usedNonces[nonce]; exists {
+		s.noncesMu.Unlock()
+		return false, ErrReplayDetected
+	}
+	s.noncesMu.Unlock()
+
+	payload := ChallengePayload(deviceID, nonce, timestamp)
+	valid, err := s.VerifySignature(deviceID, payload, signatureHex)
+	if err != nil || !valid {
+		return false, err
+	}
+
+	s.noncesMu.Lock()
+	s.usedNonces[nonce] = now
+	s.noncesMu.Unlock()
+
+	return true, nil
 }
 
 // GenerateKeyPair generates an Ed25519 keypair for pairing.
