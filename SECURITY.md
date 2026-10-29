@@ -17,8 +17,20 @@ Flitnix is designed for private, local network transfers between paired devices:
 
 1. **Local Binding**: The transfer server binds exclusively to the local network adapter selected for pairing. It does not open ports to the public internet or communicate with relay servers.
 2. **Ephemeral QR Pairing Tokens**: Pairing QR codes contain unique, ephemeral session tokens required to access the mobile web interface and API endpoints. Requests without a valid token are rejected.
-3. **Path Traversal Protection**: Upload endpoints strictly sanitize incoming filenames to prevent path traversal (`../`) attacks outside the configured download directory.
-4. **Publication Reservation**: File publication uses two-phase atomic state management to prevent race conditions from compromising local filesystem state.
+3. **Guest Drop Box Isolation**:
+   - Guest rooms require a room invitation capability secret embedded in the QR fragment.
+   - Upon joining, the host must approve the guest. Approved guests receive a random cryptographically secure token stored in an HttpOnly cookie and verified on API calls.
+   - Guest rooms are strictly **upload-only**; guests have zero access to download shared desktop files or view transfers from other guests.
+   - Destination isolation guarantees that each guest's uploads are placed in a dedicated, sanitized subfolder (`<Destination>/Flitnix Guest Drop/<Room-ID>/<Guest-ID>-<Guest-Name>/`).
+   - Host approval is enforced on every individual upload before file bytes are accepted.
+   - The host can revoke any individual guest or end the entire room at any time.
+4. **Quick Text & Link Bounding**:
+   - Message payloads are strictly bounded to 64 KiB.
+   - Payloads are validated as valid UTF-8.
+   - Text is treated as plain text without HTML interpretation. Safe URL detection strictly permits `http://` and `https://` protocols, preventing `javascript:` or data URI injection.
+5. **Path Traversal Protection**: Upload endpoints strictly sanitize incoming filenames to prevent path traversal (`../`) attacks outside the configured download directory.
+6. **Publication Reservation**: File publication uses two-phase atomic state management to prevent race conditions from compromising local filesystem state.
+7. **Local Plaintext HTTP Notice**: Transfers occur over plain HTTP across your trusted local network or hotspot. Connect only devices you control.
 
 ---
 
