@@ -1,0 +1,103 @@
+# Flitnix Architecture
+
+Flitnix is an offline-first desktop application designed for private, high-speed local file transfer between computers and mobile devices without cloud intermediaries, external accounts, or mobile app installations.
+
+---
+
+## 1. High-Level System Overview
+
+```
++-------------------------------------------------------------------------+
+|                              FLITNIX DESKTOP                            |
+|                                                                         |
+|  +-------------------------------------------------------------------+  |
+|  |                 Frontend (Svelte 5 + TypeScript)                  |  |
+|  |  [Personal Transfer]   [Guest Drop Box]   [Connection Doctor]     |  |
+|  +-------------------------------------------------------------------+  |
+|                                  | (Wails v2 IPC Bindings)              |
+|                                  v                                      |
+|  +-------------------------------------------------------------------+  |
+|  |                        Desktop Backend (Go)                       |  |
+|  |  - app.go (Wails Service Layer)                                   |  |
+|  |  - internal/netenv (Network Adapter & Wi-Fi SSID Detection)       |  |
+|  |  - internal/transfer (Two-Phase Publication Engine)               |  |
+|  |  - internal/guest (Multi-Guest Drop Box Room Manager)             |  |
+|  |  - internal/doctor (7-Point Connection Diagnostics Engine)        |  |
+|  |  - internal/textmsg (Bounded Plaintext & Link Store)              |  |
+|  |  - internal/server (Local HTTP Server, Route Handlers, Assets)    |  |
+|  +-------------------------------------------------------------------+  |
++-------------------------------------------------------------------------+
+                                   |
+                         Local Wi-Fi or Hotspot
+                                   |
+         +-------------------------+-------------------------+
+         |                                                   |
+         v                                                   v
++-------------------------------+           +-------------------------------+
+|     Personal Phone Browser    |           |    Guest Phone(s) Browser     |
+|   (/ endpoint with Bearer)    |           |    (/guest with Capability)   |
+|  - Full bidirectional files   |           |  - Upload-only file drop      |
+|  - Real-time text & links     |           |  - Per-guest isolated folder  |
+|  - Real-time speed & ETA      |           |  - Progress, speed & ETA      |
++-------------------------------+           +-------------------------------+
+```
+
+---
+
+## 2. Subsystems
+
+### 2.1 Personal Transfer Subsystem (`internal/transfer`, `internal/session`)
+- **Single-Pairing Ephemeral Token**: Scanning the desktop pairing QR loads the mobile web app with a 43-character URL-safe base64 token in the fragment (`#token`). The fragment is immediately stripped from the address bar, and the token is supplied strictly via the HTTP `Authorization: Bearer <token>` header.
+- **Two-Phase Publication Reservation**: When receiving files from a phone, incoming content streams into temporary staging `.part` files. Upon stream completion, the server checks whether the file transfer was withdrawn by the client; if not, it atomically renames the staging file into the destination folder. If a cancellation races with a successful commit, completed files are safely kept and never corrupted or left in limbo.
+- **Batch Transfer Contract**: Handles multi-file and folder hierarchy streaming with atomic item status updates, avoiding orphaned temporary files.
+
+### 2.2 Guest Drop Box Subsystem (`internal/guest`)
+The Guest Drop Box turns Flitnix into an upload-only collection room for classrooms, meetings, events, or workshops.
+
+1. **Room Lifecycle**: Rooms transition deterministically through `Starting` → `Active` → `Expiring` (last 5 minutes) → `Expired` → `Ended`. A background manager sweeps expired rooms.
+2. **Capability Secret**: The room invite URL embeds a random 32-character capability secret in the URL fragment (`/guest#<secret>`).
+3. **Dual Approval Gate**:
+   - **Guest Gate**: When a guest enters their nickname and submits a join request (`POST /guest-api/join`), they enter the host's **Pending Guests** approval queue. The host must explicitly approve or decline the guest.
+   - **Upload Gate**: For every file a guest queues, a declaration (`POST /guest-api/uploads`) is created in the host's **Upload Inbox**. The host reviews the filename, size, and guest nickname before authorizing the upload.
+4. **Per-Guest Token & Cookie**: Approved guests receive a random cryptographically secure token set as an `HttpOnly`, `SameSite=Lax` cookie (`flitnix_guest_token`) and mirrored in memory for `Authorization: Bearer` fallback.
+5. **Destination Isolation**:
+   ```
+   <Chosen Destination>/
+     └── Flitnix Guest Drop/
+         └── <Room Date and ID>/
+             ├── <Guest1 ID>-<Sanitized Nickname>/
+             │   └── presentation.pdf
+             └── <Guest2 ID>-<Sanitized Nickname>/
+                 └── photo.jpg
+   ```
+   Each guest has an isolated `transfer.Store` scoped to their private directory. Directory creation is lazy (created only upon first approved write), preventing empty folder clutter from idle or rejected guests.
+6. **Strict Upload-Only Policy**: Guest endpoints only support upload declarations, upload status polling, and chunked PUT streaming. Guests have zero access to desktop shared files or other guests' files.
+
+### 2.3 Connection Doctor Subsystem (`internal/doctor`)
+The Connection Doctor diagnoses why a mobile device cannot connect to the desktop. It runs 7 automated checks:
+
+| Check ID | Diagnostic Test | Failure / Warning Condition | Remediation Guidance |
+| :--- | :--- | :--- | :--- |
+| `adapter_presence` | Network interfaces | No active network adapter found | Connect to a Wi-Fi network or Ethernet cable. |
+| `ipv4_address` | IPv4 configuration | No valid, non-loopback IPv4 address | Ensure DHCP assigned an IP address or configure static IP. |
+| `port_available` | Port 43821 availability | Port 43821 already bound by another process | Close conflicting application or restart Flitnix. |
+| `server_health` | Local HTTP health probe | `GET http://127.0.0.1:43821/healthz` fails | Restart session or verify firewall rules. |
+| `connection_medium`| Wi-Fi SSID / Hotspot | Connected over public/enterprise Wi-Fi | Warn about client isolation; advise using mobile hotspot. |
+| `host_reachability`| Host address binding | Bound address not in valid CIDR | Select matching network adapter from dropdown. |
+| `multihomed_routing`| Multiple network adapters | Multiple active adapters (e.g. VPN + Wi-Fi) | Choose adapter matching the phone's Wi-Fi network. |
+
+Reports categorize overall health as `PASS`, `WARNING`, or `FAIL` and provide one-click triggers for **Recheck** and **Regenerate QR**.
+
+### 2.4 Quick Text & Link Sharing Subsystem (`internal/textmsg`)
+- **Bounded In-Memory Store**: Enforces a strict 64 KiB maximum payload size per message.
+- **UTF-8 Validation**: Rejects invalid UTF-8 byte sequences.
+- **XSS & Injection Protection**: Renders content strictly as plain text without HTML parsing.
+- **Protocol-Strict Link Detection**: Scans messages for URLs; links are accepted only if they strictly begin with `http://` or `https://` (blocking `javascript:`, `data:`, or `file:` schemes). Links open safely with `rel="noopener noreferrer"`.
+- **Bidirectional Synchronization**: Supported on both desktop and mobile web interfaces with instantaneous clipboard copying.
+
+### 2.5 Transfer Progress & Recovery Subsystem
+- **Smoothed Speed Calculation**: Uses an Exponential Moving Average (EMA) with rolling deltas ($\alpha = 0.3$) over a minimum 250ms sampling window to filter out TCP burst noise:
+  $$\text{speed}_{\text{new}} = 0.7 \cdot \text{speed}_{\text{prev}} + 0.3 \cdot \text{speed}_{\text{instant}}$$
+- **ETA Computation**: Calculates accurate remaining time estimates:
+  $$\text{ETA} = \frac{\text{Bytes}_{\text{total}} - \text{Bytes}_{\text{transferred}}}{\text{speed}_{\text{smoothed}}}$$
+- **Safe Zero-Byte Retry**: Failed transfers cleanly reset transferred bytes to 0, tear down partial staging resources, and restart streaming from the beginning, preventing byte alignment corruption.
