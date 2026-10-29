@@ -78,7 +78,7 @@ func TestStore_SaveAndGetRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	fromDisk := reloaded.Get()
-	if fromDisk.Theme != ThemeDark || fromDisk.DownloadDir != customDir || !fromDisk.AutoStartSession {
+	if fromDisk.Theme != ThemeDark || fromDisk.Locale != "en" || fromDisk.DownloadDir != customDir || !fromDisk.AutoStartSession {
 		t.Fatalf("reloaded settings do not match saved state: %+v", fromDisk)
 	}
 
@@ -166,7 +166,7 @@ func TestStore_Reset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reset failed: %v", err)
 	}
-	if resetted.Theme != ThemeSystem || resetted.AutoStartSession {
+	if resetted.Theme != ThemeSystem || resetted.Locale != "system" || resetted.AutoStartSession {
 		t.Fatalf("reset did not restore defaults: %+v", resetted)
 	}
 }

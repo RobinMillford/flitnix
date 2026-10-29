@@ -1,5 +1,5 @@
 export namespace audit {
-
+	
 	export class Entry {
 	    id: string;
 	    // Go type: time
@@ -13,11 +13,11 @@ export namespace audit {
 	    sha256?: string;
 	    outcome: string;
 	    details?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new Entry(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -32,7 +32,7 @@ export namespace audit {
 	        this.outcome = source["outcome"];
 	        this.details = source["details"];
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -62,11 +62,11 @@ export namespace audit {
 	    until?: any;
 	    limit?: number;
 	    offset?: number;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new Filter(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.roomId = source["roomId"];
@@ -78,7 +78,7 @@ export namespace audit {
 	        this.limit = source["limit"];
 	        this.offset = source["offset"];
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -101,7 +101,7 @@ export namespace audit {
 }
 
 export namespace devices {
-
+	
 	export class Device {
 	    id: string;
 	    name: string;
@@ -111,11 +111,11 @@ export namespace devices {
 	    // Go type: time
 	    lastSeen: any;
 	    autoApprove: boolean;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new Device(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -125,7 +125,7 @@ export namespace devices {
 	        this.lastSeen = this.convertValues(source["lastSeen"], null);
 	        this.autoApprove = source["autoApprove"];
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -148,18 +148,18 @@ export namespace devices {
 }
 
 export namespace doctor {
-
+	
 	export class DiagnosticItem {
 	    id: string;
 	    title: string;
 	    status: string;
 	    message: string;
 	    remediation?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new DiagnosticItem(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -175,11 +175,11 @@ export namespace doctor {
 	    timestamp: any;
 	    summary: string;
 	    items: DiagnosticItem[];
-
+	
 	    static createFrom(source: any = {}) {
 	        return new DiagnosticReport(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.overallStatus = source["overallStatus"];
@@ -187,7 +187,7 @@ export namespace doctor {
 	        this.summary = source["summary"];
 	        this.items = this.convertValues(source["items"], DiagnosticItem);
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -210,7 +210,7 @@ export namespace doctor {
 }
 
 export namespace guest {
-
+	
 	export class ExpectedParticipant {
 	    id: string;
 	    identifier: string;
@@ -220,11 +220,11 @@ export namespace guest {
 	    submissionCount: number;
 	    // Go type: time
 	    lastActivity?: any;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new ExpectedParticipant(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -235,7 +235,7 @@ export namespace guest {
 	        this.submissionCount = source["submissionCount"];
 	        this.lastActivity = this.convertValues(source["lastActivity"], null);
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -258,11 +258,11 @@ export namespace guest {
 	    targetPath: string;
 	    totalFiles: number;
 	    totalBytes: number;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new ExportResult(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.targetPath = source["targetPath"];
@@ -277,11 +277,11 @@ export namespace guest {
 	    required: boolean;
 	    options?: string[];
 	    maxLength?: number;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new FormField(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -300,11 +300,11 @@ export namespace guest {
 	    durationMinutes: number;
 	    collisionPolicy: string;
 	    formSchema?: FormField[];
-
+	
 	    static createFrom(source: any = {}) {
 	        return new Preset(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -315,7 +315,7 @@ export namespace guest {
 	        this.collisionPolicy = source["collisionPolicy"];
 	        this.formSchema = this.convertValues(source["formSchema"], FormField);
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -349,11 +349,11 @@ export namespace guest {
 	    createdAt: any;
 	    // Go type: time
 	    updatedAt: any;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new Template(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -369,7 +369,7 @@ export namespace guest {
 	        this.createdAt = this.convertValues(source["createdAt"], null);
 	        this.updatedAt = this.convertValues(source["updatedAt"], null);
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -392,21 +392,21 @@ export namespace guest {
 }
 
 export namespace main {
-
+	
 	export class AuditListResult {
 	    entries: audit.Entry[];
 	    total: number;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new AuditListResult(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.entries = this.convertValues(source["entries"], audit.Entry);
 	        this.total = source["total"];
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -436,11 +436,11 @@ export namespace main {
 	    state: string;
 	    sha256?: string;
 	    error?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new BatchItemView(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -473,11 +473,11 @@ export namespace main {
 	    // Go type: time
 	    completedAt?: any;
 	    error?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new BatchView(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -495,7 +495,7 @@ export namespace main {
 	        this.completedAt = this.convertValues(source["completedAt"], null);
 	        this.error = source["error"];
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -531,11 +531,11 @@ export namespace main {
 	    speed: number;
 	    sha256?: string;
 	    reason?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new DownloadView(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -552,7 +552,7 @@ export namespace main {
 	        this.sha256 = source["sha256"];
 	        this.reason = source["reason"];
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -580,11 +580,11 @@ export namespace main {
 	    collisionPolicy: string;
 	    formSchema?: guest.FormField[];
 	    expectedParticipants?: guest.ExpectedParticipant[];
-
+	
 	    static createFrom(source: any = {}) {
 	        return new GuestRoomConfigView(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.destinationDir = source["destinationDir"];
@@ -596,7 +596,7 @@ export namespace main {
 	        this.formSchema = this.convertValues(source["formSchema"], guest.FormField);
 	        this.expectedParticipants = this.convertValues(source["expectedParticipants"], guest.ExpectedParticipant);
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -631,11 +631,11 @@ export namespace main {
 	    sha256?: string;
 	    error?: string;
 	    formValues?: Record<string, string>;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new GuestUploadView(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -652,7 +652,7 @@ export namespace main {
 	        this.error = source["error"];
 	        this.formValues = source["formValues"];
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -678,11 +678,11 @@ export namespace main {
 	    state: string;
 	    // Go type: time
 	    createdAt: any;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new GuestView(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -691,7 +691,7 @@ export namespace main {
 	        this.state = source["state"];
 	        this.createdAt = this.convertValues(source["createdAt"], null);
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -732,11 +732,11 @@ export namespace main {
 	    formSchema?: guest.FormField[];
 	    roster?: guest.ExpectedParticipant[];
 	    hasRoster: boolean;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new GuestRoomView(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -758,7 +758,7 @@ export namespace main {
 	        this.roster = this.convertValues(source["roster"], guest.ExpectedParticipant);
 	        this.hasRoster = source["hasRoster"];
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -785,11 +785,11 @@ export namespace main {
 	    completedUploads: GuestUploadView[];
 	    recentUploads: GuestUploadView[];
 	    roster?: guest.ExpectedParticipant[];
-
+	
 	    static createFrom(source: any = {}) {
 	        return new GuestRoomStateView(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.room = this.convertValues(source["room"], GuestRoomView);
@@ -800,7 +800,7 @@ export namespace main {
 	        this.recentUploads = this.convertValues(source["recentUploads"], GuestUploadView);
 	        this.roster = this.convertValues(source["roster"], guest.ExpectedParticipant);
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -819,9 +819,9 @@ export namespace main {
 		    return a;
 		}
 	}
-
-
-
+	
+	
+	
 	export class SessionView {
 	    key: string;
 	    // Go type: time
@@ -832,11 +832,11 @@ export namespace main {
 	    token?: string;
 	    interfaceName?: string;
 	    address?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new SessionView(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.key = source["key"];
@@ -847,7 +847,7 @@ export namespace main {
 	        this.interfaceName = source["interfaceName"];
 	        this.address = source["address"];
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -874,11 +874,11 @@ export namespace main {
 	    effectiveDir: string;
 	    autoStartSession: boolean;
 	    preferredInterface: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new SettingsView(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.version = source["version"];
@@ -896,11 +896,11 @@ export namespace main {
 	    size: number;
 	    // Go type: time
 	    created: any;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new SharedFileView(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -908,7 +908,7 @@ export namespace main {
 	        this.size = source["size"];
 	        this.created = this.convertValues(source["created"], null);
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -936,11 +936,11 @@ export namespace main {
 	    totalBytes: number;
 	    // Go type: time
 	    created: any;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new SharedSourceView(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -951,7 +951,7 @@ export namespace main {
 	        this.totalBytes = source["totalBytes"];
 	        this.created = this.convertValues(source["created"], null);
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -978,11 +978,11 @@ export namespace main {
 	    url?: string;
 	    // Go type: time
 	    createdAt: any;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new TextMessageView(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -992,7 +992,7 @@ export namespace main {
 	        this.url = source["url"];
 	        this.createdAt = this.convertValues(source["createdAt"], null);
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -1022,11 +1022,11 @@ export namespace main {
 	    speed: number;
 	    sha256?: string;
 	    reason?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new UploadView(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -1039,7 +1039,7 @@ export namespace main {
 	        this.sha256 = source["sha256"];
 	        this.reason = source["reason"];
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -1062,7 +1062,7 @@ export namespace main {
 }
 
 export namespace netenv {
-
+	
 	export class View {
 	    name: string;
 	    ip: string;
@@ -1077,11 +1077,11 @@ export namespace netenv {
 	    connectionName: string;
 	    friendlyNameSource: string;
 	    active: boolean;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new View(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.name = source["name"];

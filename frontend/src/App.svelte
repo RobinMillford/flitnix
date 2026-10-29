@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { focusTrap } from './focusTrap'
+  import { t, setLocale, tFn } from './i18n'
   import type { main, netenv, doctor, guest, audit, devices } from '../wailsjs/go/models'
   import { OnFileDrop, OnFileDropOff } from '../wailsjs/runtime/runtime.js'
   import logoUrl from './assets/images/logo-universal.png'
@@ -199,7 +200,7 @@
 
       const currentPendingTotal = (pending?.length ?? 0) + (pendingBatches?.length ?? 0) + (guestRoomState?.pendingUploads?.length ?? 0)
       if (previousPendingTotal >= 0 && currentPendingTotal > previousPendingTotal) {
-        liveAnnouncement = 'New transfer request awaiting approval.'
+        liveAnnouncement = tFn('announcements.newTransfer')
       }
       previousPendingTotal = currentPendingTotal
 
@@ -274,6 +275,7 @@
       const v = await StartSession(selectedIp)
       activeInterfaceName = v.interfaceName ?? ''; activeAddress = v.address ?? ''
       await fetchQR(v.key)
+      liveAnnouncement = tFn('announcements.sessionStarted')
       refresh()
     } catch (err) {
       report(err)
@@ -284,7 +286,11 @@
 
   function endSession(key: string): void {
     const k = `end:${key}`; if (isBusy(k)) return
-    setBusy(k, true); EndSession(key).then(refresh).catch((e) => report(e, k)).finally(() => setBusy(k, false))
+    setBusy(k, true)
+    EndSession(key).then(() => {
+      liveAnnouncement = tFn('announcements.sessionEnded')
+      refresh()
+    }).catch((e) => report(e, k)).finally(() => setBusy(k, false))
   }
 
   function decide(u: main.UploadView, approve: boolean): void {
@@ -292,7 +298,7 @@
     setBusy(k, true)
     const call = approve ? ApproveUpload(u.id) : RejectUpload(u.id)
     call.then(() => {
-      liveAnnouncement = approve ? `Upload approved for ${u.name || 'file'}.` : `Upload rejected for ${u.name || 'file'}.`
+      liveAnnouncement = approve ? tFn('announcements.uploadApproved', { name: u.name || 'file' }) : tFn('announcements.uploadRejected', { name: u.name || 'file' })
       refresh()
     }).catch((e) => report(e, k)).finally(() => setBusy(k, false))
   }
@@ -302,7 +308,7 @@
     setBusy(k, true)
     const call = approve ? ApproveBatch(batch.id) : RejectBatch(batch.id)
     call.then(() => {
-      liveAnnouncement = approve ? `Batch transfer approved for ${batch.rootName || 'batch'}.` : `Batch transfer rejected for ${batch.rootName || 'batch'}.`
+      liveAnnouncement = approve ? tFn('announcements.batchApproved', { name: batch.rootName || 'batch' }) : tFn('announcements.batchRejected', { name: batch.rootName || 'batch' })
       refresh()
     }).catch((e) => report(e, k)).finally(() => setBusy(k, false))
   }
@@ -311,7 +317,7 @@
     const k = `cancel-batch:${batch.id}`; if (isBusy(k)) return
     setBusy(k, true)
     CancelBatch(batch.id).then(() => {
-      liveAnnouncement = `Batch transfer canceled for ${batch.rootName || 'batch'}.`
+      liveAnnouncement = tFn('announcements.batchCanceled', { name: batch.rootName || 'batch' })
       refresh()
     }).catch((e) => report(e, k)).finally(() => setBusy(k, false))
   }
@@ -320,7 +326,7 @@
     const k = `cancel:${id}`; if (isBusy(k)) return
     setBusy(k, true)
     CancelUpload(id).then(() => {
-      liveAnnouncement = 'Upload transfer canceled.'
+      liveAnnouncement = tFn('announcements.uploadCanceled')
       refresh()
     }).catch((e) => report(e, k)).finally(() => setBusy(k, false))
   }
@@ -344,7 +350,7 @@
   function handleDrop(_x: number, _y: number, paths: string[]): void {
     if (!paths.length) return
     AddDroppedSources(paths).then(() => {
-      liveAnnouncement = `${paths.length} item${paths.length === 1 ? '' : 's'} added for sharing.`
+      liveAnnouncement = tFn('announcements.itemsAdded', { count: paths.length })
       refresh()
     }).catch(report)
   }
@@ -635,6 +641,7 @@
       const s = await GetSettings()
       settingsState = s
       applyTheme(s.theme)
+      if (s.locale) setLocale(s.locale)
       if (s.preferredInterface && interfaces.length > 0 && !selectedIp) {
         const match = interfaces.find((item) => item.name === s.preferredInterface && (item.family === 'IPv4' || !item.family)) ?? interfaces.find((item) => item.name === s.preferredInterface)
         if (match) selectedIp = match.ip
@@ -671,6 +678,7 @@
     try {
       await SaveSettings(settingsState)
       applyTheme(settingsState.theme)
+      if (settingsState.locale) setLocale(settingsState.locale)
       const reloaded = await GetSettings()
       settingsState = reloaded
       receiveDir = reloaded.effectiveDir
@@ -690,6 +698,7 @@
       const defaults = await ResetSettings()
       settingsState = defaults
       applyTheme(defaults.theme)
+      setLocale(defaults.locale || 'system')
       receiveDir = defaults.effectiveDir
       settingsSavedAlert = 'Settings restored to defaults.'
       setTimeout(() => { settingsSavedAlert = '' }, 3000)
@@ -718,6 +727,7 @@
     setBusy(k, true)
     try {
       await ApproveGuest(id)
+      liveAnnouncement = tFn('announcements.guestApproved')
       refresh()
     } catch (err) {
       report(err, k)
@@ -732,6 +742,7 @@
     setBusy(k, true)
     try {
       await RejectGuest(id)
+      liveAnnouncement = tFn('announcements.guestRejected')
       refresh()
     } catch (err) {
       report(err, k)
@@ -746,6 +757,7 @@
     setBusy(k, true)
     try {
       await RevokeGuest(id)
+      liveAnnouncement = tFn('announcements.guestRevoked')
       refresh()
     } catch (err) {
       report(err, k)
@@ -760,7 +772,7 @@
     setBusy(k, true)
     try {
       await ApproveGuestUpload(id)
-      liveAnnouncement = 'Guest upload approved.'
+      liveAnnouncement = tFn('announcements.guestUploadApproved')
       refresh()
     } catch (err) {
       report(err, k)
@@ -775,7 +787,7 @@
     setBusy(k, true)
     try {
       await RejectGuestUpload(id)
-      liveAnnouncement = 'Guest upload rejected.'
+      liveAnnouncement = tFn('announcements.guestUploadRejected')
       refresh()
     } catch (err) {
       report(err, k)
@@ -828,12 +840,12 @@
 <main class="shell">
   <header class="topbar">
     <div>
-      <div class="brand"><img class="brand-logo" src={logoUrl} alt="Flitnix"/><h1>Flitnix</h1></div>
-      <p>Fast, private file transfer over your local network.</p>
+      <div class="brand"><img class="brand-logo" src={logoUrl} alt="Flitnix"/><h1>{$t('app.title')}</h1></div>
+      <p>{$t('app.tagline')}</p>
     </div>
     <div class="topbar-actions" style="display: flex; align-items: center; gap: 12px;">
       <div class:online={sessions.length > 0} class="status">
-        <span class="status-dot"></span>{sessions.length > 0 ? 'Session active' : 'Session inactive'}
+        <span class="status-dot"></span>{sessions.length > 0 ? $t('app.sessionActive') : $t('app.sessionInactive')}
       </div>
     </div>
     <div class="sr-only" role="status" aria-live="polite" aria-atomic="true">
@@ -842,8 +854,8 @@
   </header>
 
   <!-- Navigation bar with Tabs and Connection Doctor launcher -->
-  <nav class="nav-bar" aria-label="Main Navigation">
-    <div class="tab-list" role="tablist" aria-label="Main Navigation Tabs" aria-orientation="horizontal" tabindex="-1" on:keydown={handleTabKeydown}>
+  <nav class="nav-bar" aria-label={$t('nav.tabsLabel')}>
+    <div class="tab-list" role="tablist" aria-label={$t('nav.tabsLabel')} aria-orientation="horizontal" tabindex="-1" on:keydown={handleTabKeydown}>
       <button
         type="button"
         id="tab-personal"
@@ -855,7 +867,7 @@
         class:active={activeTab === 'personal'}
         on:click={() => switchTab('personal')}
       >
-        <span>Personal Transfer</span>
+        <span>{$t('nav.personal')}</span>
         {#if pending.length + pendingBatches.length > 0}
           <span class="tab-badge">{pending.length + pendingBatches.length}</span>
         {/if}
@@ -872,7 +884,7 @@
         class:active={activeTab === 'guest'}
         on:click={() => switchTab('guest')}
       >
-        <span>Guest Drop Box</span>
+        <span>{$t('nav.guest')}</span>
         {#if guestPendingCount > 0}
           <span class="tab-badge">{guestPendingCount}</span>
         {/if}
@@ -889,7 +901,7 @@
         class:active={activeTab === 'templates'}
         on:click={() => switchTab('templates')}
       >
-        <span>Templates</span>
+        <span>{$t('nav.templates')}</span>
       </button>
 
       <button
@@ -903,7 +915,7 @@
         class:active={activeTab === 'audit'}
         on:click={() => switchTab('audit')}
       >
-        <span>Audit History</span>
+        <span>{$t('nav.audit')}</span>
       </button>
 
       <button
@@ -917,7 +929,7 @@
         class:active={activeTab === 'devices'}
         on:click={() => switchTab('devices')}
       >
-        <span>Trusted Devices</span>
+        <span>{$t('nav.devices')}</span>
         {#if trustedDevices.length > 0}
           <span class="tab-badge">{trustedDevices.length}</span>
         {/if}
@@ -934,7 +946,7 @@
         class:active={activeTab === 'settings'}
         on:click={() => switchTab('settings')}
       >
-        <span>Settings</span>
+        <span>{$t('nav.settings')}</span>
       </button>
     </div>
 
@@ -942,14 +954,14 @@
       type="button"
       class="doctor-launch-btn"
       on:click={openDoctor}
-      aria-label="Open Connection Doctor, status: {doctorReport?.overallStatus || 'ready'}"
+      aria-label={$t('nav.doctorLabel', { status: doctorReport?.overallStatus || 'ready' })}
     >
       <span class="doctor-dot" class:warn={doctorReport?.overallStatus === 'WARNING'} class:fail={doctorReport?.overallStatus === 'FAIL'}></span>
-      <span>Connection Doctor</span>
+      <span>{$t('nav.doctor')}</span>
     </button>
   </nav>
 
-  {#if errorText}<div class="alert" role="alert"><span>{errorText}</span><button on:click={() => errorText = ''} aria-label="Dismiss">×</button></div>{/if}
+  {#if errorText}<div class="alert" role="alert"><span>{errorText}</span><button on:click={() => errorText = ''} aria-label={$t('app.dismiss')}>×</button></div>{/if}
 
   <!-- Connection Doctor Modal -->
   {#if doctorOpen}
@@ -968,14 +980,14 @@
         <div class="doctor-header">
           <div style="display: flex; align-items: center; gap: 10px;">
             <span class="doctor-dot" class:warn={doctorReport?.overallStatus === 'WARNING'} class:fail={doctorReport?.overallStatus === 'FAIL'}></span>
-            <h2 id="doctor-title">Connection Doctor</h2>
+            <h2 id="doctor-title">{$t('doctor.title')}</h2>
           </div>
-          <button class="button ghost small" on:click={() => doctorOpen = false} aria-label="Close dialog">✕</button>
+          <button class="button ghost small" on:click={() => doctorOpen = false} aria-label={$t('app.close')}>✕</button>
         </div>
 
         <div class="doctor-body">
           {#if doctorLoading}
-            <div class="empty" style="text-align: center;">Scanning network interfaces, port 43821, and local connectivity…</div>
+            <div class="empty" style="text-align: center;">{$t('doctor.scanning')}</div>
           {:else if doctorError}
             <div class="alert"><span>{doctorError}</span></div>
           {:else if doctorReport}
@@ -993,7 +1005,7 @@
                 <p class="doctor-check-msg">{item.message}</p>
                 {#if item.remediation}
                   <div class="doctor-remediation">
-                    <strong>Recommended Action:</strong> {item.remediation}
+                    <strong>{$t('doctor.recommendedAction')}</strong> {item.remediation}
                   </div>
                 {/if}
               </div>
@@ -1004,13 +1016,13 @@
         <div class="doctor-footer">
           <div style="display: flex; gap: 8px;">
             <button class="button secondary small" on:click={runDoctor} disabled={doctorLoading}>
-              {doctorLoading ? 'Checking…' : 'Run Diagnostics'}
+              {doctorLoading ? $t('doctor.checking') : $t('doctor.runDiagnostics')}
             </button>
             <button class="button ghost small" on:click={regenerateQRAction} disabled={!sessions.length && (!guestRoomState || !guestRoomState.room)}>
-              Regenerate QR
+              {$t('doctor.regenerateQR')}
             </button>
           </div>
-          <button class="button ghost small" on:click={() => doctorOpen = false}>Close</button>
+          <button class="button ghost small" on:click={() => doctorOpen = false}>{$t('app.close')}</button>
         </div>
       </div>
     </div>
@@ -1020,31 +1032,31 @@
   {#if activeTab === 'personal'}
     <div id="panel-personal" role="tabpanel" aria-labelledby="tab-personal" tabindex="0">
       <section class="connection panel">
-      <div class="section-heading"><div><span class="eyebrow connection-eyebrow"><span class="network-glyph" aria-hidden="true">⌁</span> Connection</span><h2>Ready to pair</h2></div><span class="pill">{sessions.length ? 'Session active' : 'Ready'}</span></div>
+      <div class="section-heading"><div><span class="eyebrow connection-eyebrow"><span class="network-glyph" aria-hidden="true">⌁</span> {$t('connection.eyebrow')}</span><h2>{$t('connection.readyToPair')}</h2></div><span class="pill">{sessions.length ? $t('app.sessionActive') : $t('connection.ready')}</span></div>
       <div class="connection-grid">
         <div>
-          <span class="connection-label">Current network</span>
+          <span class="connection-label">{$t('connection.currentNetwork')}</span>
           {#if currentNetwork}
             <div class="network-identity">
               <span class="network-dot" aria-hidden="true"></span>
               <div><strong>{currentNetwork.friendlyName || `${currentNetwork.type || 'Network'} · Name unavailable`}</strong><span>{currentNetwork.type || 'Network'} · Connected{currentNetwork.friendlyNameSource === 'Connection profile' ? ' · Profile name' : ''}</span></div>
             </div>
             <button class="button ghost change-network" on:click={() => networkChooserOpen = !networkChooserOpen}>
-              {networkChooserOpen ? 'Hide networks' : 'Change network'}
+              {networkChooserOpen ? $t('connection.hideNetworks') : $t('connection.changeNetwork')}
             </button>
           {:else if loadingIfaces}
-            <div class="network-identity"><span class="network-dot unavailable"></span><div><strong>Looking for a network…</strong><span>Scanning available connections</span></div></div>
+            <div class="network-identity"><span class="network-dot unavailable"></span><div><strong>{$t('connection.scanning')}</strong><span>{$t('connection.scanningSub')}</span></div></div>
           {:else if interfaces.length > 1}
-            <div class="network-identity"><span class="network-dot unavailable"></span><div><strong>Choose a network</strong><span>Multiple connections are available</span></div></div>
-            <button class="button ghost change-network" on:click={() => networkChooserOpen = true}>Change network</button>
+            <div class="network-identity"><span class="network-dot unavailable"></span><div><strong>{$t('connection.chooseNetwork')}</strong><span>{$t('connection.multipleConnections')}</span></div></div>
+            <button class="button ghost change-network" on:click={() => networkChooserOpen = true}>{$t('connection.changeNetwork')}</button>
           {:else}
-            <div class="network-identity"><span class="network-dot unavailable"></span><div><strong>No network available</strong><span>Connect to Wi-Fi or Ethernet to continue</span></div></div>
+            <div class="network-identity"><span class="network-dot unavailable"></span><div><strong>{$t('connection.noNetwork')}</strong><span>{$t('connection.connectPrompt')}</span></div></div>
           {/if}
           {#if networkChooserOpen || interfaces.length > 1}
             <div class="network-picker">
-              <label for="interface">Choose a network</label>
-              <select id="interface" bind:value={selectedIp} aria-label="Choose a network">
-                <option value="" disabled>Select a network…</option>
+              <label for="interface">{$t('connection.chooseNetwork')}</label>
+              <select id="interface" bind:value={selectedIp} aria-label={$t('connection.chooseNetwork')}>
+                <option value="" disabled>{$t('connection.selectNetworkPlaceholder')}</option>
                 {#each interfaces as itf (itf.ip)}
                   <option value={itf.ip} disabled={itf.suitableForQR === false}>
                     {itf.friendlyName || `${itf.type || 'Network'} · Name unavailable`} · {itf.family || 'IPv4'} ({itf.ip})
@@ -1052,23 +1064,23 @@
                   </option>
                 {/each}
               </select>
-              <button class="button ghost" on:click={refreshNetwork} disabled={loadingIfaces}>{loadingIfaces ? 'Refreshing…' : 'Rescan'}</button>
+              <button class="button ghost" on:click={refreshNetwork} disabled={loadingIfaces}>{loadingIfaces ? $t('connection.refreshing') : $t('connection.rescan')}</button>
             </div>
           {/if}
           {#if currentNetwork}
             <details class="network-details">
-              <summary>Network details</summary>
+              <summary>{$t('connection.details')}</summary>
               <dl>
-                <div><dt>Interface</dt><dd>{currentNetwork.name || 'Unavailable'}</dd></div>
-                <div><dt>Address family</dt><dd>{currentNetwork.family || 'IPv4'}</dd></div>
-                <div><dt>IP address</dt><dd>{currentNetwork.ip || 'Unavailable'}</dd></div>
-                <div><dt>Prefix / CIDR</dt><dd>{currentNetwork.cidr || 'Unavailable'}</dd></div>
-                <div><dt>Connection type</dt><dd>{currentNetwork.type || 'Network'}</dd></div>
-                <div><dt>Profile name</dt><dd>{currentNetwork.connectionName || 'Unavailable'}</dd></div>
-                <div><dt>Suitable for QR</dt><dd>{currentNetwork.suitableForQR !== false ? 'Yes (LAN reachable)' : 'No'}</dd></div>
-                {#if currentNetwork.warning}<div><dt>Notice</dt><dd>{currentNetwork.warning}</dd></div>{/if}
-                <div><dt>Name source</dt><dd>{currentNetwork.friendlyNameSource || 'Unavailable'}</dd></div>
-                <div><dt>Metadata</dt><dd>{currentNetwork.metadataAvailable ? 'Available' : 'Name unavailable'}</dd></div>
+                <div><dt>{$t('connection.interface')}</dt><dd>{currentNetwork.name || 'Unavailable'}</dd></div>
+                <div><dt>{$t('connection.addressFamily')}</dt><dd>{currentNetwork.family || 'IPv4'}</dd></div>
+                <div><dt>{$t('connection.ipAddress')}</dt><dd>{currentNetwork.ip || 'Unavailable'}</dd></div>
+                <div><dt>{$t('connection.prefixCidr')}</dt><dd>{currentNetwork.cidr || 'Unavailable'}</dd></div>
+                <div><dt>{$t('connection.connectionType')}</dt><dd>{currentNetwork.type || 'Network'}</dd></div>
+                <div><dt>{$t('connection.profileName')}</dt><dd>{currentNetwork.connectionName || 'Unavailable'}</dd></div>
+                <div><dt>{$t('connection.suitableForQR')}</dt><dd>{currentNetwork.suitableForQR !== false ? $t('connection.suitableYes') : $t('connection.suitableNo')}</dd></div>
+                {#if currentNetwork.warning}<div><dt>{$t('connection.notice')}</dt><dd>{currentNetwork.warning}</dd></div>{/if}
+                <div><dt>{$t('connection.nameSource')}</dt><dd>{currentNetwork.friendlyNameSource || 'Unavailable'}</dd></div>
+                <div><dt>{$t('connection.metadata')}</dt><dd>{currentNetwork.metadataAvailable ? 'Available' : 'Name unavailable'}</dd></div>
               </dl>
             </details>
           {/if}
@@ -1077,41 +1089,41 @@
         {#if sessions.length && qrUrl}
           <div class="pairing">
             <img class="qr" src={qrUrl} alt="Pairing QR code" />
-            <div><strong>Scan to connect</strong><p class="muted">http://{hostPort()}</p><p class="muted">Incoming files always ask for approval.</p>
-              <div class="button-row"><button class="button ghost" on:click={() => fetchQR(qrKey)}>Regenerate</button><button class="button danger" on:click={() => endSession(qrKey)} disabled={isBusy(`end:${qrKey}`)}>Stop session</button></div>
+            <div><strong>{$t('connection.scanToConnect')}</strong><p class="muted">http://{hostPort()}</p><p class="muted">{$t('connection.incomingApprovalNotice')}</p>
+              <div class="button-row"><button class="button ghost" on:click={() => fetchQR(qrKey)}>{$t('connection.regenerate')}</button><button class="button danger" on:click={() => endSession(qrKey)} disabled={isBusy(`end:${qrKey}`)}>{$t('connection.stopSession')}</button></div>
             </div>
           </div>
-        {:else if sessions.length}<p class="muted">{qrError || 'Preparing the pairing QR…'}</p>{/if}
+        {:else if sessions.length}<p class="muted">{qrError || $t('connection.preparingQR')}</p>{/if}
       </div>
-      {#if !sessions.length}<div class="empty compact">Choose the interface connected to your phone, then start a session.</div>{/if}
-      <div class="button-row"><button class="button primary" on:click={startSession} disabled={starting || (interfaces.length > 1 && !selectedIp)}>{starting ? 'Starting…' : 'Start session'}</button></div>
-      <div class="notice">⚠ Plain HTTP is used on your trusted hotspot or LAN. Connect only devices you control.</div>
+      {#if !sessions.length}<div class="empty compact">{$t('connection.chooseInterfacePrompt')}</div>{/if}
+      <div class="button-row"><button class="button primary" on:click={startSession} disabled={starting || (interfaces.length > 1 && !selectedIp)}>{starting ? $t('connection.starting') : $t('connection.startSession')}</button></div>
+      <div class="notice">{$t('connection.plainHttpNotice')}</div>
     </section>
 
     <div class="workflow-grid">
       <section class="panel workflow drop-target">
-        <div class="section-heading"><div><span class="eyebrow accent">Send to phone</span><h2>Shared files</h2></div><span class="count">{files.length}</span></div>
-        <p class="muted">Files listed here are available for direct download from the phone.</p>
+        <div class="section-heading"><div><span class="eyebrow accent">{$t('workflow.eyebrow')}</span><h2>{$t('workflow.sharedFiles')}</h2></div><span class="count">{files.length}</span></div>
+        <p class="muted">{$t('workflow.sharedFilesDesc')}</p>
         {#each files as f (f.id)}
-          <div class="file-row"><div class="file-icon">↗</div><div class="grow"><strong>{f.name}</strong><span>{formatBytes(f.size)}</span></div><button class="button danger small" on:click={() => revoke(f.id)} disabled={isBusy(`revoke:${f.id}`)}>Remove</button></div>
-        {:else}<div class="empty">No files shared yet. Choose files or drop them here.</div>{/each}
-        <div class="button-row"><button class="button secondary" on:click={pickFiles} disabled={picking || pickingFolder}>{picking ? 'Opening picker…' : '+ Choose files'}</button><button class="button ghost" on:click={pickFolder} disabled={picking || pickingFolder}>{pickingFolder ? 'Reading folder…' : '+ Choose folder'}</button></div>
-        <div class="drop-hint">Drop files or folders here. Folders are prepared privately for a future archive download.</div>
+          <div class="file-row"><div class="file-icon">↗</div><div class="grow"><strong>{f.name}</strong><span>{formatBytes(f.size)}</span></div><button class="button danger small" on:click={() => revoke(f.id)} disabled={isBusy(`revoke:${f.id}`)}>{$t('workflow.remove')}</button></div>
+        {:else}<div class="empty">{$t('workflow.noSharedFiles')}</div>{/each}
+        <div class="button-row"><button class="button secondary" on:click={pickFiles} disabled={picking || pickingFolder}>{picking ? $t('workflow.openingPicker') : $t('workflow.chooseFiles')}</button><button class="button ghost" on:click={pickFolder} disabled={picking || pickingFolder}>{pickingFolder ? $t('workflow.readingFolder') : $t('workflow.chooseFolder')}</button></div>
+        <div class="drop-hint">{$t('workflow.dropHint')}</div>
         {#each sources.filter((source) => source.kind === 'folder') as source (source.id)}
-          <div class="file-row source-row"><div class="file-icon">▣</div><div class="grow"><strong>{source.rootName || source.name}</strong><span>Folder · {source.itemCount} files · {formatBytes(source.totalBytes)} · streamed ZIP available from the phone</span></div><button class="button danger small" on:click={() => revokeSource(source.id)} disabled={isBusy(`revoke-source:${source.id}`)}>Remove</button></div>
+          <div class="file-row source-row"><div class="file-icon">▣</div><div class="grow"><strong>{source.rootName || source.name}</strong><span>{$t('workflow.folderItemSummary', { count: source.itemCount, size: formatBytes(source.totalBytes) })}</span></div><button class="button danger small" on:click={() => revokeSource(source.id)} disabled={isBusy(`revoke-source:${source.id}`)}>{$t('workflow.remove')}</button></div>
         {/each}
       </section>
 
       <section class="panel workflow">
-        <div class="section-heading"><div><span class="eyebrow blue">Receive from phone</span><h2>Approval inbox</h2></div><span class="count">{pending.length + pendingBatches.length}</span></div>
-        <p class="muted">Review each request before any file contents reach this computer.</p>
+        <div class="section-heading"><div><span class="eyebrow blue">{$t('workflow.receiveEyebrow')}</span><h2>{$t('workflow.inboxTitle')}</h2></div><span class="count">{pending.length + pendingBatches.length}</span></div>
+        <p class="muted">{$t('workflow.inboxDesc')}</p>
         {#each pending as u (u.id)}
-          <div class="request-row"><div class="file-icon">↙</div><div class="grow"><strong>{u.name}</strong><span>{formatBytes(u.size)} · waiting for approval</span></div><div class="button-row"><button class="button primary small" on:click={() => decide(u, true)} disabled={isBusy(`approve:${u.id}`)}>Allow</button><button class="button danger small" on:click={() => decide(u, false)} disabled={isBusy(`reject:${u.id}`)}>Deny</button></div></div>
+          <div class="request-row"><div class="file-icon">↙</div><div class="grow"><strong>{u.name}</strong><span>{formatBytes(u.size)} · {$t('workflow.waitingApproval')}</span></div><div class="button-row"><button class="button primary small" on:click={() => decide(u, true)} disabled={isBusy(`approve:${u.id}`)}>{$t('workflow.allow')}</button><button class="button danger small" on:click={() => decide(u, false)} disabled={isBusy(`reject:${u.id}`)}>{$t('workflow.deny')}</button></div></div>
         {/each}
         {#each pendingBatches as b (b.id)}
-          <div class="request-row"><div class="file-icon">↙</div><div class="grow"><strong>Batch · {batchName(b)}</strong><span>{formatBytes(b.declaredTotalBytes)} · waiting for approval</span><small>{b.items.map((item) => item.relativePath || item.displayName).join(', ')}</small></div><div class="button-row"><button class="button primary small" on:click={() => decideBatch(b, true)} disabled={isBusy(`approve-batch:${b.id}`)}>Allow batch</button><button class="button danger small" on:click={() => decideBatch(b, false)} disabled={isBusy(`reject-batch:${b.id}`)}>Deny</button><button class="text-button" on:click={() => cancelBatch(b)} disabled={isBusy(`cancel-batch:${b.id}`)}>Cancel</button></div></div>
+          <div class="request-row"><div class="file-icon">↙</div><div class="grow"><strong>Batch · {batchName(b)}</strong><span>{formatBytes(b.declaredTotalBytes)} · {$t('workflow.waitingApproval')}</span><small>{b.items.map((item) => item.relativePath || item.displayName).join(', ')}</small></div><div class="button-row"><button class="button primary small" on:click={() => decideBatch(b, true)} disabled={isBusy(`approve-batch:${b.id}`)}>{$t('workflow.allowBatch')}</button><button class="button danger small" on:click={() => decideBatch(b, false)} disabled={isBusy(`reject-batch:${b.id}`)}>{$t('workflow.deny')}</button><button class="text-button" on:click={() => cancelBatch(b)} disabled={isBusy(`cancel-batch:${b.id}`)}>{$t('workflow.cancel')}</button></div></div>
         {/each}
-        {#if !pending.length && !pendingBatches.length}<div class="empty">No files are waiting for approval.</div>{/if}
+        {#if !pending.length && !pendingBatches.length}<div class="empty">{$t('workflow.noPending')}</div>{/if}
       </section>
     </div>
 
@@ -1119,11 +1131,11 @@
     <section class="panel">
       <div class="section-heading">
         <div>
-          <span class="eyebrow">Quick Text & Links</span>
-          <h2>Instant bidirectional notes</h2>
+          <span class="eyebrow">{$t('quickText.eyebrow')}</span>
+          <h2>{$t('quickText.notesTitle')}</h2>
         </div>
         {#if textMessages.length > 0}
-          <button class="button ghost small" on:click={clearTextAction}>Clear History</button>
+          <button class="button ghost small" on:click={clearTextAction}>{$t('quickText.clearHistory')}</button>
         {/if}
       </div>
 
@@ -1131,27 +1143,27 @@
         <div class="text-compose-row">
           <textarea
             class="text-textarea"
-            placeholder="Type text or paste a link (http/https) to share with paired phone…"
+            placeholder={$t('quickText.placeholder')}
             bind:value={textInput}
             maxlength="65536"
             disabled={!sessions.length}
           ></textarea>
           <div class="text-compose-footer">
-            <span class="muted" style="font-size: 12.5px;">{textInput.length} / 65536 characters</span>
+            <span class="muted" style="font-size: 12.5px;">{$t('quickText.charsLimit', { count: textInput.length })}</span>
             <button
               class="button primary small"
               on:click={sendTextAction}
               disabled={!textInput.trim() || sendingText || !sessions.length}
             >
-              {sendingText ? 'Sending…' : 'Send Text'}
+              {sendingText ? $t('quickText.sending') : $t('quickText.send')}
             </button>
           </div>
         </div>
 
         {#if !sessions.length}
-          <div class="empty compact">Start a pairing session above to share text and links with your phone.</div>
+          <div class="empty compact">{$t('quickText.noSessionHint')}</div>
         {:else if textMessages.length === 0}
-          <div class="empty compact">No text messages shared in this session yet.</div>
+          <div class="empty compact">{$t('quickText.noMessages')}</div>
         {:else}
           <div class="text-feed">
             {#each textMessages as msg (msg.id)}
@@ -1162,9 +1174,9 @@
                 </div>
                 <div class="text-content-body">{msg.content}</div>
                 <div class="text-card-actions">
-                  <button class="button ghost small" on:click={() => copyTextToClipboard(msg.content)}>Copy</button>
+                  <button class="button ghost small" on:click={() => copyTextToClipboard(msg.content)}>{$t('quickText.copy')}</button>
                   {#if msg.isLink && msg.url}
-                    <button class="button secondary small" on:click={() => window.open(msg.url, '_blank', 'noopener,noreferrer')}>Open Link ↗</button>
+                    <button class="button secondary small" on:click={() => window.open(msg.url, '_blank', 'noopener,noreferrer')}>{$t('quickText.openLink')}</button>
                   {/if}
                 </div>
               </div>
@@ -1176,7 +1188,7 @@
 
     <!-- Live Telemetry -->
     <section class="panel">
-      <div class="section-heading"><div><span class="eyebrow">Live telemetry</span><h2>Active transfers</h2></div><span class="pill">{uploads.filter(activeUpload).length + downloads.filter(activeDownload).length + batches.filter(activeBatch).length} active</span></div>
+      <div class="section-heading"><div><span class="eyebrow">{$t('telemetry.eyebrow')}</span><h2>{$t('telemetry.activeTransfers')}</h2></div><span class="pill">{$t('telemetry.activeCount', { count: uploads.filter(activeUpload).length + downloads.filter(activeDownload).length + batches.filter(activeBatch).length })}</span></div>
       {#each uploads.filter(activeUpload) as u (u.id)}
         <div class="transfer">
           <div class="transfer-head">
@@ -1197,7 +1209,7 @@
           {#if u.state === 'uploading'}<div class="bar"><i style={`width:${percent(u.uploaded, u.size)}%`}></i></div>{/if}
           <div class="transfer-foot">
             <span>{u.state === 'approved' ? 'Approved — waiting for phone' : u.state === 'pending' ? 'Awaiting approval' : 'Receiving bytes'}</span>
-            {#if ['approved', 'uploading'].includes(u.state)}<button class="text-button" on:click={() => cancelUpload(u.id)}>Cancel</button>{/if}
+            {#if ['approved', 'uploading'].includes(u.state)}<button class="text-button" on:click={() => cancelUpload(u.id)}>{$t('telemetry.cancel')}</button>{/if}
           </div>
         </div>
       {/each}
@@ -1211,7 +1223,7 @@
           <div class="bar"><i style={`width:${percent(b.transferredBytes, b.declaredTotalBytes)}%`}></i></div>
           <div class="transfer-foot">
             <span>{currentItem(b) ? `Receiving ${currentItem(b)?.relativePath || currentItem(b)?.displayName}` : 'Approved — waiting for the phone to send the next file'}</span>
-            <button class="text-button" on:click={() => cancelBatch(b)} disabled={isBusy(`cancel-batch:${b.id}`)}>Cancel</button>
+            <button class="text-button" on:click={() => cancelBatch(b)} disabled={isBusy(`cancel-batch:${b.id}`)}>{$t('telemetry.cancel')}</button>
           </div>
         </div>
       {/each}
@@ -1239,13 +1251,13 @@
       {/each}
 
       {#if !uploads.some(activeUpload) && !downloads.some(activeDownload) && !batches.some(activeBatch)}
-        <div class="empty">No active transfers. Start a download or approve an incoming file to see live progress.</div>
+        <div class="empty">{$t('telemetry.noActiveTransfers')}</div>
       {/if}
     </section>
 
     <!-- History -->
     <section class="panel history">
-      <div class="section-heading"><div><span class="eyebrow">History</span><h2>Recent transfers</h2></div><span class="muted">Session history</span></div>
+      <div class="section-heading"><div><span class="eyebrow">{$t('history.eyebrow')}</span><h2>{$t('history.title')}</h2></div><span class="muted">{$t('history.sessionHistory')}</span></div>
       {#each batches.filter(finishedBatch).slice(-12).reverse() as b (b.id)}
         <div class="history-row">
           <span class="history-icon">↙</span>
@@ -1299,7 +1311,7 @@
       {/each}
 
       {#if !batches.some(finishedBatch) && !uploads.some((u) => !activeUpload(u)) && !downloads.some((d) => !activeDownload(d))}
-        <div class="empty">No completed transfers in this session.</div>
+        <div class="empty">{$t('history.noCompleted')}</div>
       {/if}
       </section>
     </div>
@@ -1695,17 +1707,17 @@
     <div class="panel" id="panel-templates" role="tabpanel" aria-labelledby="tab-templates" tabindex="0">
       <div class="section-heading">
         <div>
-          <span class="eyebrow accent">Reusable Schemas</span>
-          <h2>Collection Templates & Presets</h2>
+          <span class="eyebrow accent">{$t('templates.eyebrow')}</span>
+          <h2>{$t('templates.title')}</h2>
         </div>
         <span class="count">{templates.length}</span>
       </div>
       <p class="muted">
-        Save room settings, submission forms, and rosters as templates to quickly launch recurring collection drop boxes.
+        {$t('templates.desc')}
       </p>
 
       {#if loadingTemplates}
-        <div class="empty">Loading saved templates…</div>
+        <div class="empty">{$t('templates.loading')}</div>
       {:else if templates.length > 0}
         <div class="template-grid">
           {#each templates as tpl (tpl.id)}
@@ -1714,32 +1726,32 @@
                 <h3>{tpl.name}</h3>
                 <p>{tpl.description || 'No description provided.'}</p>
                 <div style="margin-top: 10px; display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-secondary);">
-                  <span>Duration: <strong>{tpl.durationMinutes} min</strong></span>
-                  <span>Collision Policy: <strong>{tpl.collisionPolicy === 'reject' ? 'Strict Reject' : 'Preserve Both'}</strong></span>
+                  <span>{$t('templates.duration', { duration: tpl.durationMinutes })}</span>
+                  <span>{$t('templates.collision', { policy: tpl.collisionPolicy === 'reject' ? 'Strict Reject' : 'Preserve Both' })}</span>
                   {#if tpl.formSchema && tpl.formSchema.length > 0}
-                    <span>Form Fields: <strong>{tpl.formSchema.length} configured</strong></span>
+                    <span>{$t('templates.fieldsCount', { count: tpl.formSchema.length })}</span>
                   {/if}
                   {#if tpl.expectedParticipants && tpl.expectedParticipants.length > 0}
-                    <span>Roster: <strong>{tpl.expectedParticipants.length} participants</strong></span>
+                    <span>{$t('templates.rosterCount', { count: tpl.expectedParticipants.length })}</span>
                   {/if}
                 </div>
               </div>
               <div class="button-row" style="margin-top: 12px;">
                 <button class="button primary small" on:click={() => startFromTemplateAction(tpl.id)}>
-                  Start Room
+                  {$t('templates.startRoom')}
                 </button>
                 <button class="button secondary small" on:click={() => duplicateTemplateAction(tpl.id, tpl.name)}>
-                  Duplicate
+                  {$t('templates.duplicate')}
                 </button>
                 <button class="button ghost small" style="color: var(--danger);" on:click={() => deleteTemplateAction(tpl.id)}>
-                  Delete
+                  {$t('templates.delete')}
                 </button>
               </div>
             </div>
           {/each}
         </div>
       {:else}
-        <div class="empty">No saved templates yet.</div>
+        <div class="empty">{$t('templates.noTemplates')}</div>
       {/if}
     </div>
 
@@ -1748,25 +1760,25 @@
     <div class="panel" id="panel-audit" role="tabpanel" aria-labelledby="tab-audit" tabindex="0">
       <div class="section-heading">
         <div>
-          <span class="eyebrow accent">Searchable Local Audit Log</span>
-          <h2>Transfer & Collection History</h2>
+          <span class="eyebrow accent">{$t('audit.eyebrow')}</span>
+          <h2>{$t('audit.title')}</h2>
         </div>
         <div style="display: flex; gap: 10px; align-items: center;">
           <button class="button secondary small" on:click={loadAuditLogs} disabled={auditLoading}>
-            {auditLoading ? 'Loading…' : 'Refresh'}
+            {auditLoading ? $t('audit.loading') : $t('audit.refresh')}
           </button>
           <button class="button danger small" on:click={clearAuditAction}>
-            Clear History
+            {$t('audit.clearHistory')}
           </button>
         </div>
       </div>
       <p class="muted">
-        Append-only local JSONL audit trail. Network tokens and private transfer contents are never recorded.
+        {$t('audit.desc')}
       </p>
 
       <div style="display: flex; gap: 12px; margin: 14px 0;" class="form-input-row">
         <select class="text-input" bind:value={auditFilterType} on:change={loadAuditLogs} style="max-width: 200px;">
-          <option value="">All Event Types</option>
+          <option value="">{$t('audit.allEvents')}</option>
           <option value="room_created">Room Created</option>
           <option value="room_ended">Room Ended</option>
           <option value="guest_joined">Guest Joined</option>
@@ -1788,7 +1800,7 @@
       </div>
 
       {#if auditLoading}
-        <div class="empty">Loading audit events…</div>
+        <div class="empty">{$t('audit.loading')}</div>
       {:else if auditEntries.length > 0}
         <div class="table-wrap">
           <table class="data-table">
@@ -1824,7 +1836,7 @@
           </table>
         </div>
       {:else}
-        <div class="empty">No audit events match the current filter.</div>
+        <div class="empty">{$t('audit.noEvents')}</div>
       {/if}
     </div>
 
@@ -1833,8 +1845,8 @@
     <div class="panel" id="panel-devices" role="tabpanel" aria-labelledby="tab-devices" tabindex="0">
       <div class="section-heading">
         <div>
-          <span class="eyebrow">Security & Pairing</span>
-          <h2>Cryptographically Trusted Devices</h2>
+          <span class="eyebrow">{$t('devices.eyebrow')}</span>
+          <h2>{$t('devices.title')}</h2>
         </div>
         <button
           type="button"
@@ -1842,26 +1854,26 @@
           on:click={loadTrustedDevices}
           disabled={loadingDevices}
         >
-          {loadingDevices ? 'Refreshing…' : '↻ Refresh'}
+          {loadingDevices ? $t('devices.refreshing') : $t('devices.refresh')}
         </button>
       </div>
       <p class="muted">
-        Devices paired via cryptographic Ed25519 keys. Paired devices can be granted automatic approval to bypass the manual transfer prompt.
+        {$t('devices.desc')}
       </p>
 
       {#if loadingDevices}
-        <div class="empty">Loading paired devices…</div>
+        <div class="empty">{$t('devices.refreshing')}</div>
       {:else if trustedDevices.length > 0}
         <div class="table-wrap" style="margin-top: 16px;">
           <table class="data-table">
             <thead>
               <tr>
-                <th>Device Name</th>
-                <th>Fingerprint (ID)</th>
-                <th>Paired At</th>
-                <th>Last Seen</th>
-                <th>Auto-Approve</th>
-                <th style="text-align: right;">Actions</th>
+                <th>{$t('devices.deviceName')}</th>
+                <th>{$t('devices.fingerprint')}</th>
+                <th>{$t('devices.pairedAt')}</th>
+                <th>{$t('devices.lastSeen')}</th>
+                <th>{$t('devices.autoApprove')}</th>
+                <th style="text-align: right;">{$t('devices.actions')}</th>
               </tr>
             </thead>
             <tbody>
@@ -1878,7 +1890,7 @@
                       style="font-size: 11px; padding: 2px 8px;"
                       on:click={() => toggleDeviceAutoApprove(dev.id, dev.autoApprove)}
                     >
-                      {dev.autoApprove ? '✓ Enabled' : '○ Disabled'}
+                      {dev.autoApprove ? $t('devices.enabled') : $t('devices.disabled')}
                     </button>
                   </td>
                   <td style="text-align: right;">
@@ -1888,7 +1900,7 @@
                       style="color: var(--danger-color, #e06c75);"
                       on:click={() => removeDeviceAction(dev.id)}
                     >
-                      Revoke
+                      {$t('devices.revoke')}
                     </button>
                   </td>
                 </tr>
@@ -1897,7 +1909,7 @@
           </table>
         </div>
       {:else}
-        <div class="empty">No trusted devices paired yet. Devices paired through connection authentication will appear here.</div>
+        <div class="empty">{$t('devices.noDevices')}</div>
       {/if}
     </div>
 
@@ -1906,8 +1918,8 @@
     <div class="panel" id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" tabindex="0">
       <div class="section-heading">
         <div>
-          <span class="eyebrow accent">Preferences</span>
-          <h2>Application Settings</h2>
+          <span class="eyebrow accent">{$t('settings.eyebrow')}</span>
+          <h2>{$t('settings.title')}</h2>
         </div>
       </div>
 
@@ -1920,16 +1932,16 @@
       {#if settingsError}
         <div class="alert" style="background: var(--danger-bg); border: 1px solid var(--danger-border); color: var(--danger-text); margin-bottom: 16px;" role="alert">
           <span>{settingsError}</span>
-          <button type="button" on:click={() => settingsError = ''} aria-label="Dismiss">×</button>
+          <button type="button" on:click={() => settingsError = ''} aria-label={$t('app.dismiss')}>×</button>
         </div>
       {/if}
 
       <div style="display: flex; flex-direction: column; gap: 24px;">
         <!-- Download Directory -->
         <div>
-          <label for="download-dir-input" class="connection-label">Receive Directory</label>
+          <label for="download-dir-input" class="connection-label">{$t('settings.receiveDir')}</label>
           <p style="margin: 0 0 10px; font-size: 13px; color: var(--text-secondary);">
-            Incoming files and folders from paired devices and guests are saved here.
+            {$t('settings.receiveDirDesc')}
           </p>
           <div class="form-input-row" style="margin-bottom: 8px;">
             <input
@@ -1941,15 +1953,15 @@
               style="font-family: monospace; font-size: 13px;"
             />
             <button type="button" class="button" on:click={handleSelectDownloadDir}>
-              Browse…
+              {$t('settings.browse')}
             </button>
             <button type="button" class="button ghost" on:click={handleOpenDownloadFolder}>
-              Open Folder
+              {$t('settings.openFolder')}
             </button>
           </div>
           <div style="display: flex; gap: 12px; align-items: center;">
             <span style="font-size: 12px; color: var(--text-tertiary);">
-              Current effective path: <code>{settingsState.effectiveDir || receiveDir}</code>
+              {$t('settings.currentPath', { path: settingsState.effectiveDir || receiveDir })}
             </span>
             {#if settingsState.downloadDir}
               <button
@@ -1958,7 +1970,7 @@
                 style="padding: 2px 8px; font-size: 11px;"
                 on:click={() => settingsState.downloadDir = ''}
               >
-                Reset to Default
+                {$t('settings.resetDefault')}
               </button>
             {/if}
           </div>
@@ -1966,28 +1978,48 @@
 
         <!-- Appearance / Theme -->
         <div style="border-top: 1px solid var(--line); padding-top: 20px;">
-          <label for="theme-select" class="connection-label">Appearance & Theme</label>
+          <label for="theme-select" class="connection-label">{$t('settings.appearance')}</label>
           <p style="margin: 0 0 10px; font-size: 13px; color: var(--text-secondary);">
-            Choose the color scheme for the Flitnix user interface.
+            {$t('settings.appearanceDesc')}
           </p>
           <div style="max-width: 280px;">
             <select id="theme-select" class="text-input" bind:value={settingsState.theme} style="width: 100%;">
-              <option value="system">System Default (Automatic)</option>
-              <option value="dark">Dark Theme</option>
-              <option value="light">Light Theme</option>
+              <option value="system">{$t('settings.themeSystem')}</option>
+              <option value="dark">{$t('settings.themeDark')}</option>
+              <option value="light">{$t('settings.themeLight')}</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Language / Locale -->
+        <div style="border-top: 1px solid var(--line); padding-top: 20px;">
+          <label for="language-select" class="connection-label">{$t('settings.language')}</label>
+          <p style="margin: 0 0 10px; font-size: 13px; color: var(--text-secondary);">
+            {$t('settings.languageDesc')}
+          </p>
+          <div style="max-width: 280px;">
+            <select
+              id="language-select"
+              class="text-input"
+              bind:value={settingsState.locale}
+              on:change={() => setLocale(settingsState.locale)}
+              style="width: 100%;"
+            >
+              <option value="system">{$t('settings.langSystem')}</option>
+              <option value="en">{$t('settings.langEn')}</option>
             </select>
           </div>
         </div>
 
         <!-- Preferred Network Interface -->
         <div style="border-top: 1px solid var(--line); padding-top: 20px;">
-          <label for="iface-select" class="connection-label">Preferred Network Interface</label>
+          <label for="iface-select" class="connection-label">{$t('settings.preferredInterface')}</label>
           <p style="margin: 0 0 10px; font-size: 13px; color: var(--text-secondary);">
-            Choose the network adapter used for pairing and transfers, or let Flitnix select automatically.
+            {$t('settings.preferredInterfaceDesc')}
           </p>
           <div style="max-width: 380px;">
             <select id="iface-select" class="text-input" bind:value={settingsState.preferredInterface} style="width: 100%;">
-              <option value="">Automatic Selection (Default)</option>
+              <option value="">{$t('settings.autoInterface')}</option>
               {#each uniqueInterfaces as iface (iface.name)}
                 <option value={iface.name}>
                   {iface.name} ({iface.ip}{iface.family ? ` · ${iface.family}` : ''})
@@ -1995,7 +2027,7 @@
               {/each}
               {#if settingsState.preferredInterface && !uniqueInterfaces.some(i => i.name === settingsState.preferredInterface)}
                 <option value={settingsState.preferredInterface}>
-                  {settingsState.preferredInterface} (Currently unavailable)
+                  {$t('settings.ifaceUnavailable', { name: settingsState.preferredInterface })}
                 </option>
               {/if}
             </select>
@@ -2004,7 +2036,7 @@
 
         <!-- Session Automation -->
         <div style="border-top: 1px solid var(--line); padding-top: 20px;">
-          <span class="connection-label">Session Automation</span>
+          <span class="connection-label">{$t('settings.sessionAutomation')}</span>
           <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; margin-top: 8px;">
             <input
               type="checkbox"
@@ -2012,11 +2044,11 @@
               style="width: 18px; height: 18px; cursor: pointer;"
             />
             <span style="font-size: 14px; color: var(--text-main); font-weight: 600;">
-              Automatically start pairing session on launch
+              {$t('settings.autoStartSession')}
             </span>
           </label>
           <p style="margin: 6px 0 0 28px; font-size: 13px; color: var(--text-secondary);">
-            When enabled, Flitnix prepares a connection immediately when opened so devices can pair right away.
+            {$t('settings.autoStartSessionDesc')}
           </p>
         </div>
 
@@ -2028,7 +2060,7 @@
             disabled={savingSettings}
             on:click={handleSaveSettings}
           >
-            {savingSettings ? 'Saving…' : 'Save Preferences'}
+            {savingSettings ? $t('settings.saving') : $t('settings.savePreferences')}
           </button>
 
           <button
@@ -2037,7 +2069,7 @@
             style="color: var(--text-secondary);"
             on:click={handleResetSettings}
           >
-            Reset to Defaults
+            {$t('settings.resetDefaults')}
           </button>
         </div>
       </div>
@@ -2045,6 +2077,6 @@
   {/if}
 
   {#if receiveDir}
-    <footer>Received files are saved to <code>{receiveDir}</code>. Paths stay on this computer.</footer>
+    <footer>{$t('footer.savedPath', { path: receiveDir })}</footer>
   {/if}
 </main>

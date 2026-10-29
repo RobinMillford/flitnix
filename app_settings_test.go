@@ -271,3 +271,57 @@ func TestAppSettings_ActiveTransferGuards(t *testing.T) {
 		t.Fatalf("ResetSettings failed after transfer completion: %v", err)
 	}
 }
+
+func TestAppSettings_LocalePersistenceAndRestart(t *testing.T) {
+	tempConfig := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tempConfig)
+
+	// Phase 1: First application run
+	app1, err := NewApp()
+	if err != nil {
+		t.Fatalf("NewApp (instance 1): %v", err)
+	}
+	app1.startup(context.Background())
+
+	initial := app1.GetSettings()
+	if initial.Locale != "system" {
+		t.Fatalf("initial Locale = %q, want 'system'", initial.Locale)
+	}
+
+	// Change locale to "en" and save preferences
+	toSave := initial
+	toSave.Locale = "en"
+	if err := app1.SaveSettings(toSave); err != nil {
+		t.Fatalf("SaveSettings: %v", err)
+	}
+
+	saved := app1.GetSettings()
+	if saved.Locale != "en" {
+		t.Fatalf("saved Locale = %q, want 'en'", saved.Locale)
+	}
+
+	// Shutdown first instance (simulates application exit)
+	app1.shutdown(context.Background())
+
+	// Phase 2: Second application run (simulates restart)
+	app2, err := NewApp()
+	if err != nil {
+		t.Fatalf("NewApp (instance 2 / restart): %v", err)
+	}
+	app2.startup(context.Background())
+	defer app2.shutdown(context.Background())
+
+	restored := app2.GetSettings()
+	if restored.Locale != "en" {
+		t.Fatalf("restored Locale after restart = %q, want 'en'", restored.Locale)
+	}
+
+	// Resetting preferences restores default locale "system"
+	reset, err := app2.ResetSettings()
+	if err != nil {
+		t.Fatalf("ResetSettings: %v", err)
+	}
+	if reset.Locale != "system" {
+		t.Fatalf("reset Locale = %q, want 'system'", reset.Locale)
+	}
+}
