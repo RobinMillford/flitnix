@@ -143,6 +143,7 @@ type Services struct {
 	GuestManager *guest.Manager
 	TextMessages *textmsg.Store
 	Audit        *audit.Store
+	OnPhoneContact func(source string)
 
 	// Diagnose, when non-nil, receives low-volume transfer diagnostics at
 	// meaningful transitions: one line when an item is claimed, milestones
@@ -152,6 +153,12 @@ type Services struct {
 	// no session keys beyond a bounded prefix, no paths or file names.
 	// A nil hook disables diagnostics (page-only and test servers).
 	Diagnose func(format string, args ...any)
+}
+
+func (s *Services) RecordContact(source string) {
+	if s != nil && s.OnPhoneContact != nil {
+		s.OnPhoneContact(source)
+	}
 }
 
 // normalize fills in zero-value defaults.

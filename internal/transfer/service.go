@@ -165,6 +165,7 @@ type Upload struct {
 	Reason    string  // non-empty on failed/canceled records: why the transfer ended
 	Uploaded  int64   // bytes actually received so far (live)
 	Speed     float64 // measured bytes per second while receiving
+	SHA256    string  // lowercase hex SHA-256 digest of published bytes
 	Published string  // absolute final path; populated exactly in the completed state
 
 	// BatchLinked is true for a record that belongs to a transfer batch. The
@@ -215,6 +216,7 @@ type upload struct {
 	uploaded  atomic.Int64
 	sink      contentSink // non-nil while a content stream owns the record
 	published string
+	sha256    string
 	speed     float64
 	lastAt    time.Time
 	lastBytes int64
@@ -254,6 +256,7 @@ func (u *upload) snapshotLocked() Upload {
 		Reason:    u.reason,
 		Uploaded:  u.uploaded.Load(),
 		Speed:     u.speed,
+		SHA256:    u.sha256,
 		Published: u.published,
 
 		BatchLinked: u.managed,
@@ -670,6 +673,7 @@ func (s *Service) SubmitContentWithPublish(id, sessionKey string, body io.Reader
 	}
 	u.state = StateCompleted
 	u.published = final
+	u.sha256 = result.HexSHA256()
 	u.mu.Unlock()
 	return ContentResult{Written: result.Written, SHA256: result.HexSHA256(), Path: final}, nil
 }

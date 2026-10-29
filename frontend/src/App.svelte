@@ -958,6 +958,21 @@
           <div class="grow">
             <strong>Batch · {batchName(b)}</strong>
             <span>{doneItems(b)} of {b.totalItemCount} files · {formatBytes(b.transferredBytes)} of {formatBytes(b.declaredTotalBytes)} · {fmtTime(b.createdAt)}</span>
+            {#if b.items && b.items.some(i => i.sha256)}
+              <div style="margin-top: 4px; display: flex; flex-wrap: wrap; gap: 4px;">
+                {#each b.items.filter(i => i.sha256) as it}
+                  <button
+                    type="button"
+                    class="button ghost small"
+                    style="padding: 2px 4px; font-size: 10px; font-family: monospace; color: var(--text-muted);"
+                    title="Click to copy SHA256 for {it.displayName}"
+                    on:click={() => copyTextToClipboard(it.sha256 || '')}
+                  >
+                    {it.displayName}: {(it.sha256 || '').slice(0, 8)}…
+                  </button>
+                {/each}
+              </div>
+            {/if}
             {#if b.error}<small class="error-text" style="display:block; margin-top:2px;">{b.error}</small>{/if}
           </div>
           <span class="badge {b.state}">{b.state}</span>
@@ -970,6 +985,19 @@
           <div class="grow">
             <strong>{item.name}</strong>
             <span>{'fileId' in item ? `${item.kind === 'archive' ? 'ZIP archive' : 'Individual file'} · ` : ''}{formatBytes('fileId' in item ? item.written : item.uploaded)} of {formatBytes(item.size)} · {fmtTime(item.created)}</span>
+            {#if 'sha256' in item && item.sha256}
+              <div style="margin-top: 2px;">
+                <button
+                  type="button"
+                  class="button ghost small"
+                  style="padding: 2px 4px; font-size: 11px; font-family: monospace; color: var(--text-muted);"
+                  title="Click to copy SHA256 hash"
+                  on:click={() => copyTextToClipboard(item.sha256 || '')}
+                >
+                  SHA256: {item.sha256.slice(0, 12)}…
+                </button>
+              </div>
+            {/if}
             {#if 'reason' in item && item.reason}<small class="error-text" style="display:block; margin-top:2px;">{item.reason}</small>{/if}
           </div>
           <span class="badge {item.state}">{item.state === 'sent' ? 'sent to browser' : item.state}</span>

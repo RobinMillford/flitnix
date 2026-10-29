@@ -37,11 +37,12 @@ type DiagnosticReport struct {
 }
 
 type Params struct {
-	NetSource     netenv.Provider
-	ServerRunning bool
-	ServerAddr    string // e.g. "192.168.1.50:43821"
-	ActiveIP      string // e.g. "192.168.1.50"
-	ActiveIface   string // e.g. "wlo1"
+	NetSource        netenv.Provider
+	ServerRunning    bool
+	ServerAddr       string // e.g. "192.168.1.50:43821"
+	ActiveIP         string // e.g. "192.168.1.50"
+	ActiveIface      string // e.g. "wlo1"
+	LastPhoneContact *time.Time
 }
 
 func RunDiagnostics(p Params) DiagnosticReport {
@@ -255,11 +256,15 @@ func RunDiagnostics(p Params) DiagnosticReport {
 			}
 		}
 		if matches || host == "127.0.0.1" || host == "localhost" {
+			msg := fmt.Sprintf("Server is bound to reachable local address %s.", host)
+			if p.LastPhoneContact != nil {
+				msg = fmt.Sprintf("Server is bound to %s. Phone handshake active (last contact at %s).", host, p.LastPhoneContact.Format("15:04:05"))
+			}
 			report.Items = append(report.Items, DiagnosticItem{
 				ID:      "host_reachability",
 				Title:   "Host Address Binding",
 				Status:  StatusPass,
-				Message: fmt.Sprintf("Server is bound to reachable local address %s.", host),
+				Message: msg,
 			})
 		} else {
 			report.Items = append(report.Items, DiagnosticItem{

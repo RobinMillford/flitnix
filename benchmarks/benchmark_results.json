@@ -1,0 +1,43 @@
+{
+  "generated_at": "2026-10-29T05:27:53.796291456Z",
+  "platform": "linux/amd64 (16 CPUs)",
+  "go_version": "go1.27.3",
+  "results": [
+    {
+      "topology": "Topology 1: Large File",
+      "description": "Single 500 MB file streaming transfer",
+      "file_count": 1,
+      "total_bytes": 524288000,
+      "duration_ms": 426,
+      "throughput_mbs": 1173.7089201877934,
+      "peak_heap_alloc_mb": 0.7579269409179688,
+      "total_alloc_mb": 0.264617919921875,
+      "integrity_checked": true,
+      "integrity_pass": true
+    },
+    {
+      "topology": "Topology 2: Many Small Files",
+      "description": "1,000 files x 20 KB each (metadata \u0026 connection turnaround)",
+      "file_count": 1000,
+      "total_bytes": 20480000,
+      "duration_ms": 469,
+      "throughput_mbs": 41.64445628997868,
+      "peak_heap_alloc_mb": 2.0513534545898438,
+      "total_alloc_mb": 94.25843811035156,
+      "integrity_checked": true,
+      "integrity_pass": true
+    },
+    {
+      "topology": "Topology 3: Mixed Hierarchy",
+      "description": "111 mixed files (50 MB video, 10x5MB clips, 100x100KB documents)",
+      "file_count": 111,
+      "total_bytes": 115097600,
+      "duration_ms": 151,
+      "throughput_mbs": 726.9246688741722,
+      "peak_heap_alloc_mb": 2.5326766967773438,
+      "total_alloc_mb": 10.4852294921875,
+      "integrity_checked": true,
+      "integrity_pass": true
+    }
+  ]
+}
