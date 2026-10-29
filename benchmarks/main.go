@@ -174,6 +174,22 @@ func main() {
 	fmt.Printf("Duration: %d ms | Throughput: %.2f MB/s | Heap Peak: %.2f MB | Integrity: %v\n\n",
 		res3.DurationMs, res3.ThroughputMBs, res3.PeakHeapAllocMB, res3.IntegrityPass)
 
+	// Topology 4: Outbound Single File Download (500 MB) with RFC 9530 Content-Digest
+	fmt.Println("--- Topology 4: Outbound Single File Download with Content-Digest (500 MB) ---")
+	res4 := runDownloadTest(client, serverURL, token, reg, "Topology 4: Outbound Single File Download", "500 MB file download with streaming RFC 9530 Content-Digest", testFileEntry{
+		path: largeFilePath, name: "large_500mb.bin", size: largeSize, sha256: largeHash,
+	})
+	results = append(results, res4)
+	fmt.Printf("Duration: %d ms | Throughput: %.2f MB/s | Heap Peak: %.2f MB | Integrity: %v\n\n",
+		res4.DurationMs, res4.ThroughputMBs, res4.PeakHeapAllocMB, res4.IntegrityPass)
+
+	// Topology 5: Outbound Multi-File / Folder ZIP Download (111 files, 110 MB) with Two-Pass Content-Digest
+	fmt.Println("--- Topology 5: Outbound Folder ZIP Download with Two-Pass Content-Digest (111 files, 110 MB) ---")
+	res5 := runArchiveDownloadTest(client, serverURL, token, reg, "Topology 5: Outbound Folder Archive Download", "111 files (110 MB) uncompressed ZIP download with deterministic two-pass Content-Digest", mixedDir, len(mixedEntries))
+	results = append(results, res5)
+	fmt.Printf("Duration: %d ms | Throughput: %.2f MB/s | Heap Peak: %.2f MB | Integrity: %v\n\n",
+		res5.DurationMs, res5.ThroughputMBs, res5.PeakHeapAllocMB, res5.IntegrityPass)
+
 	// Save JSON report
 	suite := SuiteReport{
 		GeneratedAt: time.Now().UTC(),
@@ -315,6 +331,183 @@ func runTransferTest(client *http.Client, serverURL, token string, transfers *tr
 		TotalAllocMB:     totalAllocMB,
 		IntegrityChecked: true,
 		IntegrityPass:    allIntegrityPass,
+	}
+}
+
+func runDownloadTest(client *http.Client, serverURL, token string, reg *transfer.Registry, topology, desc string, file testFileEntry) BenchmarkResult {
+	sf, err := reg.Add(file.path, file.name, "")
+	if err != nil {
+		panic(fmt.Sprintf("Add shared file failed: %v", err))
+	}
+	defer reg.Remove(sf.ID)
+
+	runtime.GC()
+	var mBefore, mAfter runtime.MemStats
+	runtime.ReadMemStats(&mBefore)
+
+	start := time.Now()
+	req, err := http.NewRequest("GET", serverURL+"/api/files/"+sf.ID+"/download", nil)
+	if err != nil {
+		panic(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		panic(fmt.Sprintf("Download request failed: %v", err))
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		panic(fmt.Sprintf("Download failed with status %d", resp.StatusCode))
+	}
+
+	digestHdr := resp.Header.Get("Content-Digest")
+	if digestHdr == "" {
+		panic("Missing Content-Digest header in download response")
+	}
+
+	parsedHex, err := transfer.ParseContentDigest(digestHdr)
+	if err != nil {
+		panic(fmt.Sprintf("ParseContentDigest failed: %v", err))
+	}
+
+	hasher := sha256.New()
+	buf := make([]byte, 64*1024)
+	totalRead, err := io.CopyBuffer(hasher, resp.Body, buf)
+	if err != nil {
+		panic(fmt.Sprintf("Error reading download stream: %v", err))
+	}
+
+	duration := time.Since(start)
+	runtime.ReadMemStats(&mAfter)
+
+	durationMs := duration.Milliseconds()
+	if durationMs == 0 {
+		durationMs = 1
+	}
+	throughput := (float64(totalRead) / (1024 * 1024)) / (float64(durationMs) / 1000.0)
+	peakAllocMB := float64(mAfter.HeapAlloc) / (1024 * 1024)
+	totalAllocMB := float64(mAfter.TotalAlloc-mBefore.TotalAlloc) / (1024 * 1024)
+
+	actualHex := hex.EncodeToString(hasher.Sum(nil))
+	integrityPass := (actualHex == file.sha256) && (parsedHex == file.sha256)
+
+	return BenchmarkResult{
+		Topology:         topology,
+		Description:      desc,
+		FileCount:        1,
+		TotalBytes:       totalRead,
+		DurationMs:       durationMs,
+		ThroughputMBs:    throughput,
+		PeakHeapAllocMB:  peakAllocMB,
+		TotalAllocMB:     totalAllocMB,
+		IntegrityChecked: true,
+		IntegrityPass:    integrityPass,
+	}
+}
+
+func runArchiveDownloadTest(client *http.Client, serverURL, token string, reg *transfer.Registry, topology, desc, folderPath string, fileCount int) BenchmarkResult {
+	source, err := reg.AddFolder(folderPath, "")
+	if err != nil {
+		panic(fmt.Sprintf("AddFolder failed: %v", err))
+	}
+	defer reg.Remove(source.ID)
+
+	runtime.GC()
+	var mBefore, mAfter runtime.MemStats
+	runtime.ReadMemStats(&mBefore)
+
+	start := time.Now()
+
+	grantReqBody, _ := json.Marshal(map[string]any{
+		"sourceIds": []string{source.ID},
+	})
+	grantReq, err := http.NewRequest("POST", serverURL+"/api/download-grants", bytes.NewReader(grantReqBody))
+	if err != nil {
+		panic(err)
+	}
+	grantReq.Header.Set("Authorization", "Bearer "+token)
+	grantReq.Header.Set("Content-Type", "application/json")
+
+	grantResp, err := client.Do(grantReq)
+	if err != nil {
+		panic(fmt.Sprintf("Create grant failed: %v", err))
+	}
+	var grantRes struct {
+		ID          string `json:"id"`
+		Archive     bool   `json:"archive"`
+		DownloadURL string `json:"downloadUrl"`
+		SHA256      string `json:"sha256"`
+		TotalBytes  int64  `json:"totalBytes"`
+	}
+	_ = json.NewDecoder(grantResp.Body).Decode(&grantRes)
+	cookies := grantResp.Cookies()
+	grantResp.Body.Close()
+
+	if grantResp.StatusCode != http.StatusCreated {
+		panic(fmt.Sprintf("Grant creation returned status %d", grantResp.StatusCode))
+	}
+
+	dlReq, err := http.NewRequest("GET", serverURL+grantRes.DownloadURL, nil)
+	if err != nil {
+		panic(err)
+	}
+	for _, c := range cookies {
+		dlReq.AddCookie(c)
+	}
+
+	dlResp, err := client.Do(dlReq)
+	if err != nil {
+		panic(fmt.Sprintf("Archive download failed: %v", err))
+	}
+	defer dlResp.Body.Close()
+
+	if dlResp.StatusCode != http.StatusOK {
+		panic(fmt.Sprintf("Archive download returned status %d", dlResp.StatusCode))
+	}
+
+	digestHdr := dlResp.Header.Get("Content-Digest")
+	if digestHdr == "" {
+		panic("Missing Content-Digest header in archive download")
+	}
+	parsedHex, err := transfer.ParseContentDigest(digestHdr)
+	if err != nil {
+		panic(fmt.Sprintf("ParseContentDigest failed: %v", err))
+	}
+
+	hasher := sha256.New()
+	buf := make([]byte, 64*1024)
+	totalRead, err := io.CopyBuffer(hasher, dlResp.Body, buf)
+	if err != nil {
+		panic(fmt.Sprintf("Error reading archive download stream: %v", err))
+	}
+
+	duration := time.Since(start)
+	runtime.ReadMemStats(&mAfter)
+
+	durationMs := duration.Milliseconds()
+	if durationMs == 0 {
+		durationMs = 1
+	}
+	throughput := (float64(totalRead) / (1024 * 1024)) / (float64(durationMs) / 1000.0)
+	peakAllocMB := float64(mAfter.HeapAlloc) / (1024 * 1024)
+	totalAllocMB := float64(mAfter.TotalAlloc-mBefore.TotalAlloc) / (1024 * 1024)
+
+	actualHex := hex.EncodeToString(hasher.Sum(nil))
+	integrityPass := (actualHex == grantRes.SHA256) && (parsedHex == grantRes.SHA256)
+
+	return BenchmarkResult{
+		Topology:         topology,
+		Description:      desc,
+		FileCount:        fileCount,
+		TotalBytes:       totalRead,
+		DurationMs:       durationMs,
+		ThroughputMBs:    throughput,
+		PeakHeapAllocMB:  peakAllocMB,
+		TotalAllocMB:     totalAllocMB,
+		IntegrityChecked: true,
+		IntegrityPass:    integrityPass,
 	}
 }
 
