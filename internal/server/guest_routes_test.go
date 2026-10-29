@@ -302,3 +302,155 @@ func TestGuestRevocationBlocksOperations(t *testing.T) {
 		t.Fatalf("revoked guest declare status = %d; want 401", resp.StatusCode)
 	}
 }
+
+func TestDNSRebindingProtection(t *testing.T) {
+	ts, _, _, _ := setupTestGuestServer(t)
+
+	req, err := http.NewRequest("GET", ts.URL+"/healthz", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "evil.attacker.com"
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request for rebinding Host header, got %d", resp.StatusCode)
+	}
+}
+
+func TestCrossSiteCSRFProtection(t *testing.T) {
+	ts, _, room, _ := setupTestGuestServer(t)
+
+	// Test Sec-Fetch-Site: cross-site
+	joinData, _ := json.Marshal(map[string]string{
+		"secret":   room.InviteSecret,
+		"nickname": "CSRF Victim",
+	})
+	req, err := http.NewRequest("POST", ts.URL+"/guest-api/join", bytes.NewReader(joinData))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden for cross-site Sec-Fetch-Site, got %d", resp.StatusCode)
+	}
+
+	// Test untrusted Origin
+	req2, err := http.NewRequest("POST", ts.URL+"/guest-api/join", bytes.NewReader(joinData))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req2.Header.Set("Origin", "https://attacker.com")
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden for untrusted Origin, got %d", resp2.StatusCode)
+	}
+}
+
+func TestZeroByteUpload(t *testing.T) {
+	ts, _, room, _ := setupTestGuestServer(t)
+
+	g, err := room.Join("ZeroByteUser")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := room.ApproveGuest(g.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	up, err := room.DeclareUpload(g.ID, "empty.txt", 0)
+	if err != nil {
+		t.Fatalf("failed to declare 0-byte upload: %v", err)
+	}
+	if err := room.ApproveUpload(up.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	req, err := http.NewRequest("PUT", ts.URL+"/guest-api/uploads/"+up.ID+"/content", bytes.NewReader([]byte{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+g.Token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK for 0-byte upload stream, got %d", resp.StatusCode)
+	}
+}
+
+func TestUnicodeNicknameSanitization(t *testing.T) {
+	ts, _, room, _ := setupTestGuestServer(t)
+
+	// Nickname containing multi-byte UTF-8 emojis and non-Latin runes exceeding 30 runes
+	multiByteNick := "🚀✨🎉🔥🌟日本語テストユーザー名長いテキスト超過分確認"
+	joinData, _ := json.Marshal(map[string]string{
+		"secret":   room.InviteSecret,
+		"nickname": multiByteNick,
+	})
+	req, err := http.NewRequest("POST", ts.URL+"/guest-api/join", bytes.NewReader(joinData))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("join status = %d; want 201", resp.StatusCode)
+	}
+
+	var res struct {
+		GuestID  string `json:"guestId"`
+		Nickname string `json:"nickname"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&res)
+	if len([]rune(res.Nickname)) > 30 {
+		t.Fatalf("expected max 30 runes, got %d runes: %q", len([]rune(res.Nickname)), res.Nickname)
+	}
+	// Verify valid UTF-8
+	if !bytes.Equal([]byte(res.Nickname), []byte(string([]rune(res.Nickname)))) {
+		t.Fatalf("nickname is not valid UTF-8: %q", res.Nickname)
+	}
+}
+
+func TestGuestRoomCapacityLimit(t *testing.T) {
+	ts, _, room, _ := setupTestGuestServer(t)
+
+	for i := 0; i < guest.MaxGuestsPerRoom; i++ {
+		_, err := room.Join("Guest")
+		if err != nil {
+			t.Fatalf("Join guest %d failed: %v", i, err)
+		}
+	}
+
+	// 257th guest should hit capacity limit -> 429 Too Many Requests
+	joinData, _ := json.Marshal(map[string]string{
+		"secret":   room.InviteSecret,
+		"nickname": "OverflowGuest",
+	})
+	req, _ := http.NewRequest("POST", ts.URL+"/guest-api/join", bytes.NewReader(joinData))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 Too Many Requests on full room, got %d", resp.StatusCode)
+	}
+}

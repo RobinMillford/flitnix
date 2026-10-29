@@ -10,10 +10,12 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/itsyamin/flitnix/internal/session"
 	"github.com/itsyamin/flitnix/internal/textmsg"
@@ -93,7 +95,65 @@ func newRouter(services *Services, stall, downloadStall time.Duration, grants *D
 			mux.HandleFunc("/guest-api/", serveNotFound)
 		}
 	}
-	return mux
+	return securityMiddleware(mux)
+}
+
+// isAllowedHost validates that the request Host header matches an IPv4/IPv6
+// address, localhost, or RFC 2606 test domains (for httptest). Any arbitrary
+// DNS hostname is rejected to prevent DNS rebinding attacks.
+func isAllowedHost(hostHeader string) bool {
+	host := strings.TrimSpace(hostHeader)
+	if host == "" {
+		return false
+	}
+	h, _, err := net.SplitHostPort(host)
+	if err != nil {
+		h = host
+	}
+	h = strings.TrimPrefix(h, "[")
+	h = strings.TrimSuffix(h, "]")
+	if strings.EqualFold(h, "localhost") || strings.HasSuffix(strings.ToLower(h), ".localhost") {
+		return true
+	}
+	if strings.EqualFold(h, "example.com") || strings.HasSuffix(strings.ToLower(h), ".example.com") || strings.HasSuffix(strings.ToLower(h), ".test") {
+		return true
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return true
+	}
+	return false
+}
+
+// securityMiddleware rejects requests with untrusted Host headers (DNS rebinding)
+// and rejects cross-origin state-changing requests (CSRF).
+func securityMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isAllowedHost(r.Host) {
+			writeError(w, http.StatusBadRequest, "invalid host header")
+			return
+		}
+
+		// Cross-origin defense for state-changing operations
+		if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch || r.Method == http.MethodDelete {
+			if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+				writeError(w, http.StatusForbidden, "cross-origin request forbidden")
+				return
+			}
+			if origin := r.Header.Get("Origin"); origin != "" {
+				if origin == "null" {
+					writeError(w, http.StatusForbidden, "cross-origin request forbidden")
+					return
+				}
+				u, err := url.Parse(origin)
+				if err != nil || u.Host == "" || !strings.EqualFold(u.Host, r.Host) {
+					writeError(w, http.StatusForbidden, "cross-origin request forbidden")
+					return
+				}
+			}
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 // newAPIMux registers the transfer endpoints. Authentication is applied at
@@ -1057,6 +1117,11 @@ func handleTextMessageSend(svcs *Services) http.HandlerFunc {
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, textmsg.MaxContentBytes+1024))
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "reading message body")
+			return
+		}
+
+		if !utf8.Valid(body) {
+			writeError(w, http.StatusBadRequest, "invalid UTF-8 content")
 			return
 		}
 
