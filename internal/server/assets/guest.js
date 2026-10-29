@@ -341,6 +341,14 @@
       fileSelector.click();
     });
 
+    dropZone.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        if (e.repeat) return;
+        fileSelector.click();
+      }
+    });
+
     dropZone.addEventListener("dragover", function (e) {
       e.preventDefault();
       dropZone.classList.add("drop-zone--dragover");
@@ -442,6 +450,11 @@
 
     var barBg = document.createElement("div");
     barBg.className = "progress-bar-bg";
+    barBg.setAttribute("role", "progressbar");
+    barBg.setAttribute("aria-label", "Upload progress for " + (job.file ? job.file.name : "file"));
+    barBg.setAttribute("aria-valuemin", "0");
+    barBg.setAttribute("aria-valuemax", "100");
+    barBg.setAttribute("aria-valuenow", "0");
     var barFill = document.createElement("div");
     barFill.className = "progress-bar-fill";
     barBg.appendChild(barFill);
@@ -481,6 +494,7 @@
     job.el = {
       root: li,
       badge: badgeSpan,
+      bar: barBg,
       fill: barFill,
       detail: detailSpan,
       retryBtn: retryBtn
@@ -502,6 +516,7 @@
         b.textContent = "Awaiting Host Approval";
         detail.textContent = "Waiting for host to accept file…";
         fill.style.width = "0%";
+        if (job.el.bar) job.el.bar.setAttribute("aria-valuenow", "0");
         break;
       case "approved":
         b.className = "badge badge--approved";
@@ -513,6 +528,12 @@
         var pct = job.size > 0 ? Math.min(100, (job.transferred / job.size) * 100) : 0;
         b.textContent = "Uploading " + pct.toFixed(0) + "%";
         fill.style.width = pct + "%";
+        if (job.el.bar) {
+          var step = Math.floor(pct / 20) * 20;
+          if (job.el.bar.getAttribute("aria-valuenow") !== String(step)) {
+            job.el.bar.setAttribute("aria-valuenow", String(step));
+          }
+        }
         var speedText = "";
         if (job.speed > 0) {
           speedText = " (" + formatBytes(job.speed) + "/s";
@@ -531,6 +552,7 @@
         fill.style.width = "100%";
         fill.style.background = "var(--accent-teal)";
         detail.textContent = "Saved to host folder";
+        if (job.el.bar) job.el.bar.setAttribute("aria-valuenow", "100");
         if (job.el.retryBtn) job.el.retryBtn.hidden = true;
         break;
       case "rejected":

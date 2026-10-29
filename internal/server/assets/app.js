@@ -279,7 +279,10 @@
       : (job.phase === "done" ? 100 : 0);
     if (job.phase === "done") renderedPercent = 100;
     r.fill.style.width = renderedPercent + "%";
-    r.bar.setAttribute("aria-valuenow", String(renderedPercent));
+    var ariaStep = job.phase === "done" ? 100 : Math.floor(renderedPercent / 20) * 20;
+    if (r.bar.getAttribute("aria-valuenow") !== String(ariaStep)) {
+      r.bar.setAttribute("aria-valuenow", String(ariaStep));
+    }
     if (job.phase === "sending" && job.uploaded > 0 && job.size > 0) {
       text += " " + renderedPercent + "%";
       if (job.speed > 0) {

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import { focusTrap } from './focusTrap'
   import type { main, netenv, doctor, guest, audit, devices } from '../wailsjs/go/models'
   import { OnFileDrop, OnFileDropOff } from '../wailsjs/runtime/runtime.js'
   import logoUrl from './assets/images/logo-universal.png'
@@ -42,6 +43,50 @@
   let settingsSavedAlert = ''
   let settingsError = ''
   let savingSettings = false
+
+  // Accessibility & live announcements
+  let liveAnnouncement = ''
+  let previousPendingTotal = -1
+
+  const tabOrder: Array<'personal' | 'guest' | 'templates' | 'audit' | 'devices' | 'settings'> = [
+    'personal', 'guest', 'templates', 'audit', 'devices', 'settings'
+  ]
+
+  function switchTab(target: 'personal' | 'guest' | 'templates' | 'audit' | 'devices' | 'settings'): void {
+    activeTab = target
+    if (target === 'templates') loadTemplates()
+    else if (target === 'audit') loadAuditLogs()
+    else if (target === 'devices') loadTrustedDevices()
+    else if (target === 'settings') loadSettings()
+  }
+
+  function handleTabKeydown(e: KeyboardEvent): void {
+    const currentIndex = tabOrder.indexOf(activeTab)
+    if (currentIndex === -1) return
+    let nextIndex = currentIndex
+
+    if (e.key === 'ArrowRight') {
+      e.preventDefault()
+      nextIndex = (currentIndex + 1) % tabOrder.length
+    } else if (e.key === 'ArrowLeft') {
+      e.preventDefault()
+      nextIndex = (currentIndex - 1 + tabOrder.length) % tabOrder.length
+    } else if (e.key === 'Home') {
+      e.preventDefault()
+      nextIndex = 0
+    } else if (e.key === 'End') {
+      e.preventDefault()
+      nextIndex = tabOrder.length - 1
+    } else {
+      // Allow browser vertical scrolling on ArrowUp / ArrowDown in horizontal tablist
+      return
+    }
+
+    const nextTab = tabOrder[nextIndex]
+    switchTab(nextTab)
+    const btn = document.getElementById(`tab-${nextTab}`)
+    btn?.focus()
+  }
 
   // Personal transfer state
   let sessions: main.SessionView[] = []
@@ -151,6 +196,13 @@
       receiveDir = dir; serverAddress = addr ?? ''
       guestRoomState = grState ?? null
       if (!guestDestDir && dir) guestDestDir = dir
+
+      const currentPendingTotal = (pending?.length ?? 0) + (pendingBatches?.length ?? 0) + (guestRoomState?.pendingUploads?.length ?? 0)
+      if (previousPendingTotal >= 0 && currentPendingTotal > previousPendingTotal) {
+        liveAnnouncement = 'New transfer request awaiting approval.'
+      }
+      previousPendingTotal = currentPendingTotal
+
       if (!sessions.length) { qrKey = ''; qrUrl = ''; qrError = '' }
       else if (!sessions.some((x) => x.key === qrKey)) fetchQR(sessions[0].key)
 
@@ -239,25 +291,38 @@
     const k = `${approve ? 'approve' : 'reject'}:${u.id}`; if (isBusy(k)) return
     setBusy(k, true)
     const call = approve ? ApproveUpload(u.id) : RejectUpload(u.id)
-    call.then(refresh).catch((e) => report(e, k)).finally(() => setBusy(k, false))
+    call.then(() => {
+      liveAnnouncement = approve ? `Upload approved for ${u.name || 'file'}.` : `Upload rejected for ${u.name || 'file'}.`
+      refresh()
+    }).catch((e) => report(e, k)).finally(() => setBusy(k, false))
   }
 
   function decideBatch(batch: main.BatchView, approve: boolean): void {
     const k = `${approve ? 'approve' : 'reject'}-batch:${batch.id}`; if (isBusy(k)) return
     setBusy(k, true)
     const call = approve ? ApproveBatch(batch.id) : RejectBatch(batch.id)
-    call.then(refresh).catch((e) => report(e, k)).finally(() => setBusy(k, false))
+    call.then(() => {
+      liveAnnouncement = approve ? `Batch transfer approved for ${batch.rootName || 'batch'}.` : `Batch transfer rejected for ${batch.rootName || 'batch'}.`
+      refresh()
+    }).catch((e) => report(e, k)).finally(() => setBusy(k, false))
   }
 
   function cancelBatch(batch: main.BatchView): void {
     const k = `cancel-batch:${batch.id}`; if (isBusy(k)) return
     setBusy(k, true)
-    CancelBatch(batch.id).then(refresh).catch((e) => report(e, k)).finally(() => setBusy(k, false))
+    CancelBatch(batch.id).then(() => {
+      liveAnnouncement = `Batch transfer canceled for ${batch.rootName || 'batch'}.`
+      refresh()
+    }).catch((e) => report(e, k)).finally(() => setBusy(k, false))
   }
 
   function cancelUpload(id: string): void {
     const k = `cancel:${id}`; if (isBusy(k)) return
-    setBusy(k, true); CancelUpload(id).then(refresh).catch((e) => report(e, k)).finally(() => setBusy(k, false))
+    setBusy(k, true)
+    CancelUpload(id).then(() => {
+      liveAnnouncement = 'Upload transfer canceled.'
+      refresh()
+    }).catch((e) => report(e, k)).finally(() => setBusy(k, false))
   }
 
   function pickFiles(): void {
@@ -278,7 +343,10 @@
 
   function handleDrop(_x: number, _y: number, paths: string[]): void {
     if (!paths.length) return
-    AddDroppedSources(paths).then(refresh).catch(report)
+    AddDroppedSources(paths).then(() => {
+      liveAnnouncement = `${paths.length} item${paths.length === 1 ? '' : 's'} added for sharing.`
+      refresh()
+    }).catch(report)
   }
 
   function revoke(id: string): void {
@@ -692,6 +760,7 @@
     setBusy(k, true)
     try {
       await ApproveGuestUpload(id)
+      liveAnnouncement = 'Guest upload approved.'
       refresh()
     } catch (err) {
       report(err, k)
@@ -706,6 +775,7 @@
     setBusy(k, true)
     try {
       await RejectGuestUpload(id)
+      liveAnnouncement = 'Guest upload rejected.'
       refresh()
     } catch (err) {
       report(err, k)
@@ -766,18 +836,24 @@
         <span class="status-dot"></span>{sessions.length > 0 ? 'Session active' : 'Session inactive'}
       </div>
     </div>
+    <div class="sr-only" role="status" aria-live="polite" aria-atomic="true">
+      {liveAnnouncement}
+    </div>
   </header>
 
   <!-- Navigation bar with Tabs and Connection Doctor launcher -->
   <nav class="nav-bar" aria-label="Main Navigation">
-    <div class="tab-list" role="tablist">
+    <div class="tab-list" role="tablist" aria-label="Main Navigation Tabs" aria-orientation="horizontal" tabindex="-1" on:keydown={handleTabKeydown}>
       <button
         type="button"
+        id="tab-personal"
         role="tab"
         aria-selected={activeTab === 'personal'}
+        aria-controls="panel-personal"
+        tabindex={activeTab === 'personal' ? 0 : -1}
         class="tab-btn"
         class:active={activeTab === 'personal'}
-        on:click={() => activeTab = 'personal'}
+        on:click={() => switchTab('personal')}
       >
         <span>Personal Transfer</span>
         {#if pending.length + pendingBatches.length > 0}
@@ -787,11 +863,14 @@
 
       <button
         type="button"
+        id="tab-guest"
         role="tab"
         aria-selected={activeTab === 'guest'}
+        aria-controls="panel-guest"
+        tabindex={activeTab === 'guest' ? 0 : -1}
         class="tab-btn"
         class:active={activeTab === 'guest'}
-        on:click={() => activeTab = 'guest'}
+        on:click={() => switchTab('guest')}
       >
         <span>Guest Drop Box</span>
         {#if guestPendingCount > 0}
@@ -801,33 +880,42 @@
 
       <button
         type="button"
+        id="tab-templates"
         role="tab"
         aria-selected={activeTab === 'templates'}
+        aria-controls="panel-templates"
+        tabindex={activeTab === 'templates' ? 0 : -1}
         class="tab-btn"
         class:active={activeTab === 'templates'}
-        on:click={() => { activeTab = 'templates'; loadTemplates(); }}
+        on:click={() => switchTab('templates')}
       >
         <span>Templates</span>
       </button>
 
       <button
         type="button"
+        id="tab-audit"
         role="tab"
         aria-selected={activeTab === 'audit'}
+        aria-controls="panel-audit"
+        tabindex={activeTab === 'audit' ? 0 : -1}
         class="tab-btn"
         class:active={activeTab === 'audit'}
-        on:click={() => { activeTab = 'audit'; loadAuditLogs(); }}
+        on:click={() => switchTab('audit')}
       >
         <span>Audit History</span>
       </button>
 
       <button
         type="button"
+        id="tab-devices"
         role="tab"
         aria-selected={activeTab === 'devices'}
+        aria-controls="panel-devices"
+        tabindex={activeTab === 'devices' ? 0 : -1}
         class="tab-btn"
         class:active={activeTab === 'devices'}
-        on:click={() => { activeTab = 'devices'; loadTrustedDevices(); }}
+        on:click={() => switchTab('devices')}
       >
         <span>Trusted Devices</span>
         {#if trustedDevices.length > 0}
@@ -837,17 +925,25 @@
 
       <button
         type="button"
+        id="tab-settings"
         role="tab"
         aria-selected={activeTab === 'settings'}
+        aria-controls="panel-settings"
+        tabindex={activeTab === 'settings' ? 0 : -1}
         class="tab-btn"
         class:active={activeTab === 'settings'}
-        on:click={() => { activeTab = 'settings'; loadSettings(); }}
+        on:click={() => switchTab('settings')}
       >
         <span>Settings</span>
       </button>
     </div>
 
-    <button type="button" class="doctor-launch-btn" on:click={openDoctor} aria-label="Open Connection Doctor">
+    <button
+      type="button"
+      class="doctor-launch-btn"
+      on:click={openDoctor}
+      aria-label="Open Connection Doctor, status: {doctorReport?.overallStatus || 'ready'}"
+    >
       <span class="doctor-dot" class:warn={doctorReport?.overallStatus === 'WARNING'} class:fail={doctorReport?.overallStatus === 'FAIL'}></span>
       <span>Connection Doctor</span>
     </button>
@@ -861,9 +957,14 @@
       class="modal-overlay"
       role="presentation"
       on:click|self={() => doctorOpen = false}
-      on:keydown={(e) => { if (e.key === 'Escape') doctorOpen = false }}
     >
-      <div class="doctor-dialog" role="dialog" aria-labelledby="doctor-title" aria-modal="true">
+      <div
+        class="doctor-dialog"
+        role="dialog"
+        aria-labelledby="doctor-title"
+        aria-modal="true"
+        use:focusTrap={{ onEscape: () => doctorOpen = false }}
+      >
         <div class="doctor-header">
           <div style="display: flex; align-items: center; gap: 10px;">
             <span class="doctor-dot" class:warn={doctorReport?.overallStatus === 'WARNING'} class:fail={doctorReport?.overallStatus === 'FAIL'}></span>
@@ -917,7 +1018,8 @@
 
   <!-- TAB 1: PERSONAL TRANSFER -->
   {#if activeTab === 'personal'}
-    <section class="connection panel">
+    <div id="panel-personal" role="tabpanel" aria-labelledby="tab-personal" tabindex="0">
+      <section class="connection panel">
       <div class="section-heading"><div><span class="eyebrow connection-eyebrow"><span class="network-glyph" aria-hidden="true">⌁</span> Connection</span><h2>Ready to pair</h2></div><span class="pill">{sessions.length ? 'Session active' : 'Ready'}</span></div>
       <div class="connection-grid">
         <div>
@@ -1199,10 +1301,12 @@
       {#if !batches.some(finishedBatch) && !uploads.some((u) => !activeUpload(u)) && !downloads.some((d) => !activeDownload(d))}
         <div class="empty">No completed transfers in this session.</div>
       {/if}
-    </section>
+      </section>
+    </div>
 
   <!-- TAB 2: GUEST DROP BOX -->
   {:else if activeTab === 'guest'}
+    <div id="panel-guest" role="tabpanel" aria-labelledby="tab-guest" tabindex="0">
     {#if !guestRoomState?.room || guestRoomState.room.state === 'ended' || guestRoomState.room.state === 'expired' || guestRoomState.room.state === 'Ended'}
       <!-- Room Setup Card -->
       <section class="panel">
@@ -1584,10 +1688,11 @@
         </section>
       </div>
     {/if}
+    </div>
 
   <!-- TAB 3: TEMPLATES -->
   {:else if activeTab === 'templates'}
-    <section class="panel">
+    <div class="panel" id="panel-templates" role="tabpanel" aria-labelledby="tab-templates" tabindex="0">
       <div class="section-heading">
         <div>
           <span class="eyebrow accent">Reusable Schemas</span>
@@ -1636,11 +1741,11 @@
       {:else}
         <div class="empty">No saved templates yet.</div>
       {/if}
-    </section>
+    </div>
 
   <!-- TAB 4: AUDIT HISTORY -->
   {:else if activeTab === 'audit'}
-    <section class="panel">
+    <div class="panel" id="panel-audit" role="tabpanel" aria-labelledby="tab-audit" tabindex="0">
       <div class="section-heading">
         <div>
           <span class="eyebrow accent">Searchable Local Audit Log</span>
@@ -1721,11 +1826,11 @@
       {:else}
         <div class="empty">No audit events match the current filter.</div>
       {/if}
-    </section>
+    </div>
 
   <!-- TAB 5: TRUSTED DEVICES -->
   {:else if activeTab === 'devices'}
-    <section class="panel" aria-label="Trusted Devices">
+    <div class="panel" id="panel-devices" role="tabpanel" aria-labelledby="tab-devices" tabindex="0">
       <div class="section-heading">
         <div>
           <span class="eyebrow">Security & Pairing</span>
@@ -1794,11 +1899,11 @@
       {:else}
         <div class="empty">No trusted devices paired yet. Devices paired through connection authentication will appear here.</div>
       {/if}
-    </section>
+    </div>
 
   <!-- TAB 6: SETTINGS -->
   {:else if activeTab === 'settings'}
-    <section class="panel" aria-label="Application Settings">
+    <div class="panel" id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" tabindex="0">
       <div class="section-heading">
         <div>
           <span class="eyebrow accent">Preferences</span>
@@ -1936,7 +2041,7 @@
           </button>
         </div>
       </div>
-    </section>
+    </div>
   {/if}
 
   {#if receiveDir}
