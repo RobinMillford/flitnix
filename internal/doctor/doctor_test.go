@@ -221,3 +221,42 @@ func TestRunDiagnosticsDynamicPortAndHealthProbe(t *testing.T) {
 	}
 	_ = portStr
 }
+
+func TestRunDiagnosticsIPv6HealthyPass(t *testing.T) {
+	iface := net.Interface{Index: 1, Name: "wlo1", Flags: net.FlagUp | net.FlagBroadcast}
+	ip, ipnet, _ := net.ParseCIDR("2001:db8::10/64")
+	ipnet.IP = ip
+
+	prov := &mockProvider{
+		ifaces: []net.Interface{iface},
+		addrs:  map[string][]net.Addr{"wlo1": {ipnet}},
+	}
+
+	report := RunDiagnostics(Params{
+		NetSource:     prov,
+		ServerRunning: true,
+		ServerAddr:    "[2001:db8::10]:43821",
+		ActiveIP:      "2001:db8::10",
+		ActiveIface:   "wlo1",
+	})
+
+	if len(report.Items) != 7 {
+		t.Fatalf("expected 7 diagnostic items, got %d", len(report.Items))
+	}
+
+	for _, it := range report.Items {
+		if it.ID == "ipv4_address" {
+			if it.Status != StatusPass {
+				t.Fatalf("expected ipv4_address check to PASS for IPv6, got %s: %s", it.Status, it.Message)
+			}
+			if it.Message != "Using reachable local IPv6 address: [2001:db8::10]" {
+				t.Errorf("unexpected IPv6 address diagnostic message: %q", it.Message)
+			}
+		}
+		if it.ID == "host_reachability" {
+			if it.Status != StatusPass {
+				t.Fatalf("expected host_reachability to PASS for IPv6, got %s: %s", it.Status, it.Message)
+			}
+		}
+	}
+}
