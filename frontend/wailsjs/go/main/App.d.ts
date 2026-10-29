@@ -41,6 +41,8 @@ export function GetBatch(arg1:string):Promise<main.BatchView>;
 
 export function GetGuestRoomState():Promise<main.GuestRoomStateView>;
 
+export function GetSettings():Promise<main.SettingsView>;
+
 export function ListAuditEvents(arg1:audit.Filter):Promise<main.AuditListResult>;
 
 export function ListBatches():Promise<Array<main.BatchView>>;
@@ -64,6 +66,8 @@ export function ListSharedSources():Promise<Array<main.SharedSourceView>>;
 export function ListTextMessages(arg1:string):Promise<Array<main.TextMessageView>>;
 
 export function ListTrustedDevices():Promise<Array<devices.Device>>;
+
+export function OpenDownloadFolder():Promise<void>;
 
 export function OpenGuestFolder():Promise<void>;
 
@@ -93,6 +97,8 @@ export function RemoveExpectedParticipant(arg1:string):Promise<void>;
 
 export function RemoveTrustedDevice(arg1:string):Promise<void>;
 
+export function ResetSettings():Promise<main.SettingsView>;
+
 export function RevokeGuest(arg1:string):Promise<void>;
 
 export function RevokeSharedFile(arg1:string):Promise<void>;
@@ -102,6 +108,10 @@ export function RevokeSharedSource(arg1:string):Promise<void>;
 export function RunConnectionDiagnostics():Promise<doctor.DiagnosticReport>;
 
 export function SaveGuestTemplate(arg1:guest.Template):Promise<void>;
+
+export function SaveSettings(arg1:main.SettingsView):Promise<void>;
+
+export function SelectDownloadDirectory():Promise<string>;
 
 export function SendTextMessage(arg1:string,arg2:string):Promise<main.TextMessageView>;
 
