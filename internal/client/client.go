@@ -42,6 +42,9 @@ var (
 
 	// ErrServerFault indicates an unexpected HTTP error from the server.
 	ErrServerFault = errors.New("client: server error")
+
+	// ErrConflict indicates an item or batch could not be modified due to its current state.
+	ErrConflict = errors.New("client: item cannot be canceled (already completed or terminal)")
 )
 
 // ItemResult holds the verification details for a completed item transfer.
@@ -324,5 +327,26 @@ func (c *Client) CancelItem(ctx context.Context, batchID, itemID string) error {
 		return err
 	}
 	defer resp.Body.Close()
-	return nil
+
+	if resp.StatusCode == http.StatusOK {
+		return nil
+	}
+	if resp.StatusCode == http.StatusConflict {
+		return ErrConflict
+	}
+	return fmt.Errorf("unexpected status canceling item: %d", resp.StatusCode)
+}
+
+// CancelBatch cancels all unfinished items in a batch, transitioning the batch to canceled on the server.
+func (c *Client) CancelBatch(ctx context.Context, batchID string, items []transfer.ItemView) error {
+	var firstErr error
+	for _, item := range items {
+		if item.State == transfer.ItemStateCompleted || item.State == transfer.ItemStateCanceled {
+			continue
+		}
+		if err := c.CancelItem(ctx, batchID, item.ID); err != nil && !errors.Is(err, ErrConflict) && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }

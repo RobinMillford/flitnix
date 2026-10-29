@@ -30,11 +30,15 @@ const (
 )
 
 func runSendCLI(args []string, stdout, stderr io.Writer) int {
+	return runSendCLIWithStdin(args, os.Stdin, stdout, stderr)
+}
+
+func runSendCLIWithStdin(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
 	toURL := fs.String("to", "", "recipient pairing URL (e.g. http://192.168.1.50:43821/#<token>, or '-' for stdin)")
-	tokenFlag := fs.String("token", "", "session pairing token (optional if specified in --to fragment or FLITNIX_TOKEN)")
+	tokenFlag := fs.String("token", "", "session pairing token (optional if specified in --to fragment, '-' for stdin)")
 	nameOverride := fs.String("name", "", "override top-level folder name when sending a single directory")
 	timeout := fs.Duration("timeout", 5*time.Minute, "maximum duration to wait for recipient approval")
 	yes := fs.Bool("y", false, "skip interactive confirmation prompt")
@@ -71,7 +75,7 @@ func runSendCLI(args []string, stdout, stderr io.Writer) int {
 
 	if rawURL == "-" {
 		// Read URL from stdin
-		urlFromStdin, err := client.ReadHiddenInput("", os.Stdin, os.Stderr)
+		urlFromStdin, err := client.ReadHiddenInput("", stdin, os.Stderr)
 		if err != nil {
 			fmt.Fprintf(stderr, "Error reading pairing URL from stdin: %v\n", err)
 			return ExitUsageError
@@ -79,16 +83,16 @@ func runSendCLI(args []string, stdout, stderr io.Writer) int {
 		rawURL = urlFromStdin
 	} else if rawURL == "" {
 		// Prompt interactively if on terminal, otherwise read stdin
-		stdinFd := os.Stdin.Fd()
+		stdinFd := stdin.Fd()
 		if isatty.IsTerminal(stdinFd) || isatty.IsCygwinTerminal(stdinFd) {
-			urlFromPrompt, err := client.ReadHiddenInput("Paste recipient pairing URL (hidden): ", os.Stdin, os.Stderr)
+			urlFromPrompt, err := client.ReadHiddenInput("Paste recipient pairing URL (hidden): ", stdin, os.Stderr)
 			if err != nil {
 				fmt.Fprintf(stderr, "Error reading pairing URL: %v\n", err)
 				return ExitUsageError
 			}
 			rawURL = urlFromPrompt
 		} else {
-			urlFromStdin, err := client.ReadHiddenInput("", os.Stdin, os.Stderr)
+			urlFromStdin, err := client.ReadHiddenInput("", stdin, os.Stderr)
 			if err != nil {
 				fmt.Fprintf(stderr, "Error reading pairing URL from stdin: %v\n", err)
 				return ExitUsageError
@@ -100,6 +104,34 @@ func runSendCLI(args []string, stdout, stderr io.Writer) int {
 	if strings.TrimSpace(rawURL) == "" {
 		fmt.Fprintln(stderr, "Error: recipient pairing URL is required.")
 		return ExitUsageError
+	}
+
+	if explicitToken == "-" {
+		// Read token from stdin
+		tokFromStdin, err := client.ReadHiddenInput("", stdin, os.Stderr)
+		if err != nil {
+			fmt.Fprintf(stderr, "Error reading pairing token from stdin: %v\n", err)
+			return ExitUsageError
+		}
+		explicitToken = tokFromStdin
+	} else if !strings.Contains(rawURL, "#") && explicitToken == "" {
+		// URL provided without token fragment: prompt interactively if on terminal
+		stdinFd := stdin.Fd()
+		if isatty.IsTerminal(stdinFd) || isatty.IsCygwinTerminal(stdinFd) {
+			tokFromPrompt, err := client.ReadHiddenInput("Paste recipient pairing token (hidden): ", stdin, os.Stderr)
+			if err != nil {
+				fmt.Fprintf(stderr, "Error reading pairing token: %v\n", err)
+				return ExitUsageError
+			}
+			explicitToken = tokFromPrompt
+		}
+	}
+
+	// Security notice: token passed as CLI argument can leak into process listing or shell history
+	tokenInFlags := (*tokenFlag != "" && *tokenFlag != "-") || (*toURL != "" && strings.Contains(*toURL, "#"))
+	if tokenInFlags && !*quiet && !*jsonOutput {
+		fmt.Fprintln(stderr, "Notice: Pairing token passed via command-line arguments; this may be exposed in process listings (ps) or shell history.")
+		fmt.Fprintln(stderr, "        To protect secrets, consider using interactive hidden prompt, '--to -', '--token -', or FLITNIX_TOKEN.")
 	}
 
 	// 2. Parse target information (strictly isolates token)
@@ -148,11 +180,11 @@ func runSendCLI(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	stdinFd := os.Stdin.Fd()
+	stdinFd := stdin.Fd()
 	if !*yes && !*jsonOutput && (isatty.IsTerminal(stdinFd) || isatty.IsCygwinTerminal(stdinFd)) {
 		fmt.Fprint(stdout, "Proceed with transfer? [Y/n]: ")
 		var resp string
-		_, _ = fmt.Fscanln(os.Stdin, &resp)
+		_, _ = fmt.Fscanln(stdin, &resp)
 		resp = strings.TrimSpace(resp)
 		if resp != "" && !strings.EqualFold(resp, "y") && !strings.EqualFold(resp, "yes") {
 			fmt.Fprintln(stdout, "Transfer canceled by user.")
@@ -183,6 +215,12 @@ func runSendCLI(args []string, stdout, stderr io.Writer) int {
 		if !*quiet && !*jsonOutput {
 			fmt.Fprintln(stdout)
 		}
+
+		// Cancel the declared batch on recipient server to avoid leaving a lingering pending batch
+		cancelCtx, cancelCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = cli.CancelBatch(cancelCtx, view.ID, view.Items)
+		cancelCancel()
+
 		if errors.Is(err, client.ErrRejected) {
 			fmt.Fprintln(stderr, "Transfer rejected by recipient.")
 			return ExitApprovalRefused
@@ -216,6 +254,9 @@ func runSendCLI(args []string, stdout, stderr io.Writer) int {
 	for i, item := range approvedView.Items {
 		select {
 		case <-ctx.Done():
+			cancelCtx, cancelCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = cli.CancelBatch(cancelCtx, approvedView.ID, approvedView.Items)
+			cancelCancel()
 			fmt.Fprintln(stderr, "\nTransfer canceled.")
 			return ExitCanceled
 		default:
@@ -240,6 +281,9 @@ func runSendCLI(args []string, stdout, stderr io.Writer) int {
 				fmt.Fprintln(stdout, "FAILED")
 			}
 			if errors.Is(streamErr, context.Canceled) {
+				cancelCtx, cancelCancel := context.WithTimeout(context.Background(), 2*time.Second)
+				_ = cli.CancelBatch(cancelCtx, approvedView.ID, approvedView.Items)
+				cancelCancel()
 				fmt.Fprintln(stderr, "\nTransfer canceled.")
 				return ExitCanceled
 			}
@@ -321,7 +365,7 @@ func printSendHelp(out io.Writer) {
 	fmt.Fprintf(out, "  --to <url>          Recipient pairing URL (e.g. http://192.168.1.50:43821/#<token>)\n")
 	fmt.Fprintf(out, "                      Pass '-' to read URL from standard input.\n")
 	fmt.Fprintf(out, "                      If omitted, prompt interactively for hidden input.\n")
-	fmt.Fprintf(out, "  --token <secret>    Pairing token (optional if specified in --to fragment)\n")
+	fmt.Fprintf(out, "  --token <secret>    Pairing token (optional if specified in --to fragment, '-' for stdin)\n")
 	fmt.Fprintf(out, "  --name <string>     Folder name override when sending a single directory\n")
 	fmt.Fprintf(out, "  --timeout <dur>     Approval timeout waiting for recipient (default: 5m)\n")
 	fmt.Fprintf(out, "  -y, --yes           Skip confirmation prompt and proceed immediately\n")
