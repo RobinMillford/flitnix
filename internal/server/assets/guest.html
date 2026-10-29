@@ -34,7 +34,14 @@
 }
 .text-input:focus {
   border-color: var(--accent);
-  outline: none;
+}
+.text-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.drop-zone:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .btn-primary {
   width: 100%;
@@ -136,7 +143,7 @@
   </section>
 
   <!-- Connection / Status Indicator -->
-  <section class="status" id="status-card" data-state="checking">
+  <section class="status" id="status-card" data-state="checking" aria-live="polite">
     <span class="status__dot" aria-hidden="true"></span>
     <span class="status__text" id="status-text">Connecting to Guest Drop Box…</span>
   </section>
@@ -167,13 +174,13 @@
   </section>
 
   <!-- Step 2: Waiting for Host Approval -->
-  <section class="card" id="waiting-view" hidden>
+  <section class="card" id="waiting-view" hidden aria-live="polite">
     <h2>Waiting for Host Approval</h2>
     <p id="waiting-msg">Your join request has been sent to the host desktop. Please keep this screen open while the host approves your access.</p>
   </section>
 
   <!-- Step 3: Rejected / Revoked / Ended -->
-  <section class="card card--warn" id="rejected-view" hidden>
+  <section class="card card--warn" id="rejected-view" hidden aria-live="polite">
     <h2 id="rejected-title">Access Denied</h2>
     <p id="rejected-msg">Your request was rejected or access has ended.</p>
   </section>
@@ -187,10 +194,10 @@
       </div>
       <p class="muted">Files you send will be saved directly into the host's Guest Drop folder. Each file starts after host approval.</p>
 
-      <div class="drop-zone" id="drop-zone">
+      <div class="drop-zone" id="drop-zone" role="button" tabindex="0" aria-label="Tap to select files or drag and drop">
         <p style="margin: 0; font-weight: 500;">Tap to select files or drag & drop</p>
         <p class="muted" style="margin: 0.3rem 0 0; font-size: 0.85rem;">Photos, videos, documents of any size</p>
-        <input type="file" id="file-selector" multiple hidden>
+        <input type="file" id="file-selector" multiple hidden aria-hidden="true" tabindex="-1">
       </div>
 
       <!-- Submission Form Details (Dynamic Schema) -->
@@ -201,7 +208,7 @@
       </div>
 
       <!-- File Queue -->
-      <ul id="upload-queue" style="padding: 0; margin: 1rem 0 0;"></ul>
+      <ul id="upload-queue" style="padding: 0; margin: 1rem 0 0;" aria-live="polite"></ul>
     </section>
 
     <p class="footnote">Guest Drop Box is upload-only. Files are transferred directly over your local Wi-Fi or LAN.</p>

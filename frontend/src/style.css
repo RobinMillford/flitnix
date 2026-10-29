@@ -52,13 +52,13 @@
   --border: #cbd5e1;
   --border-strong: #94a3b8;
   --line: #e2e8f0;
-  --primary: #0284c7;
+  --primary: #0369a1;
   --primary-text: #ffffff;
   --teal: #0d9488;
   --secondary-bg: rgba(2, 132, 199, 0.1);
   --secondary-text: #0369a1;
-  --focus: #38bdf8;
-  --success: #059669;
+  --focus: #0284c7;
+  --success: #047857;
   --warning-bg: #fef3c7;
   --warning-text: #92400e;
   --error: #dc2626;
@@ -82,13 +82,13 @@
     --border: #cbd5e1;
     --border-strong: #94a3b8;
     --line: #e2e8f0;
-    --primary: #0284c7;
+    --primary: #0369a1;
     --primary-text: #ffffff;
     --teal: #0d9488;
     --secondary-bg: rgba(2, 132, 199, 0.1);
     --secondary-text: #0369a1;
-    --focus: #38bdf8;
-    --success: #059669;
+    --focus: #0284c7;
+    --success: #047857;
     --warning-bg: #fef3c7;
     --warning-text: #92400e;
     --error: #dc2626;
@@ -135,12 +135,31 @@ body {
 }
 
 button,
-select { font: inherit; }
+select,
+input,
+textarea { font: inherit; }
 button { cursor: pointer; }
 button:focus-visible,
-select:focus-visible {
+select:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+summary:focus-visible,
+[tabindex="0"]:focus-visible,
+[role="button"]:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .shell {
@@ -632,7 +651,10 @@ code { color: #a5f3fc; }
 }
 .text-textarea:focus {
   border-color: var(--primary);
-  outline: none;
+}
+.text-textarea:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
 }
 .text-compose-footer {
   display: flex;
@@ -897,4 +919,15 @@ code { color: #a5f3fc; }
 }
 .form-input-row input {
   flex: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
