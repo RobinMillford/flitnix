@@ -70,6 +70,10 @@ export function GetGuestRoomState() {
   return window['go']['main']['App']['GetGuestRoomState']();
 }
 
+export function GetSettings() {
+  return window['go']['main']['App']['GetSettings']();
+}
+
 export function ListAuditEvents(arg1) {
   return window['go']['main']['App']['ListAuditEvents'](arg1);
 }
@@ -116,6 +120,10 @@ export function ListTextMessages(arg1) {
 
 export function ListTrustedDevices() {
   return window['go']['main']['App']['ListTrustedDevices']();
+}
+
+export function OpenDownloadFolder() {
+  return window['go']['main']['App']['OpenDownloadFolder']();
 }
 
 export function OpenGuestFolder() {
@@ -174,6 +182,10 @@ export function RemoveTrustedDevice(arg1) {
   return window['go']['main']['App']['RemoveTrustedDevice'](arg1);
 }
 
+export function ResetSettings() {
+  return window['go']['main']['App']['ResetSettings']();
+}
+
 export function RevokeGuest(arg1) {
   return window['go']['main']['App']['RevokeGuest'](arg1);
 }
@@ -192,6 +204,14 @@ export function RunConnectionDiagnostics() {
 
 export function SaveGuestTemplate(arg1) {
   return window['go']['main']['App']['SaveGuestTemplate'](arg1);
+}
+
+export function SaveSettings(arg1) {
+  return window['go']['main']['App']['SaveSettings'](arg1);
+}
+
+export function SelectDownloadDirectory() {
+  return window['go']['main']['App']['SelectDownloadDirectory']();
 }
 
 export function SendTextMessage(arg1, arg2) {

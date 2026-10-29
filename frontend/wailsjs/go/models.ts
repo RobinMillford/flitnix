@@ -866,6 +866,30 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class SettingsView {
+	    version: number;
+	    theme: string;
+	    locale: string;
+	    downloadDir: string;
+	    effectiveDir: string;
+	    autoStartSession: boolean;
+	    preferredInterface: string;
+
+	    static createFrom(source: any = {}) {
+	        return new SettingsView(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.version = source["version"];
+	        this.theme = source["theme"];
+	        this.locale = source["locale"];
+	        this.downloadDir = source["downloadDir"];
+	        this.effectiveDir = source["effectiveDir"];
+	        this.autoStartSession = source["autoStartSession"];
+	        this.preferredInterface = source["preferredInterface"];
+	    }
+	}
 	export class SharedFileView {
 	    id: string;
 	    name: string;

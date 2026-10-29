@@ -39,6 +39,7 @@ import (
 	"github.com/itsyamin/flitnix/internal/qr"
 	"github.com/itsyamin/flitnix/internal/server"
 	"github.com/itsyamin/flitnix/internal/session"
+	"github.com/itsyamin/flitnix/internal/settings"
 	"github.com/itsyamin/flitnix/internal/textmsg"
 	"github.com/itsyamin/flitnix/internal/transfer"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -226,11 +227,23 @@ type BatchView struct {
 	Error              string          `json:"error,omitempty"`
 }
 
+// SettingsView is the UI projection of persistent user settings.
+type SettingsView struct {
+	Version            int    `json:"version"`
+	Theme              string `json:"theme"`
+	Locale             string `json:"locale"`
+	DownloadDir        string `json:"downloadDir"`
+	EffectiveDir       string `json:"effectiveDir"`
+	AutoStartSession   bool   `json:"autoStartSession"`
+	PreferredInterface string `json:"preferredInterface"`
+}
+
 // App owns the Flitnix core instances and the desktop lifecycle.
 type App struct {
 	ctx context.Context
 
 	store         *transfer.Store
+	settingsStore *settings.Store
 	sessions      *session.Manager
 	transfers     *transfer.Service
 	coordinator   *transfer.Coordinator
@@ -275,17 +288,26 @@ func resolveDataDir() string {
 	return filepath.Join(dir, "flitnix")
 }
 
-// NewApp constructs the application: receive store on the default directory
-// (~/Downloads/Flitnix), a fresh session manager, transfer service and
-// shared-file registry. The HTTP server is not started here; it starts
+// NewApp constructs the application: receive store configured from persistent
+// settings (or default ~/Downloads/Flitnix), a fresh session manager, transfer
+// service and shared-file registry. The HTTP server is not started here; it starts
 // lazily when the first session is created and stops again when the last
 // session ends.
 func NewApp() (*App, error) {
-	store, err := transfer.NewStore(transfer.StoreConfig{})
+	dataDir := resolveDataDir()
+	settingsStore, err := settings.NewStore(filepath.Join(dataDir, "settings.json"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "flitnix: settings store initialization warning: %v\n", err)
+		settingsStore, _ = settings.NewStore("")
+	}
+	initialDir := ""
+	if settingsStore != nil {
+		initialDir = settingsStore.Get().DownloadDir
+	}
+	store, err := transfer.NewStore(transfer.StoreConfig{Dir: initialDir})
 	if err != nil {
 		return nil, err
 	}
-	dataDir := resolveDataDir()
 	auditStore, err := audit.NewStore(filepath.Join(dataDir, "audit.jsonl"), 10000)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "flitnix: audit store initialization warning: %v\n", err)
@@ -301,6 +323,7 @@ func NewApp() (*App, error) {
 
 	a := &App{
 		store:         store,
+		settingsStore: settingsStore,
 		transfers:     transfer.NewService(transfer.Config{Store: store}),
 		coordinator:   transfer.NewCoordinator(transfer.CoordinatorConfig{}),
 		registry:      transfer.NewRegistry(),
@@ -353,6 +376,15 @@ func (a *App) startup(ctx context.Context) {
 
 	if len(initial) > 0 {
 		_, _ = a.AddDroppedSources(initial)
+	}
+
+	if a.settingsStore != nil && a.settingsStore.Get().AutoStartSession {
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			if a.sessions.Len() == 0 {
+				_, _ = a.StartSession("")
+			}
+		}()
 	}
 }
 
@@ -673,6 +705,25 @@ func (a *App) resolveInterface(ip string) (netenv.View, error) {
 		return netenv.View{}, fmt.Errorf("flitnix: could not read the network interfaces: %w", err)
 	}
 	if ip == "" {
+		if a.settingsStore != nil {
+			pref := a.settingsStore.Get().PreferredInterface
+			if pref != "" {
+				var match *netenv.View
+				for _, v := range views {
+					if v.Name == pref {
+						if v.Family == "IPv4" || match == nil {
+							vCopy := v
+							match = &vCopy
+						}
+					}
+				}
+				if match != nil {
+					return *match, nil
+				}
+				// If preferred interface is not currently available, fall back
+				// safely to PickDefault below without hardcoded addresses or interfaces.
+			}
+		}
 		view, pickErr := netenv.PickDefault(views)
 		switch {
 		case errors.Is(pickErr, netenv.ErrAmbiguous):
@@ -683,6 +734,14 @@ func (a *App) resolveInterface(ip string) (netenv.View, error) {
 		return view, nil
 	}
 	view, pickErr := netenv.InterfaceFor(a.source, ip)
+	if pickErr != nil {
+		// If caller passed an interface name instead of an IP literal, match by name.
+		for _, v := range views {
+			if v.Name == ip {
+				return v, nil
+			}
+		}
+	}
 	switch {
 	case errors.Is(pickErr, netenv.ErrGone):
 		return netenv.View{}, fmt.Errorf("flitnix: the selected network is no longer reachable: %w", pickErr)
@@ -1278,6 +1337,146 @@ func (a *App) RevokeSharedSource(id string) error {
 // ReceiveDirectory returns the absolute receive directory for received
 // files.
 func (a *App) ReceiveDirectory() string { return a.store.Dir() }
+
+// GetSettings returns the user settings and current effective download directory.
+func (a *App) GetSettings() SettingsView {
+	if a.settingsStore == nil {
+		return SettingsView{
+			Version:      settings.CurrentSchemaVersion,
+			Theme:        settings.ThemeSystem,
+			Locale:       "system",
+			EffectiveDir: a.store.Dir(),
+		}
+	}
+	s := a.settingsStore.Get()
+	return SettingsView{
+		Version:            s.Version,
+		Theme:              s.Theme,
+		Locale:             s.Locale,
+		DownloadDir:        s.DownloadDir,
+		EffectiveDir:       a.store.Dir(),
+		AutoStartSession:   s.AutoStartSession,
+		PreferredInterface: s.PreferredInterface,
+	}
+}
+
+// hasActiveTransfers reports whether any transfers (standalone or batches) are currently
+// in progress, transferring, or pending.
+func (a *App) hasActiveTransfers() bool {
+	if a.transfers != nil {
+		counts := a.transfers.Counts()
+		if counts.Uploading > 0 {
+			return true
+		}
+		for _, u := range a.transfers.List() {
+			if u.State == transfer.StateUploading || u.State == transfer.StateApproved {
+				return true
+			}
+		}
+	}
+	if a.coordinator != nil {
+		for _, key := range a.coordinator.SessionKeys() {
+			batches, err := a.coordinator.ListBatches(key)
+			if err == nil {
+				for _, b := range batches {
+					if b.State == transfer.BatchStateTransferring ||
+						b.State == transfer.BatchStateQueued ||
+						b.State == transfer.BatchStateApproved {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+// SaveSettings updates the persistent settings and applies them to active subsystems.
+func (a *App) SaveSettings(view SettingsView) error {
+	if a.settingsStore == nil {
+		return errors.New("flitnix: settings store not available")
+	}
+	theme := strings.ToLower(strings.TrimSpace(view.Theme))
+	if theme != "" && theme != settings.ThemeSystem && theme != settings.ThemeDark && theme != settings.ThemeLight {
+		return settings.ErrInvalidTheme
+	}
+	if view.DownloadDir != "" {
+		info, err := os.Stat(view.DownloadDir)
+		if err == nil && !info.IsDir() {
+			return errors.New("flitnix: download path cannot be a regular file")
+		}
+	}
+	if a.settingsStore != nil {
+		currentDir := a.settingsStore.Get().DownloadDir
+		if view.DownloadDir != currentDir && a.hasActiveTransfers() {
+			return errors.New("flitnix: cannot change receive directory while transfers are active")
+		}
+	}
+	s := settings.Settings{
+		Version:            view.Version,
+		Theme:              view.Theme,
+		Locale:             view.Locale,
+		DownloadDir:        view.DownloadDir,
+		AutoStartSession:   view.AutoStartSession,
+		PreferredInterface: view.PreferredInterface,
+	}
+	if err := a.settingsStore.Save(s); err != nil {
+		return err
+	}
+	if a.store != nil {
+		if err := a.store.SetDir(s.DownloadDir); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ResetSettings resets settings to baseline defaults and re-applies default paths.
+func (a *App) ResetSettings() (SettingsView, error) {
+	if a.settingsStore == nil {
+		return SettingsView{}, errors.New("flitnix: settings store not available")
+	}
+	if a.hasActiveTransfers() {
+		if a.settingsStore != nil && a.settingsStore.Get().DownloadDir != "" {
+			return SettingsView{}, errors.New("flitnix: cannot reset receive directory while transfers are active")
+		}
+	}
+	if _, err := a.settingsStore.Reset(); err != nil {
+		return SettingsView{}, err
+	}
+	if a.store != nil {
+		_ = a.store.SetDir("")
+	}
+	return a.GetSettings(), nil
+}
+
+// SelectDownloadDirectory opens the native directory dialog for choosing the download directory.
+func (a *App) SelectDownloadDirectory() (string, error) {
+	if a.ctx == nil {
+		return "", errors.New("flitnix: application context not initialized")
+	}
+	defaultDir := ""
+	if a.store != nil {
+		defaultDir = a.store.Dir()
+	}
+	dir, err := runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
+		Title:            "Select Download Directory",
+		DefaultDirectory: defaultDir,
+	})
+	if err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// OpenDownloadFolder opens the active download directory in the native file manager.
+func (a *App) OpenDownloadFolder() error {
+	dir := a.store.Dir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("flitnix: cannot create download directory: %w", err)
+	}
+	return openFolderInOS(dir)
+}
 
 // ---- Projections ----
 

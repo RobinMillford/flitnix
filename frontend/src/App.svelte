@@ -21,12 +21,27 @@
     AddExpectedParticipant, RemoveExpectedParticipant, UpdateExpectedParticipant,
     ListAuditEvents, ClearAuditHistory,
     RunConnectionDiagnostics, SendTextMessage, ListTextMessages, ClearTextMessages,
-    ListTrustedDevices, RemoveTrustedDevice, SetDeviceAutoApprove
+    ListTrustedDevices, RemoveTrustedDevice, SetDeviceAutoApprove,
+    GetSettings, SaveSettings, ResetSettings, SelectDownloadDirectory, OpenDownloadFolder
   } from '../wailsjs/go/main/App.js'
 
-  let activeTab: 'personal' | 'guest' | 'templates' | 'audit' | 'devices' = 'personal'
+  let activeTab: 'personal' | 'guest' | 'templates' | 'audit' | 'devices' | 'settings' = 'personal'
   let trustedDevices: devices.Device[] = []
   let loadingDevices = false
+
+  // Persistent Settings state
+  let settingsState: main.SettingsView = {
+    version: 1,
+    theme: 'system',
+    locale: 'system',
+    downloadDir: '',
+    effectiveDir: '',
+    autoStartSession: false,
+    preferredInterface: ''
+  }
+  let settingsSavedAlert = ''
+  let settingsError = ''
+  let savingSettings = false
 
   // Personal transfer state
   let sessions: main.SessionView[] = []
@@ -173,6 +188,11 @@
       if (next.length === 1) {
         selectedIp = next[0].ip
         networkChooserOpen = false
+      } else if (settingsState.preferredInterface && next.some((item) => item.name === settingsState.preferredInterface)) {
+        const prefMatch = next.find((item) => item.name === settingsState.preferredInterface && (item.family === 'IPv4' || !item.family)) ?? next.find((item) => item.name === settingsState.preferredInterface)
+        if (prefMatch) {
+          selectedIp = prefMatch.ip
+        }
       } else if (!next.some((item) => item.ip === selectedIp)) {
         selectedIp = ''
         networkChooserOpen = false
@@ -534,6 +554,82 @@
     }
   }
 
+  function applyTheme(theme: string): void {
+    if (theme === 'dark' || theme === 'light') {
+      document.documentElement.setAttribute('data-theme', theme)
+    } else {
+      document.documentElement.removeAttribute('data-theme')
+    }
+  }
+
+  async function loadSettings(): Promise<void> {
+    try {
+      const s = await GetSettings()
+      settingsState = s
+      applyTheme(s.theme)
+      if (s.preferredInterface && interfaces.length > 0 && !selectedIp) {
+        const match = interfaces.find((item) => item.name === s.preferredInterface && (item.family === 'IPv4' || !item.family)) ?? interfaces.find((item) => item.name === s.preferredInterface)
+        if (match) selectedIp = match.ip
+      }
+    } catch (err) {
+      settingsError = stringOfError(err)
+    }
+  }
+
+  async function handleSelectDownloadDir(): Promise<void> {
+    try {
+      const selected = await SelectDownloadDirectory()
+      if (selected) {
+        settingsState.downloadDir = selected
+        settingsState.effectiveDir = selected
+      }
+    } catch (err) {
+      settingsError = stringOfError(err)
+    }
+  }
+
+  async function handleOpenDownloadFolder(): Promise<void> {
+    try {
+      await OpenDownloadFolder()
+    } catch (err) {
+      settingsError = stringOfError(err)
+    }
+  }
+
+  async function handleSaveSettings(): Promise<void> {
+    savingSettings = true
+    settingsSavedAlert = ''
+    settingsError = ''
+    try {
+      await SaveSettings(settingsState)
+      applyTheme(settingsState.theme)
+      const reloaded = await GetSettings()
+      settingsState = reloaded
+      receiveDir = reloaded.effectiveDir
+      settingsSavedAlert = 'Settings saved successfully.'
+      setTimeout(() => { settingsSavedAlert = '' }, 3000)
+    } catch (err) {
+      settingsError = stringOfError(err)
+    } finally {
+      savingSettings = false
+    }
+  }
+
+  async function handleResetSettings(): Promise<void> {
+    settingsSavedAlert = ''
+    settingsError = ''
+    try {
+      const defaults = await ResetSettings()
+      settingsState = defaults
+      applyTheme(defaults.theme)
+      receiveDir = defaults.effectiveDir
+      settingsSavedAlert = 'Settings restored to defaults.'
+      setTimeout(() => { settingsSavedAlert = '' }, 3000)
+    } catch (err) {
+      settingsError = stringOfError(err)
+    }
+  }
+
   async function endGuestRoomAction(): Promise<void> {
     const k = 'end-guest-room'
     if (isBusy(k)) return
@@ -639,7 +735,12 @@
 
   $: guestPendingCount = (guestRoomState?.pendingGuests?.length ?? 0) + (guestRoomState?.pendingUploads?.length ?? 0)
 
+  $: uniqueInterfaces = interfaces.filter((item, index, self) =>
+    index === self.findIndex((t) => t.name === item.name)
+  )
+
   onMount(() => {
+    loadSettings()
     refresh()
     refreshNetwork()
     loadPresets()
@@ -732,6 +833,17 @@
         {#if trustedDevices.length > 0}
           <span class="tab-badge">{trustedDevices.length}</span>
         {/if}
+      </button>
+
+      <button
+        type="button"
+        role="tab"
+        aria-selected={activeTab === 'settings'}
+        class="tab-btn"
+        class:active={activeTab === 'settings'}
+        on:click={() => { activeTab = 'settings'; loadSettings(); }}
+      >
+        <span>Settings</span>
       </button>
     </div>
 
@@ -1682,6 +1794,148 @@
       {:else}
         <div class="empty">No trusted devices paired yet. Devices paired through connection authentication will appear here.</div>
       {/if}
+    </section>
+
+  <!-- TAB 6: SETTINGS -->
+  {:else if activeTab === 'settings'}
+    <section class="panel" aria-label="Application Settings">
+      <div class="section-heading">
+        <div>
+          <span class="eyebrow accent">Preferences</span>
+          <h2>Application Settings</h2>
+        </div>
+      </div>
+
+      {#if settingsSavedAlert}
+        <div class="alert" style="background: rgba(45, 212, 191, 0.15); border: 1px solid var(--success); color: var(--success); margin-bottom: 16px;" role="status">
+          <span>{settingsSavedAlert}</span>
+        </div>
+      {/if}
+
+      {#if settingsError}
+        <div class="alert" style="background: var(--danger-bg); border: 1px solid var(--danger-border); color: var(--danger-text); margin-bottom: 16px;" role="alert">
+          <span>{settingsError}</span>
+          <button type="button" on:click={() => settingsError = ''} aria-label="Dismiss">×</button>
+        </div>
+      {/if}
+
+      <div style="display: flex; flex-direction: column; gap: 24px;">
+        <!-- Download Directory -->
+        <div>
+          <label for="download-dir-input" class="connection-label">Receive Directory</label>
+          <p style="margin: 0 0 10px; font-size: 13px; color: var(--text-secondary);">
+            Incoming files and folders from paired devices and guests are saved here.
+          </p>
+          <div class="form-input-row" style="margin-bottom: 8px;">
+            <input
+              id="download-dir-input"
+              type="text"
+              class="text-input"
+              bind:value={settingsState.downloadDir}
+              placeholder={settingsState.effectiveDir || 'Default: ~/Downloads/Flitnix'}
+              style="font-family: monospace; font-size: 13px;"
+            />
+            <button type="button" class="button" on:click={handleSelectDownloadDir}>
+              Browse…
+            </button>
+            <button type="button" class="button ghost" on:click={handleOpenDownloadFolder}>
+              Open Folder
+            </button>
+          </div>
+          <div style="display: flex; gap: 12px; align-items: center;">
+            <span style="font-size: 12px; color: var(--text-tertiary);">
+              Current effective path: <code>{settingsState.effectiveDir || receiveDir}</code>
+            </span>
+            {#if settingsState.downloadDir}
+              <button
+                type="button"
+                class="button ghost small"
+                style="padding: 2px 8px; font-size: 11px;"
+                on:click={() => settingsState.downloadDir = ''}
+              >
+                Reset to Default
+              </button>
+            {/if}
+          </div>
+        </div>
+
+        <!-- Appearance / Theme -->
+        <div style="border-top: 1px solid var(--line); padding-top: 20px;">
+          <label for="theme-select" class="connection-label">Appearance & Theme</label>
+          <p style="margin: 0 0 10px; font-size: 13px; color: var(--text-secondary);">
+            Choose the color scheme for the Flitnix user interface.
+          </p>
+          <div style="max-width: 280px;">
+            <select id="theme-select" class="text-input" bind:value={settingsState.theme} style="width: 100%;">
+              <option value="system">System Default (Automatic)</option>
+              <option value="dark">Dark Theme</option>
+              <option value="light">Light Theme</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Preferred Network Interface -->
+        <div style="border-top: 1px solid var(--line); padding-top: 20px;">
+          <label for="iface-select" class="connection-label">Preferred Network Interface</label>
+          <p style="margin: 0 0 10px; font-size: 13px; color: var(--text-secondary);">
+            Choose the network adapter used for pairing and transfers, or let Flitnix select automatically.
+          </p>
+          <div style="max-width: 380px;">
+            <select id="iface-select" class="text-input" bind:value={settingsState.preferredInterface} style="width: 100%;">
+              <option value="">Automatic Selection (Default)</option>
+              {#each uniqueInterfaces as iface (iface.name)}
+                <option value={iface.name}>
+                  {iface.name} ({iface.ip}{iface.family ? ` · ${iface.family}` : ''})
+                </option>
+              {/each}
+              {#if settingsState.preferredInterface && !uniqueInterfaces.some(i => i.name === settingsState.preferredInterface)}
+                <option value={settingsState.preferredInterface}>
+                  {settingsState.preferredInterface} (Currently unavailable)
+                </option>
+              {/if}
+            </select>
+          </div>
+        </div>
+
+        <!-- Session Automation -->
+        <div style="border-top: 1px solid var(--line); padding-top: 20px;">
+          <span class="connection-label">Session Automation</span>
+          <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; margin-top: 8px;">
+            <input
+              type="checkbox"
+              bind:checked={settingsState.autoStartSession}
+              style="width: 18px; height: 18px; cursor: pointer;"
+            />
+            <span style="font-size: 14px; color: var(--text-main); font-weight: 600;">
+              Automatically start pairing session on launch
+            </span>
+          </label>
+          <p style="margin: 6px 0 0 28px; font-size: 13px; color: var(--text-secondary);">
+            When enabled, Flitnix prepares a connection immediately when opened so devices can pair right away.
+          </p>
+        </div>
+
+        <!-- Actions -->
+        <div style="border-top: 1px solid var(--line); padding-top: 20px; display: flex; justify-content: space-between; align-items: center;">
+          <button
+            type="button"
+            class="button"
+            disabled={savingSettings}
+            on:click={handleSaveSettings}
+          >
+            {savingSettings ? 'Saving…' : 'Save Preferences'}
+          </button>
+
+          <button
+            type="button"
+            class="button ghost"
+            style="color: var(--text-secondary);"
+            on:click={handleResetSettings}
+          >
+            Reset to Defaults
+          </button>
+        </div>
+      </div>
     </section>
   {/if}
 
