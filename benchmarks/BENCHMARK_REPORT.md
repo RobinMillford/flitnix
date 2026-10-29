@@ -1,15 +1,15 @@
 # Flitnix Transfer Performance Benchmark Report
 
-**Date:** 2026-10-29 05:27:53 UTC  
+**Date:** 2026-10-29 05:42:11 UTC  
 **Environment:** linux/amd64 (16 CPUs) | go1.27.3  
 
 ## 1. Measured Performance Results
 
 | Topology | Files | Data Volume | Duration | Throughput | Peak Heap | Integrity Pass |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Topology 1: Large File**<br><small>Single 500 MB file streaming transfer</small> | 1 | 500.00 MB | 426 ms | **1173.71 MB/s** | 0.76 MB | true |
-| **Topology 2: Many Small Files**<br><small>1,000 files x 20 KB each (metadata & connection turnaround)</small> | 1000 | 19.53 MB | 469 ms | **41.64 MB/s** | 2.05 MB | true |
-| **Topology 3: Mixed Hierarchy**<br><small>111 mixed files (50 MB video, 10x5MB clips, 100x100KB documents)</small> | 111 | 109.77 MB | 151 ms | **726.92 MB/s** | 2.53 MB | true |
+| **Topology 1: Large File**<br><small>Single 500 MB file streaming transfer</small> | 1 | 500.00 MB | 526 ms | **950.57 MB/s** | 0.73 MB | true |
+| **Topology 2: Many Small Files**<br><small>1,000 files x 20 KB each (metadata & connection turnaround)</small> | 1000 | 19.53 MB | 428 ms | **45.63 MB/s** | 3.14 MB | true |
+| **Topology 3: Mixed Hierarchy**<br><small>111 mixed files (50 MB video, 10x5MB clips, 100x100KB documents)</small> | 111 | 109.77 MB | 153 ms | **717.42 MB/s** | 2.67 MB | true |
 
 ## 2. Architecture & Comparison Protocol vs LocalSend
 
