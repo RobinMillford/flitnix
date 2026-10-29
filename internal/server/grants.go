@@ -58,10 +58,11 @@ type archiveSource struct {
 }
 
 type archiveEntry struct {
-	Name string
-	Path string
-	Size int64
-	Dir  bool
+	Name    string
+	Path    string
+	Size    int64
+	Dir     bool
+	ModTime time.Time
 }
 
 // downloadGrant is the immutable, server-built plan one browser navigation
@@ -75,6 +76,8 @@ type downloadGrant struct {
 	Entries                                 []archiveEntry
 	Total                                   int64
 	Archive                                 bool
+	ArchiveSize                             int64
+	SHA256                                  string
 	ExpiresAt                               time.Time
 }
 
@@ -219,6 +222,16 @@ func (s *DownloadGrantStore) create(sess *session.Session, sources []archiveSour
 	progress := &archiveProgress{ID: progressID, Session: key, Total: total, State: progressPending, Updated: now, clock: s.now, downloads: s.downloads, downloadID: downloadID}
 	s.grants[id], s.progress[progressID] = grant, progress
 	return grant, progress, nil
+}
+
+func (s *DownloadGrantStore) updateDigest(id string, sha256Hex string, archiveSize int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if g, ok := s.grants[id]; ok {
+		g.SHA256 = sha256Hex
+		g.ArchiveSize = archiveSize
+		s.grants[id] = g
+	}
 }
 
 // redeem consumes a grant. Success is one-shot: the grant is deleted, so a

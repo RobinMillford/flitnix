@@ -33,6 +33,7 @@ type Download struct {
 	State    DownloadState
 	Written  int64
 	Speed    float64
+	SHA256   string
 	Reason   string
 }
 
@@ -135,7 +136,11 @@ func (r *DownloadRegistry) Progress(id string, written int64) {
 }
 
 func (r *DownloadRegistry) Finish(id string, written int64) {
-	r.finish(id, DownloadSent, "", written)
+	r.finish(id, DownloadSent, "", written, "")
+}
+
+func (r *DownloadRegistry) FinishWithDigest(id string, written int64, sha256 string) {
+	r.finish(id, DownloadSent, "", written, sha256)
 }
 
 func (r *DownloadRegistry) Begin(id string) {
@@ -147,7 +152,7 @@ func (r *DownloadRegistry) Finalize(id string) {
 }
 
 func (r *DownloadRegistry) Fail(id string, reason string, written int64) {
-	r.finish(id, DownloadFailed, reason, written)
+	r.finish(id, DownloadFailed, reason, written, "")
 }
 
 func (r *DownloadRegistry) CancelSession(session string) {
@@ -182,7 +187,7 @@ func (r *DownloadRegistry) List() []Download {
 	return out
 }
 
-func (r *DownloadRegistry) finish(id string, state DownloadState, reason string, written int64) {
+func (r *DownloadRegistry) finish(id string, state DownloadState, reason string, written int64, sha256 string) {
 	r.mu.Lock()
 	d := r.records[id]
 	r.mu.Unlock()
@@ -206,6 +211,9 @@ func (r *DownloadRegistry) finish(id string, state DownloadState, reason string,
 	}
 	d.State = state
 	d.Reason = reason
+	if sha256 != "" {
+		d.SHA256 = sha256
+	}
 	d.Finished = now
 }
 

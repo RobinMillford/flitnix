@@ -169,6 +169,7 @@ type DownloadView struct {
 	State    string    `json:"state"`
 	Written  int64     `json:"written"`
 	Speed    float64   `json:"speed"`
+	SHA256   string    `json:"sha256,omitempty"`
 	Reason   string    `json:"reason,omitempty"`
 }
 
@@ -1247,7 +1248,7 @@ func downloadView(d transfer.Download) DownloadView {
 		ID: d.ID, FileID: d.FileID, Name: d.Name, Kind: d.Kind, Size: d.Size,
 		Created: d.Created, Started: d.Started, Finished: d.Finished,
 		State: string(d.State), Written: d.Written,
-		Speed: d.Speed, Reason: d.Reason,
+		Speed: d.Speed, SHA256: d.SHA256, Reason: d.Reason,
 	}
 }
 
