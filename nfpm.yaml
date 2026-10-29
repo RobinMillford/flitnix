@@ -19,6 +19,18 @@ contents:
     dst: /usr/share/applications/flitnix.desktop
     file_info:
       mode: 0644
+  - src: ./build/linux/nautilus/Share with Flitnix
+    dst: /etc/skel/.local/share/nautilus/scripts/Share with Flitnix
+    file_info:
+      mode: 0755
+  - src: ./build/linux/nautilus/Share with Flitnix
+    dst: /usr/share/nautilus-scripts/Share with Flitnix
+    file_info:
+      mode: 0755
+  - src: ./build/linux/servicemenus/flitnix.desktop
+    dst: /usr/share/kio/servicemenus/flitnix.desktop
+    file_info:
+      mode: 0644
   - src: ./build/linux/icons/hicolor/16x16/apps/flitnix.png
     dst: /usr/share/icons/hicolor/16x16/apps/flitnix.png
   - src: ./build/linux/icons/hicolor/24x24/apps/flitnix.png

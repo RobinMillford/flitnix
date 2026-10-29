@@ -349,9 +349,53 @@ func (a *App) startup(ctx context.Context) {
 	a.startupDone = true
 	a.startupMu.Unlock()
 
+	ensureLinuxNautilusScript()
+
 	if len(initial) > 0 {
 		_, _ = a.AddDroppedSources(initial)
 	}
+}
+
+// ensureLinuxNautilusScript ensures the "Share with Flitnix" Nautilus script
+// is installed in ~/.local/share/nautilus/scripts if GNOME/Nautilus is present.
+func ensureLinuxNautilusScript() {
+	if stdlibRuntime.GOOS != "linux" {
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	scriptsDir := filepath.Join(home, ".local", "share", "nautilus", "scripts")
+	nautilusDir := filepath.Join(home, ".local", "share", "nautilus")
+	desktopEnv := strings.ToLower(os.Getenv("XDG_CURRENT_DESKTOP"))
+	// Only auto-provision if Nautilus data directory exists or user is in a GNOME desktop session
+	if _, err := os.Stat(nautilusDir); os.IsNotExist(err) && !strings.Contains(desktopEnv, "gnome") {
+		return
+	}
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		return
+	}
+	scriptPath := filepath.Join(scriptsDir, "Share with Flitnix")
+	if _, err := os.Stat(scriptPath); err == nil {
+		return // already present
+	}
+	content := `#!/usr/bin/env bash
+# Share with Flitnix - GNOME Files (Nautilus) script
+# Passes selected files and folders, or current folder if none selected.
+
+if [ "$#" -gt 0 ]; then
+    exec flitnix "$@"
+elif [ -n "${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-}" ]; then
+    mapfile -t paths <<< "${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS}"
+    exec flitnix "${paths[@]}"
+elif [ -n "${NAUTILUS_SCRIPT_CURRENT_URI:-}" ]; then
+    exec flitnix "${NAUTILUS_SCRIPT_CURRENT_URI}"
+else
+    exec flitnix
+fi
+`
+	_ = os.WriteFile(scriptPath, []byte(content), 0o755)
 }
 
 // onSecondInstanceLaunch is invoked when a second instance of Flitnix launches.

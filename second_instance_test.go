@@ -124,3 +124,30 @@ func TestSecondInstanceLaunch_Deduplication(t *testing.T) {
 		t.Fatalf("expected still exactly 1 source after second launch, got %d", len(sources2))
 	}
 }
+
+func TestEnsureLinuxNautilusScript(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	t.Setenv("XDG_CURRENT_DESKTOP", "GNOME")
+
+	ensureLinuxNautilusScript()
+
+	scriptPath := filepath.Join(tempHome, ".local", "share", "nautilus", "scripts", "Share with Flitnix")
+	info, err := os.Stat(scriptPath)
+	if err != nil {
+		t.Fatalf("expected nautilus script to be created at %s: %v", scriptPath, err)
+	}
+	if info.Mode()&0o111 == 0 {
+		t.Fatalf("expected script to have executable permissions, got %v", info.Mode())
+	}
+	content, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(content) == 0 {
+		t.Fatal("expected non-empty script content")
+	}
+
+	// Idempotency: calling again should succeed without error or file corruption
+	ensureLinuxNautilusScript()
+}
