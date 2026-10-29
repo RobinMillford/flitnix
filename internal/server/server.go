@@ -145,6 +145,10 @@ type Services struct {
 	Audit        *audit.Store
 	OnPhoneContact func(source string)
 
+	// OnBatchPending, when non-nil, receives notice of a newly declared batch
+	// with its session key, initial view, and remote client address.
+	OnBatchPending func(sessionKey string, batch transfer.BatchView, remoteAddr string)
+
 	// Diagnose, when non-nil, receives low-volume transfer diagnostics at
 	// meaningful transitions: one line when an item is claimed, milestones
 	// at quarter marks of large streams, and one line per stream ending

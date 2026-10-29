@@ -734,6 +734,9 @@ func handleBatchCreate(svcs *Services) http.HandlerFunc {
 				return
 			}
 		}
+		if svcs.OnBatchPending != nil {
+			svcs.OnBatchPending(sess.Key(), view, r.RemoteAddr)
+		}
 		writeJSON(w, http.StatusCreated, view)
 	}
 }
