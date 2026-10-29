@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#07111f">
+<meta name="description" content="Flitnix Guest Drop Box: upload files directly to the host desktop without an app.">
+<title>Flitnix Guest Drop Box</title>
+<link rel="icon" type="image/png" href="/static/favicon.png">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/styles.css">
+<style>
+.input-group {
+  margin: 1rem 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.input-label {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+.text-input {
+  width: 100%;
+  padding: 0.75rem 0.9rem;
+  background: var(--surface-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 0.95rem;
+  font-family: inherit;
+}
+.text-input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+.btn-primary {
+  width: 100%;
+  padding: 0.8rem 1rem;
+  background: var(--accent);
+  color: var(--accent-text);
+  border: none;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 0.95rem;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn-primary:not(:disabled):active {
+  opacity: 0.85;
+}
+.drop-zone {
+  border: 2px dashed var(--border-strong);
+  border-radius: var(--radius);
+  padding: 1.5rem 1rem;
+  text-align: center;
+  margin: 1rem 0;
+  background: rgba(18, 37, 58, 0.4);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.drop-zone:hover, .drop-zone--dragover {
+  border-color: var(--accent);
+  background: rgba(34, 211, 238, 0.08);
+}
+.progress-bar-bg {
+  width: 100%;
+  height: 6px;
+  background: var(--bar-track);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-top: 0.4rem;
+}
+.progress-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.2s ease;
+  width: 0%;
+}
+.meta-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-top: 0.25rem;
+}
+.badge {
+  display: inline-block;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.badge--pending { background: rgba(244, 199, 106, 0.15); color: var(--accent-warn); }
+.badge--approved { background: rgba(20, 184, 166, 0.15); color: var(--accent-teal); }
+.badge--uploading { background: rgba(34, 211, 238, 0.15); color: var(--accent); }
+.badge--completed { background: rgba(45, 212, 191, 0.2); color: #7ff0df; }
+.badge--rejected { background: rgba(248, 113, 113, 0.15); color: var(--danger); }
+.badge--failed { background: rgba(248, 113, 113, 0.15); color: var(--danger); }
+.queue-item {
+  list-style: none;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--line);
+}
+.queue-item:last-child {
+  border-bottom: none;
+}
+</style>
+</head>
+<body>
+<main class="app" data-app="guest-drop-box">
+
+  <header class="app__header">
+    <div class="brand">
+      <img class="brand__mark" src="/static/logo-mark.png" alt="Flitnix" width="42" height="27">
+      <div>
+        <h1 class="brand__name">Flitnix</h1>
+        <span class="badge badge--uploading" style="margin-top: 0.2rem;">Guest Drop Box</span>
+      </div>
+    </div>
+    <p class="tagline">Upload-only file drop to host desktop</p>
+  </header>
+
+  <!-- Connection / Status Indicator -->
+  <section class="status" id="status-card" data-state="checking">
+    <span class="status__dot" aria-hidden="true"></span>
+    <span class="status__text" id="status-text">Connecting to Guest Drop Box…</span>
+  </section>
+
+  <!-- Step 0: Missing QR Secret -->
+  <section class="card card--warn" id="rescan-view" hidden>
+    <h2>Scan the Guest QR code</h2>
+    <p>Please join by scanning the Guest Drop Box QR code displayed on the desktop screen.</p>
+  </section>
+
+  <!-- Step 1: Join Form -->
+  <section class="card" id="join-view" hidden>
+    <h2>Join Guest Drop Box</h2>
+    <p>Enter your name or device model so the host knows who is uploading.</p>
+    <form id="join-form">
+      <div class="input-group">
+        <label for="nickname-input" class="input-label">Your Nickname (Optional)</label>
+        <input type="text" id="nickname-input" class="text-input" placeholder="e.g. Alex (Pixel 8)" maxlength="30" autocomplete="name">
+      </div>
+      <button type="submit" id="join-btn" class="btn-primary">Request to Join</button>
+    </form>
+  </section>
+
+  <!-- Step 2: Waiting for Host Approval -->
+  <section class="card" id="waiting-view" hidden>
+    <h2>Waiting for Host Approval</h2>
+    <p id="waiting-msg">Your join request has been sent to the host desktop. Please keep this screen open while the host approves your access.</p>
+  </section>
+
+  <!-- Step 3: Rejected / Revoked / Ended -->
+  <section class="card card--warn" id="rejected-view" hidden>
+    <h2 id="rejected-title">Access Denied</h2>
+    <p id="rejected-msg">Your request was rejected or access has ended.</p>
+  </section>
+
+  <!-- Step 4: Approved & Upload Area -->
+  <section class="flow" id="upload-view" hidden>
+    <section class="panel">
+      <div class="panel__head">
+        <h2>Drop Files Here</h2>
+        <span id="guest-badge" class="badge badge--approved">Connected</span>
+      </div>
+      <p class="muted">Files you send will be saved directly into the host's Guest Drop folder. Each file starts after host approval.</p>
+
+      <div class="drop-zone" id="drop-zone">
+        <p style="margin: 0; font-weight: 500;">Tap to select files or drag & drop</p>
+        <p class="muted" style="margin: 0.3rem 0 0; font-size: 0.85rem;">Photos, videos, documents of any size</p>
+        <input type="file" id="file-selector" multiple hidden>
+      </div>
+
+      <!-- File Queue -->
+      <ul id="upload-queue" style="padding: 0; margin: 1rem 0 0;"></ul>
+    </section>
+
+    <p class="footnote">Guest Drop Box is upload-only. Files are transferred directly over your local Wi-Fi or LAN.</p>
+  </section>
+
+  <footer class="app__footer">
+    <p>Flitnix local file transfer · No cloud relays</p>
+  </footer>
+
+</main>
+<script src="/static/guest.js"></script>
+</body>
+</html>
