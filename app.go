@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/itsyamin/flitnix/internal/audit"
+	"github.com/itsyamin/flitnix/internal/devices"
 	"github.com/itsyamin/flitnix/internal/doctor"
 	"github.com/itsyamin/flitnix/internal/guest"
 	"github.com/itsyamin/flitnix/internal/netenv"
@@ -237,6 +238,8 @@ type App struct {
 	textStore   *textmsg.Store
 	auditStore    *audit.Store
 	templateStore *guest.TemplateStore
+	devicesStore  *devices.Store
+	initialShares []string
 
 	phoneContactMu   sync.Mutex
 	lastPhoneContact *time.Time
@@ -287,6 +290,10 @@ func NewApp() (*App, error) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "flitnix: template store initialization warning: %v\n", err)
 	}
+	devicesStore, err := devices.NewStore(filepath.Join(dataDir, "devices.json"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "flitnix: devices store initialization warning: %v\n", err)
+	}
 
 	a := &App{
 		store:         store,
@@ -298,6 +305,7 @@ func NewApp() (*App, error) {
 		textStore:     textmsg.NewStore(),
 		auditStore:    auditStore,
 		templateStore: templateStore,
+		devicesStore:  devicesStore,
 		source:        netenv.DefaultSource(),
 	}
 	a.sessions = session.NewManager(session.Config{OnExpire: a.releaseSession, OnEnd: a.logSessionEnd})
@@ -332,6 +340,9 @@ func (a *App) releaseSession(key string) {
 // runtime (native file dialogs).
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	if len(a.initialShares) > 0 {
+		_, _ = a.AddDroppedSources(a.initialShares)
+	}
 }
 
 // shortKey returns a bounded prefix of a session's non-secret key for log
@@ -1930,4 +1941,27 @@ func (a *App) ClearTextMessages(sessionKey string) error {
 		a.textStore.Clear(sessionKey)
 	}
 	return nil
+}
+
+// ---- Cryptographically Trusted Devices ----
+
+func (a *App) ListTrustedDevices() []devices.Device {
+	if a.devicesStore == nil {
+		return nil
+	}
+	return a.devicesStore.List()
+}
+
+func (a *App) RemoveTrustedDevice(id string) error {
+	if a.devicesStore == nil {
+		return nil
+	}
+	return a.devicesStore.Remove(id)
+}
+
+func (a *App) SetDeviceAutoApprove(id string, autoApprove bool) error {
+	if a.devicesStore == nil {
+		return nil
+	}
+	return a.devicesStore.SetAutoApprove(id, autoApprove)
 }

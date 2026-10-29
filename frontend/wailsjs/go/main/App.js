@@ -114,6 +114,10 @@ export function ListTextMessages(arg1) {
   return window['go']['main']['App']['ListTextMessages'](arg1);
 }
 
+export function ListTrustedDevices() {
+  return window['go']['main']['App']['ListTrustedDevices']();
+}
+
 export function OpenGuestFolder() {
   return window['go']['main']['App']['OpenGuestFolder']();
 }
@@ -166,6 +170,10 @@ export function RemoveExpectedParticipant(arg1) {
   return window['go']['main']['App']['RemoveExpectedParticipant'](arg1);
 }
 
+export function RemoveTrustedDevice(arg1) {
+  return window['go']['main']['App']['RemoveTrustedDevice'](arg1);
+}
+
 export function RevokeGuest(arg1) {
   return window['go']['main']['App']['RevokeGuest'](arg1);
 }
@@ -196,6 +204,10 @@ export function ServerAddress() {
 
 export function SessionQR(arg1) {
   return window['go']['main']['App']['SessionQR'](arg1);
+}
+
+export function SetDeviceAutoApprove(arg1, arg2) {
+  return window['go']['main']['App']['SetDeviceAutoApprove'](arg1, arg2);
 }
 
 export function StartGuestRoom(arg1, arg2) {

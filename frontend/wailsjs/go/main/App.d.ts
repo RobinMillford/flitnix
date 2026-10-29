@@ -4,6 +4,7 @@ import {main} from '../models';
 import {guest} from '../models';
 import {audit} from '../models';
 import {netenv} from '../models';
+import {devices} from '../models';
 import {doctor} from '../models';
 
 export function AddDroppedSources(arg1:Array<string>):Promise<Array<main.SharedSourceView>>;
@@ -62,6 +63,8 @@ export function ListSharedSources():Promise<Array<main.SharedSourceView>>;
 
 export function ListTextMessages(arg1:string):Promise<Array<main.TextMessageView>>;
 
+export function ListTrustedDevices():Promise<Array<devices.Device>>;
+
 export function OpenGuestFolder():Promise<void>;
 
 export function PickExportDestination():Promise<string>;
@@ -88,6 +91,8 @@ export function RejectUpload(arg1:string):Promise<main.UploadView>;
 
 export function RemoveExpectedParticipant(arg1:string):Promise<void>;
 
+export function RemoveTrustedDevice(arg1:string):Promise<void>;
+
 export function RevokeGuest(arg1:string):Promise<void>;
 
 export function RevokeSharedFile(arg1:string):Promise<void>;
@@ -103,6 +108,8 @@ export function SendTextMessage(arg1:string,arg2:string):Promise<main.TextMessag
 export function ServerAddress():Promise<string>;
 
 export function SessionQR(arg1:string):Promise<string>;
+
+export function SetDeviceAutoApprove(arg1:string,arg2:boolean):Promise<void>;
 
 export function StartGuestRoom(arg1:string,arg2:number):Promise<main.GuestRoomView>;
 

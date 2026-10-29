@@ -2,6 +2,7 @@ package main
 
 import (
 	"embed"
+	"os"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -20,14 +21,21 @@ var assets embed.FS
 var appIcon []byte
 
 func main() {
+	// Process CLI flags and subcommands before GUI initialization.
+	handled, code, initialShares := handleCLI(os.Args, os.Stdout, os.Stderr)
+	if handled {
+		os.Exit(code)
+	}
+
 	// Create an instance of the app structure. Constructing the receive
 	// store can fail (e.g. an unresolvable home directory), so the error is
 	// reported and startup is abandoned before any GUI work happens.
 	app, err := NewApp()
 	if err != nil {
 		println("Error:", err.Error())
-		return
+		os.Exit(1)
 	}
+	app.initialShares = initialShares
 
 	// Create application with options
 	err = wails.Run(&options.App{
@@ -49,5 +57,6 @@ func main() {
 
 	if err != nil {
 		println("Error:", err.Error())
+		os.Exit(1)
 	}
 }
