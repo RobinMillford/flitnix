@@ -21,17 +21,23 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	stdlibRuntime "runtime"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/itsyamin/flitnix/internal/doctor"
+	"github.com/itsyamin/flitnix/internal/guest"
 	"github.com/itsyamin/flitnix/internal/netenv"
 	"github.com/itsyamin/flitnix/internal/qr"
 	"github.com/itsyamin/flitnix/internal/server"
 	"github.com/itsyamin/flitnix/internal/session"
+	"github.com/itsyamin/flitnix/internal/textmsg"
 	"github.com/itsyamin/flitnix/internal/transfer"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -52,6 +58,60 @@ type SessionView struct {
 	// session's URL (never a gateway address). Listings leave both empty.
 	InterfaceName string `json:"interfaceName,omitempty"`
 	Address       string `json:"address,omitempty"`
+}
+
+type GuestRoomView struct {
+	ID              string    `json:"id"`
+	Date            string    `json:"date"`
+	DestinationRoot string    `json:"destinationRoot"`
+	RoomFolder      string    `json:"roomFolder"`
+	State           string    `json:"state"`
+	DurationSeconds int       `json:"durationSeconds"`
+	CreatedAt       time.Time `json:"createdAt"`
+	ExpiresAt       time.Time `json:"expiresAt"`
+	InviteSecret    string    `json:"inviteSecret,omitempty"`
+	InviteURL       string    `json:"inviteUrl,omitempty"`
+	QRDataURL       string    `json:"qrDataUrl,omitempty"`
+}
+
+type GuestView struct {
+	ID        string    `json:"id"`
+	Nickname  string    `json:"nickname"`
+	State     string    `json:"state"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+type GuestUploadView struct {
+	ID          string    `json:"id"`
+	GuestID     string    `json:"guestId"`
+	GuestName   string    `json:"guestName"`
+	FileName    string    `json:"fileName"`
+	Size        int64     `json:"size"`
+	State       string    `json:"state"`
+	Transferred int64     `json:"transferred"`
+	Speed       float64   `json:"speed"`
+	CreatedAt   time.Time `json:"createdAt"`
+	CompletedAt time.Time `json:"completedAt,omitempty"`
+	SHA256      string    `json:"sha256,omitempty"`
+	Error       string    `json:"error,omitempty"`
+}
+
+type GuestRoomStateView struct {
+	Room             *GuestRoomView    `json:"room"`
+	PendingGuests    []GuestView       `json:"pendingGuests"`
+	ApprovedGuests   []GuestView       `json:"approvedGuests"`
+	PendingUploads   []GuestUploadView `json:"pendingUploads"`
+	CompletedUploads []GuestUploadView `json:"completedUploads"`
+	RecentUploads    []GuestUploadView `json:"recentUploads"`
+}
+
+type TextMessageView struct {
+	ID        string    `json:"id"`
+	Sender    string    `json:"sender"`
+	Content   string    `json:"content"`
+	IsLink    bool      `json:"isLink"`
+	URL       string    `json:"url,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 // UploadView is the UI projection of an incoming upload (pending approval,
@@ -145,6 +205,8 @@ type App struct {
 	coordinator *transfer.Coordinator
 	registry    *transfer.Registry
 	downloads   *transfer.DownloadRegistry
+	guestMgr    *guest.Manager
+	textStore   *textmsg.Store
 
 	// source supplies live network-interface state for the session
 	// address decisions; tests inject synthetic interfaces.
@@ -177,6 +239,8 @@ func NewApp() (*App, error) {
 		coordinator: transfer.NewCoordinator(transfer.CoordinatorConfig{}),
 		registry:    transfer.NewRegistry(),
 		downloads:   transfer.NewDownloadRegistry(),
+		guestMgr:    guest.NewManager(),
+		textStore:   textmsg.NewStore(),
 		source:      netenv.DefaultSource(),
 	}
 	a.sessions = session.NewManager(session.Config{OnExpire: a.releaseSession, OnEnd: a.logSessionEnd})
@@ -204,6 +268,7 @@ func (a *App) releaseSession(key string) {
 	for _, source := range a.registry.ListSourceSession(key) {
 		a.registry.RemoveSource(source.ID)
 	}
+	a.textStore.Clear(key)
 }
 
 // startup records the Wails runtime context so bound methods can call the
@@ -256,6 +321,7 @@ func (a *App) shutdown(ctx context.Context) {
 	}
 	a.sessions.Close()
 	a.registry.Clear()
+	a.guestMgr.Close()
 	a.stopServer()
 }
 
@@ -292,12 +358,14 @@ func (a *App) startServerLocked(listen string) error {
 	srv := server.New(server.Config{
 		ListenAddr: listen,
 		Services: &server.Services{
-			Sessions:    a.sessions,
-			Transfers:   a.transfers,
-			Coordinator: a.coordinator,
-			Registry:    a.registry,
-			Downloads:   a.downloads,
-			Diagnose:    a.logTransferDiagnostics,
+			Sessions:     a.sessions,
+			Transfers:    a.transfers,
+			Coordinator:  a.coordinator,
+			Registry:     a.registry,
+			Downloads:    a.downloads,
+			GuestManager: a.guestMgr,
+			TextMessages: a.textStore,
+			Diagnose:     a.logTransferDiagnostics,
 		},
 	})
 	serveCtx, cancel := context.WithCancel(context.Background())
@@ -1113,4 +1181,343 @@ func downloadViews(list []transfer.Download) []DownloadView {
 		out = append(out, downloadView(d))
 	}
 	return out
+}
+
+// ---- Guest Drop Box methods ----
+
+func (a *App) StartGuestRoom(destinationDir string, durationMinutes int) (GuestRoomView, error) {
+	if destinationDir == "" {
+		destinationDir = a.store.Dir()
+	}
+
+	a.srvMu.Lock()
+	var listen string
+	if a.srv != nil && a.srv.Addr() != nil {
+		listen = a.srv.Addr().String()
+	}
+	a.srvMu.Unlock()
+
+	if listen == "" {
+		ifaces, err := a.ListNetworkInterfaces()
+		if err != nil || len(ifaces) == 0 {
+			return GuestRoomView{}, errors.New("flitnix: no usable network interface found; connect to a network first")
+		}
+		listen = fmt.Sprintf("%s:%d", ifaces[0].IP, server.DefaultPort)
+	}
+
+	if err := a.ensureServer(listen); err != nil {
+		return GuestRoomView{}, err
+	}
+
+	duration := time.Duration(durationMinutes) * time.Minute
+	if duration <= 0 {
+		duration = 1 * time.Hour
+	}
+
+	room, err := a.guestMgr.CreateRoom(destinationDir, duration)
+	if err != nil {
+		return GuestRoomView{}, err
+	}
+
+	a.srvMu.Lock()
+	srvURL := a.srv.URL()
+	a.srvMu.Unlock()
+
+	inviteURL := fmt.Sprintf("%s/guest#%s", srvURL, room.InviteSecret)
+	qrPNG, err := qr.PNG(inviteURL, qr.DefaultSize)
+	var qrDataURL string
+	if err == nil {
+		qrDataURL = "data:image/png;base64," + base64.StdEncoding.EncodeToString(qrPNG)
+	}
+
+	v := room.View()
+	return GuestRoomView{
+		ID:              v.ID,
+		Date:            v.Date,
+		DestinationRoot: v.DestinationRoot,
+		RoomFolder:      v.RoomFolder,
+		State:           string(v.State),
+		DurationSeconds: v.DurationSeconds,
+		CreatedAt:       v.CreatedAt,
+		ExpiresAt:       v.ExpiresAt,
+		InviteSecret:    v.InviteSecret,
+		InviteURL:       inviteURL,
+		QRDataURL:       qrDataURL,
+	}, nil
+}
+
+func (a *App) GetGuestRoomState() (GuestRoomStateView, error) {
+	room := a.guestMgr.ActiveRoom()
+	if room == nil {
+		return GuestRoomStateView{}, nil
+	}
+
+	a.srvMu.Lock()
+	var srvURL string
+	if a.srv != nil {
+		srvURL = a.srv.URL()
+	}
+	a.srvMu.Unlock()
+
+	var qrDataURL string
+	inviteURL := ""
+	if srvURL != "" {
+		inviteURL = fmt.Sprintf("%s/guest#%s", srvURL, room.InviteSecret)
+		qrPNG, err := qr.PNG(inviteURL, qr.DefaultSize)
+		if err == nil {
+			qrDataURL = "data:image/png;base64," + base64.StdEncoding.EncodeToString(qrPNG)
+		}
+	}
+
+	rv := room.View()
+	roomView := &GuestRoomView{
+		ID:              rv.ID,
+		Date:            rv.Date,
+		DestinationRoot: rv.DestinationRoot,
+		RoomFolder:      rv.RoomFolder,
+		State:           string(rv.State),
+		DurationSeconds: rv.DurationSeconds,
+		CreatedAt:       rv.CreatedAt,
+		ExpiresAt:       rv.ExpiresAt,
+		InviteSecret:    rv.InviteSecret,
+		InviteURL:       inviteURL,
+		QRDataURL:       qrDataURL,
+	}
+
+	var pendingGuests []GuestView
+	var approvedGuests []GuestView
+	for _, g := range room.ListGuests() {
+		gv := GuestView{
+			ID:        g.ID,
+			Nickname:  g.Nickname,
+			State:     string(g.State),
+			CreatedAt: g.CreatedAt,
+		}
+		if g.State == guest.GuestPending {
+			pendingGuests = append(pendingGuests, gv)
+		} else if g.State == guest.GuestApproved {
+			approvedGuests = append(approvedGuests, gv)
+		}
+	}
+
+	var pendingUploads []GuestUploadView
+	var completedUploads []GuestUploadView
+	var recentUploads []GuestUploadView
+	for _, u := range room.ListUploads() {
+		uv := GuestUploadView{
+			ID:          u.ID,
+			GuestID:     u.GuestID,
+			GuestName:   u.GuestName,
+			FileName:    u.FileName,
+			Size:        u.Size,
+			State:       string(u.State),
+			Transferred: u.Transferred,
+			Speed:       u.Speed,
+			CreatedAt:   u.CreatedAt,
+			CompletedAt: u.CompletedAt,
+			SHA256:      u.SHA256,
+			Error:       u.Error,
+		}
+		recentUploads = append(recentUploads, uv)
+		if u.State == guest.UploadPendingApproval {
+			pendingUploads = append(pendingUploads, uv)
+		} else if u.State == guest.UploadCompleted {
+			completedUploads = append(completedUploads, uv)
+		}
+	}
+
+	sort.Slice(recentUploads, func(i, j int) bool {
+		return recentUploads[i].CreatedAt.After(recentUploads[j].CreatedAt)
+	})
+
+	return GuestRoomStateView{
+		Room:             roomView,
+		PendingGuests:    pendingGuests,
+		ApprovedGuests:   approvedGuests,
+		PendingUploads:   pendingUploads,
+		CompletedUploads: completedUploads,
+		RecentUploads:    recentUploads,
+	}, nil
+}
+
+func (a *App) ApproveGuest(guestID string) error {
+	room := a.guestMgr.ActiveRoom()
+	if room == nil {
+		return errors.New("flitnix: no active guest room")
+	}
+	return room.ApproveGuest(guestID)
+}
+
+func (a *App) RejectGuest(guestID string) error {
+	room := a.guestMgr.ActiveRoom()
+	if room == nil {
+		return errors.New("flitnix: no active guest room")
+	}
+	return room.RejectGuest(guestID)
+}
+
+func (a *App) RevokeGuest(guestID string) error {
+	room := a.guestMgr.ActiveRoom()
+	if room == nil {
+		return errors.New("flitnix: no active guest room")
+	}
+	return room.RevokeGuest(guestID)
+}
+
+func (a *App) ApproveGuestUpload(uploadID string) error {
+	room := a.guestMgr.ActiveRoom()
+	if room == nil {
+		return errors.New("flitnix: no active guest room")
+	}
+	return room.ApproveUpload(uploadID)
+}
+
+func (a *App) RejectGuestUpload(uploadID string) error {
+	room := a.guestMgr.ActiveRoom()
+	if room == nil {
+		return errors.New("flitnix: no active guest room")
+	}
+	return room.RejectUpload(uploadID)
+}
+
+func (a *App) EndGuestRoom() error {
+	return a.guestMgr.EndRoom()
+}
+
+func (a *App) PickGuestDestination() (string, error) {
+	if a.ctx == nil {
+		return a.store.Dir(), nil
+	}
+	dir, err := runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Choose Guest Drop Box Destination",
+	})
+	if err != nil {
+		return "", err
+	}
+	if dir == "" {
+		return a.store.Dir(), nil
+	}
+	return dir, nil
+}
+
+func openFolderInOS(folder string) error {
+	var cmd *exec.Cmd
+	switch stdlibRuntime.GOOS {
+	case "windows":
+		cmd = exec.Command("explorer.exe", folder)
+	case "darwin":
+		cmd = exec.Command("open", folder)
+	default:
+		cmd = exec.Command("xdg-open", folder)
+	}
+	return cmd.Start()
+}
+
+func (a *App) OpenGuestFolder() error {
+	room := a.guestMgr.ActiveRoom()
+	if room == nil {
+		return errors.New("flitnix: no active guest room")
+	}
+	folder := room.RoomFolder
+	_ = os.MkdirAll(folder, 0700)
+	return openFolderInOS(folder)
+}
+
+// ---- Connection Doctor methods ----
+
+func (a *App) RunConnectionDiagnostics() doctor.DiagnosticReport {
+	a.srvMu.Lock()
+	serverRunning := a.srv != nil
+	var serverAddr string
+	if a.srv != nil && a.srv.Addr() != nil {
+		serverAddr = a.srv.Addr().String()
+	}
+	a.srvMu.Unlock()
+
+	var activeIP string
+	var activeIface string
+	for _, s := range a.ListSessions() {
+		if s.Address != "" {
+			activeIP = s.Address
+		}
+		if s.InterfaceName != "" {
+			activeIface = s.InterfaceName
+		}
+	}
+	if activeIP == "" && serverAddr != "" {
+		host, _, err := net.SplitHostPort(serverAddr)
+		if err == nil {
+			activeIP = host
+		}
+	}
+
+	return doctor.RunDiagnostics(doctor.Params{
+		NetSource:     a.source,
+		ServerRunning: serverRunning,
+		ServerAddr:    serverAddr,
+		ActiveIP:      activeIP,
+		ActiveIface:   activeIface,
+	})
+}
+
+// ---- Quick Text & Link Transfer methods ----
+
+func (a *App) SendTextMessage(sessionKey, content string) (TextMessageView, error) {
+	if sessionKey == "" {
+		sessions := a.sessions.ActiveSessions()
+		if len(sessions) == 0 {
+			return TextMessageView{}, errors.New("flitnix: no active pairing session; start one first")
+		}
+		sessionKey = sessions[0].Key()
+	}
+
+	msg, err := a.textStore.Add(sessionKey, "desktop", content)
+	if err != nil {
+		return TextMessageView{}, err
+	}
+	return TextMessageView{
+		ID:        msg.ID,
+		Sender:    msg.Sender,
+		Content:   msg.Content,
+		IsLink:    msg.IsLink,
+		URL:       msg.URL,
+		CreatedAt: msg.CreatedAt,
+	}, nil
+}
+
+func (a *App) ListTextMessages(sessionKey string) []TextMessageView {
+	if sessionKey == "" {
+		sessions := a.sessions.ActiveSessions()
+		if len(sessions) == 0 {
+			return []TextMessageView{}
+		}
+		sessionKey = sessions[0].Key()
+	}
+
+	msgs := a.textStore.List(sessionKey)
+	res := make([]TextMessageView, len(msgs))
+	for i, m := range msgs {
+		res[i] = TextMessageView{
+			ID:        m.ID,
+			Sender:    m.Sender,
+			Content:   m.Content,
+			IsLink:    m.IsLink,
+			URL:       m.URL,
+			CreatedAt: m.CreatedAt,
+		}
+	}
+	return res
+}
+
+func (a *App) ClearTextMessages(sessionKey string) error {
+	if sessionKey == "" {
+		sessions := a.sessions.ActiveSessions()
+		if len(sessions) > 0 {
+			sessionKey = sessions[0].Key()
+		}
+	}
+	if sessionKey != "" {
+		a.textStore.Clear(sessionKey)
+	}
+	return nil
 }
