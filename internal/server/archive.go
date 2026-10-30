@@ -3,9 +3,12 @@ package server
 import (
 	"archive/zip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"mime"
 	"net/http"
@@ -71,6 +74,18 @@ type createGrantResponse struct {
 	ProgressID  string `json:"progressId"`
 	Archive     bool   `json:"archive"`
 	Filename    string `json:"filename"`
+	SHA256      string `json:"sha256,omitempty"`
+}
+
+type countingHasher struct {
+	h       hash.Hash
+	written int64
+}
+
+func (c *countingHasher) Write(p []byte) (n int, err error) {
+	n, err = c.h.Write(p)
+	c.written += int64(n)
+	return n, err
 }
 
 func createDownloadGrant(svcs *Services, grants *DownloadGrantStore) http.HandlerFunc {
@@ -111,6 +126,7 @@ func createDownloadGrant(svcs *Services, grants *DownloadGrantStore) http.Handle
 			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
+
 		http.SetCookie(w, &http.Cookie{
 			Name: grantCookieName, Value: grant.Secret,
 			Path: "/api/downloads/" + grant.ID + "/content", HttpOnly: true,
@@ -120,7 +136,9 @@ func createDownloadGrant(svcs *Services, grants *DownloadGrantStore) http.Handle
 		w.Header().Set("Cache-Control", "no-store")
 		writeJSON(w, http.StatusCreated, createGrantResponse{
 			DownloadURL: "/api/downloads/" + grant.ID + "/content",
-			ProgressID:  progress.ID, Archive: grant.Archive, Filename: grant.Filename,
+			ProgressID:  progress.ID,
+			Archive:     grant.Archive,
+			Filename:    grant.Filename,
 		})
 	}
 }
@@ -137,10 +155,14 @@ func serveDownloadProgress(svcs *Services, grants *DownloadGrantStore) http.Hand
 			writeError(w, http.StatusNotFound, "progress not found")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{
+		resp := map[string]any{
 			"id": p.ID, "totalBytes": p.Total, "processedBytes": p.Processed,
 			"state": p.State, "error": p.Error,
-		})
+		}
+		if p.State == progressCompleted && p.SHA256 != "" {
+			resp["sha256"] = p.SHA256
+		}
+		writeJSON(w, http.StatusOK, resp)
 	}
 }
 
@@ -162,7 +184,7 @@ func buildArchiveEntries(sources []archiveSource) ([]archiveEntry, int64, error)
 				}
 				if !used[name] {
 					used[name] = true
-					entries = append(entries, archiveEntry{Name: name, Dir: true})
+					entries = append(entries, archiveEntry{Name: name, Dir: true, ModTime: time.Unix(0, 0)})
 				}
 			}
 			for _, item := range source.Items {
@@ -175,11 +197,15 @@ func buildArchiveEntries(sources []archiveSource) ([]archiveEntry, int64, error)
 				}
 				name = uniqueArchiveName(name, used)
 				used[name] = true
-				entries = append(entries, archiveEntry{Name: name, Path: item.Path, Size: item.Size})
+				var modTime time.Time
+				if info, statErr := os.Stat(item.Path); statErr == nil {
+					modTime = info.ModTime().Truncate(2 * time.Second)
+				}
+				entries = append(entries, archiveEntry{Name: name, Path: item.Path, Size: item.Size, ModTime: modTime})
 				total += item.Size
 			}
 			if len(source.Items) == 0 && len(source.Empty) == 0 {
-				entries = append(entries, archiveEntry{Name: root + "/", Dir: true})
+				entries = append(entries, archiveEntry{Name: root + "/", Dir: true, ModTime: time.Unix(0, 0)})
 			}
 		} else {
 			if source.File.Size < 0 || total > (int64(^uint64(0)>>1))-source.File.Size {
@@ -190,7 +216,11 @@ func buildArchiveEntries(sources []archiveSource) ([]archiveEntry, int64, error)
 				return nil, 0, err
 			}
 			used[name] = true
-			entries = append(entries, archiveEntry{Name: name, Path: source.File.Path, Size: source.File.Size})
+			var modTime time.Time
+			if info, statErr := os.Stat(source.File.Path); statErr == nil {
+				modTime = info.ModTime().Truncate(2 * time.Second)
+			}
+			entries = append(entries, archiveEntry{Name: name, Path: source.File.Path, Size: source.File.Size, ModTime: modTime})
 			total += source.File.Size
 		}
 		if len(entries) > transfer.MaxSourceItems+transfer.MaxSourceEmptyDirs {
@@ -483,6 +513,9 @@ func (g *guardedReader) flush() {
 }
 
 func updateProgress(p *archiveProgress, n int64) {
+	if p == nil {
+		return
+	}
 	p.mu.Lock()
 	p.Processed += n
 	processed := p.Processed
@@ -507,18 +540,31 @@ func setProgressFailed(p *archiveProgress, reason string) {
 // only ever passed after the whole body, including the ZIP central directory,
 // was written and flushed to the connection.
 func finishProgress(p *archiveProgress, err error) {
+	finishProgressWithDigest(p, err, "")
+}
+
+func finishProgressWithDigest(p *archiveProgress, err error, sha256Hex string) {
+	if p == nil {
+		return
+	}
 	p.mu.Lock()
 	p.Updated = p.now()
 	if err == nil {
 		p.State, p.Error = progressCompleted, ""
+		p.SHA256 = sha256Hex
 		processed := p.Processed
 		p.mu.Unlock()
 		if p.downloads != nil {
-			p.downloads.Finish(p.downloadID, processed)
+			if sha256Hex != "" {
+				p.downloads.FinishWithDigest(p.downloadID, processed, sha256Hex)
+			} else {
+				p.downloads.Finish(p.downloadID, processed)
+			}
 		}
 		return
 	}
 	p.State, p.Error = progressFailed, publicDownloadError(err)
+	p.SHA256 = ""
 	processed := p.Processed
 	reason := p.Error
 	p.mu.Unlock()
@@ -543,12 +589,17 @@ func flushResponse(w http.ResponseWriter) error {
 // would make a truncated archive look complete.
 func writeArchive(ctx context.Context, out io.Writer, grant downloadGrant, progress *archiveProgress) error {
 	zw := zip.NewWriter(out)
-	buf := make([]byte, downloadCopySize)
+	bufPtr := transfer.GetCopyBuffer()
+	defer transfer.PutCopyBuffer(bufPtr)
+	buf := *bufPtr
 	for _, entry := range grant.Entries {
 		if ctx.Err() != nil {
 			return errDownloadCanceled
 		}
 		header := &zip.FileHeader{Name: entry.Name, Method: zip.Store}
+		if !entry.ModTime.IsZero() {
+			header.Modified = entry.ModTime
+		}
 		if entry.Dir {
 			header.SetMode(0o755 | os.ModeDir)
 			if _, err := zw.CreateHeader(header); err != nil {
@@ -560,20 +611,25 @@ func writeArchive(ctx context.Context, out io.Writer, grant downloadGrant, progr
 			return err
 		}
 	}
-	if progress.downloads != nil {
+	if progress != nil && progress.downloads != nil {
 		progress.downloads.Finalize(progress.downloadID)
 	}
 	return zw.Close()
 }
 
 func writeArchiveFile(ctx context.Context, zw *zip.Writer, header *zip.FileHeader, entry archiveEntry, sess *session.Session, progress *archiveProgress, buf []byte) error {
-	f, err := openTrustedSource(entry.Path)
+	f, info, err := openTrustedSource(entry.Path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	if info, statErr := f.Stat(); statErr == nil {
-		header.Modified = info.ModTime()
+	if info.Size() != entry.Size {
+		return errSourceChanged
+	}
+	if !entry.ModTime.IsZero() {
+		header.Modified = entry.ModTime
+	} else {
+		header.Modified = info.ModTime().Truncate(2 * time.Second)
 	}
 	part, err := zw.CreateHeader(header)
 	if err != nil {
@@ -635,6 +691,7 @@ func serveArchiveDownload(svcs *Services, grants *DownloadGrantStore, stall time
 		h := w.Header()
 		h.Set("Content-Disposition", contentDisposition(grant.Filename))
 		h.Set("Cache-Control", "no-store")
+		h.Set("X-Type-Options", "nosniff")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Accept-Ranges", "none")
 
@@ -644,15 +701,29 @@ func serveArchiveDownload(svcs *Services, grants *DownloadGrantStore, stall time
 				svcs.Downloads.Begin(grant.DownloadID)
 			}
 			started, err = streamSingleFile(r.Context(), w, out, grant, progress)
+			if err != nil && !started {
+				finishProgressWithDigest(progress, err, "")
+			}
 		} else {
 			h.Set("Content-Type", "application/zip")
+			h.Set("Trailer", "Content-Digest, X-Content-SHA256")
 			w.WriteHeader(http.StatusOK)
-			err = writeArchive(r.Context(), out, grant, progress)
+
+			passHasher := sha256.New()
+			teeOut := io.MultiWriter(out, passHasher)
+			err = writeArchive(r.Context(), teeOut, grant, progress)
 			if err == nil {
+				actualSHA256 := hex.EncodeToString(passHasher.Sum(nil))
+				if digestHdr := transfer.FormatContentDigest(actualSHA256); digestHdr != "" {
+					w.Header().Set("Content-Digest", digestHdr)
+				}
+				w.Header().Set("X-Content-SHA256", actualSHA256)
+				finishProgressWithDigest(progress, nil, actualSHA256)
 				err = flushResponse(w)
+			} else {
+				finishProgressWithDigest(progress, err, "")
 			}
 		}
-		finishProgress(progress, err)
 		if err != nil && started {
 			abortResponse()
 		}
@@ -665,31 +736,48 @@ func serveArchiveDownload(svcs *Services, grants *DownloadGrantStore, stall time
 // connection can end normally.
 func streamSingleFile(ctx context.Context, w http.ResponseWriter, out io.Writer, grant downloadGrant, progress *archiveProgress) (started bool, err error) {
 	entry := grant.Entries[0]
-	f, err := openTrustedSource(entry.Path)
+	f, info, err := openTrustedSource(entry.Path)
 	if err != nil {
 		http.Error(w, "source unavailable", http.StatusGone)
 		return false, err
 	}
 	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		http.Error(w, "source unavailable", http.StatusGone)
-		return false, errSourceUnavailable
+	if info.Size() != entry.Size {
+		http.Error(w, "source changed", http.StatusGone)
+		return false, errSourceChanged
 	}
 	size := info.Size()
+
 	h := w.Header()
 	h.Set("Content-Type", "application/octet-stream")
 	h.Set("Content-Length", strconv.FormatInt(size, 10))
+	h.Set("Trailer", "Content-Digest, X-Content-SHA256")
 	w.WriteHeader(http.StatusOK)
+
+	streamHasher := sha256.New()
+	teeOut := io.MultiWriter(out, streamHasher)
 	src := &guardedReader{r: io.LimitReader(f, size), ctx: ctx, sess: grant.Sess, p: progress}
-	n, err := io.CopyBuffer(out, src, make([]byte, downloadCopySize))
+	bufPtr := transfer.GetCopyBuffer()
+	defer transfer.PutCopyBuffer(bufPtr)
+	buf := *bufPtr
+	n, err := io.CopyBuffer(teeOut, src, buf)
 	src.flush()
 	if err != nil {
+		finishProgressWithDigest(progress, err, "")
 		return true, err
 	}
 	if n != size {
+		finishProgressWithDigest(progress, errSourceChanged, "")
 		return true, errSourceChanged
 	}
+
+	actualSHA256 := hex.EncodeToString(streamHasher.Sum(nil))
+	if digestHdr := transfer.FormatContentDigest(actualSHA256); digestHdr != "" {
+		w.Header().Set("Content-Digest", digestHdr)
+	}
+	w.Header().Set("X-Content-SHA256", actualSHA256)
+
+	finishProgressWithDigest(progress, nil, actualSHA256)
 	return true, flushResponse(w)
 }
 
@@ -697,19 +785,19 @@ func streamSingleFile(ctx context.Context, w http.ResponseWriter, out io.Writer,
 // that is not a regular file at the moment of opening (symlinks, devices,
 // sockets) and re-checks the opened handle against the lstat result so a swap
 // between the two is caught. Errors carry no filesystem path.
-func openTrustedSource(path string) (*os.File, error) {
+func openTrustedSource(path string) (*os.File, os.FileInfo, error) {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() {
-		return nil, errSourceUnavailable
+		return nil, nil, errSourceUnavailable
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, errSourceUnavailable
+		return nil, nil, errSourceUnavailable
 	}
 	opened, err := f.Stat()
 	if err != nil || !os.SameFile(info, opened) || !opened.Mode().IsRegular() {
 		_ = f.Close()
-		return nil, errSourceChanged
+		return nil, nil, errSourceChanged
 	}
-	return f, nil
+	return f, opened, nil
 }

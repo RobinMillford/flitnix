@@ -4,7 +4,7 @@ platform: "linux"
 version: "${VERSION}"
 section: "net"
 priority: "optional"
-maintainer: "RobinMillford <issan.yamin@gmail.com>"
+maintainer: "RobinMillford <RobinMillford@users.noreply.github.com>"
 description: "Fast, private local file transfer between desktop and phone"
 vendor: "Flitnix"
 homepage: "https://github.com/RobinMillford/flitnix"
@@ -17,6 +17,18 @@ contents:
       mode: 0755
   - src: ./build/linux/flitnix.desktop
     dst: /usr/share/applications/flitnix.desktop
+    file_info:
+      mode: 0644
+  - src: ./build/linux/nautilus/Share with Flitnix
+    dst: /etc/skel/.local/share/nautilus/scripts/Share with Flitnix
+    file_info:
+      mode: 0755
+  - src: ./build/linux/nautilus/Share with Flitnix
+    dst: /usr/share/nautilus-scripts/Share with Flitnix
+    file_info:
+      mode: 0755
+  - src: ./build/linux/servicemenus/flitnix.desktop
+    dst: /usr/share/kio/servicemenus/flitnix.desktop
     file_info:
       mode: 0644
   - src: ./build/linux/icons/hicolor/16x16/apps/flitnix.png

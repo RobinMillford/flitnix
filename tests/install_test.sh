@@ -346,4 +346,134 @@ with socketserver.TCPServer(('127.0.0.1', 0), lambda *a: SilentHandler(*a, direc
     unset SERVER_PID_V2
 fi
 
+# Test 8: Desktop File-Manager Integrations Validation
+
+# 8a: Linux Desktop Entry
+if command -v desktop-file-validate >/dev/null 2>&1; then
+    desktop-file-validate build/linux/flitnix.desktop
+fi
+if ! grep -q "^Exec=flitnix %F" build/linux/flitnix.desktop; then
+    echo "  [FAIL] flitnix.desktop missing Exec=flitnix %F"
+    exit 1
+fi
+if ! grep -q "inode/directory;" build/linux/flitnix.desktop; then
+    echo "  [FAIL] flitnix.desktop missing inode/directory in MimeType"
+    exit 1
+fi
+if ! grep -q "^Actions=Share;" build/linux/flitnix.desktop; then
+    echo "  [FAIL] flitnix.desktop missing Actions=Share;"
+    exit 1
+fi
+if ! grep -q "\[Desktop Action Share\]" build/linux/flitnix.desktop; then
+    echo "  [FAIL] flitnix.desktop missing [Desktop Action Share] group"
+    exit 1
+fi
+echo "  [PASS] Linux desktop entry validation (Exec=%F, MIME, Actions)"
+
+# 8b: GNOME Files / Nautilus Script
+if [ ! -x "build/linux/nautilus/Share with Flitnix" ]; then
+    echo "  [FAIL] Nautilus script is missing or not executable"
+    exit 1
+fi
+bash -n "build/linux/nautilus/Share with Flitnix"
+if ! grep -q 'exec flitnix "\$@"' "build/linux/nautilus/Share with Flitnix"; then
+    echo "  [FAIL] Nautilus script does not exec flitnix with arguments"
+    exit 1
+fi
+echo "  [PASS] Nautilus script validation (executable, syntax, exec flitnix)"
+
+# 8c: KDE Dolphin Service Menu
+if [ ! -f "build/linux/servicemenus/flitnix.desktop" ]; then
+    echo "  [FAIL] KDE Dolphin service menu file is missing"
+    exit 1
+fi
+if ! grep -q "^Type=Service" "build/linux/servicemenus/flitnix.desktop"; then
+    echo "  [FAIL] Dolphin service menu missing Type=Service"
+    exit 1
+fi
+if ! grep -q "^ServiceTypes=KonqPopupMenu/Plugin" "build/linux/servicemenus/flitnix.desktop"; then
+    echo "  [FAIL] Dolphin service menu missing ServiceTypes=KonqPopupMenu/Plugin"
+    exit 1
+fi
+if ! grep -q "inode/directory;" "build/linux/servicemenus/flitnix.desktop"; then
+    echo "  [FAIL] Dolphin service menu missing inode/directory"
+    exit 1
+fi
+if ! grep -q "Exec=flitnix %F" "build/linux/servicemenus/flitnix.desktop"; then
+    echo "  [FAIL] Dolphin service menu missing Exec=flitnix %F"
+    exit 1
+fi
+echo "  [PASS] KDE Dolphin service menu validation (Type=Service, ServiceTypes, Exec=%F)"
+
+# 8d: Windows NSIS Registry Integration
+if ! grep -q 'WriteRegStr SHCTX "Software\\Classes\\\*\\shell\\Flitnix"' build/windows/installer/project.nsi; then
+    echo "  [FAIL] project.nsi missing file shell verb registration"
+    exit 1
+fi
+if ! grep -q 'WriteRegStr SHCTX "Software\\Classes\\Directory\\shell\\Flitnix"' build/windows/installer/project.nsi; then
+    echo "  [FAIL] project.nsi missing directory shell verb registration"
+    exit 1
+fi
+if ! grep -q 'WriteRegStr SHCTX "Software\\Classes\\Directory\\Background\\shell\\Flitnix"' build/windows/installer/project.nsi; then
+    echo "  [FAIL] project.nsi missing directory background shell verb registration"
+    exit 1
+fi
+if ! grep -q 'DeleteRegKey SHCTX "Software\\Classes\\\*\\shell\\Flitnix"' build/windows/installer/project.nsi; then
+    echo "  [FAIL] project.nsi uninstall section missing file shell verb deletion"
+    exit 1
+fi
+if ! grep -q 'DeleteRegKey SHCTX "Software\\Classes\\Directory\\shell\\Flitnix"' build/windows/installer/project.nsi; then
+    echo "  [FAIL] project.nsi uninstall section missing directory shell verb deletion"
+    exit 1
+fi
+if ! grep -q 'DeleteRegKey SHCTX "Software\\Classes\\Directory\\Background\\shell\\Flitnix"' build/windows/installer/project.nsi; then
+    echo "  [FAIL] project.nsi uninstall section missing directory background shell verb deletion"
+    exit 1
+fi
+echo "  [PASS] Windows NSIS installer registry validation (install & uninstall symmetry)"
+
+# 8e: macOS Info.plist Integration
+python3 -c "
+import xml.etree.ElementTree as ET
+import re
+
+with open('build/darwin/Info.plist') as f:
+    raw = f.read()
+
+# Replace template tags for XML syntax check
+cleaned = re.sub(r'\{\{.*?\}\}', '', raw)
+root = ET.fromstring(cleaned)
+keys = [elem.text for elem in root.findall('./dict/key')]
+
+assert 'CFBundleDocumentTypes' in keys, 'CFBundleDocumentTypes missing from Info.plist'
+assert 'public.item' in raw, 'public.item missing from Info.plist'
+assert 'public.folder' in raw, 'public.folder missing from Info.plist'
+# Verify unsupported NSServices is not declared without native handler
+assert 'NSServices' not in keys, 'NSServices should remain deferred until a native Cocoa services provider exists'
+"
+echo "  [PASS] macOS Info.plist validation (CFBundleDocumentTypes verified, NSServices deferred)"
+
+# 8f: nfpm and packaging manifests check
+if ! grep -q "/etc/skel/.local/share/nautilus/scripts/Share with Flitnix" nfpm.yaml; then
+    echo "  [FAIL] nfpm.yaml missing /etc/skel Nautilus script packaging"
+    exit 1
+fi
+if ! grep -q "build/linux/servicemenus/flitnix.desktop" nfpm.yaml; then
+    echo "  [FAIL] nfpm.yaml missing KDE service menu packaging"
+    exit 1
+fi
+if ! grep -q "share/nautilus/scripts" scripts/package-linux.sh; then
+    echo "  [FAIL] package-linux.sh missing Nautilus script staging"
+    exit 1
+fi
+if ! grep -q "share/kio/servicemenus" scripts/package-linux.sh; then
+    echo "  [FAIL] package-linux.sh missing KDE service menu staging"
+    exit 1
+fi
+if ! grep -q "install_user_nautilus_script" install.sh; then
+    echo "  [FAIL] install.sh missing install_user_nautilus_script call"
+    exit 1
+fi
+echo "  [PASS] Package configuration validation (nfpm.yaml, package-linux.sh, install.sh)"
+
 echo "==> All installer tests passed!"

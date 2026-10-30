@@ -3,6 +3,8 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,12 +12,17 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/itsyamin/flitnix/internal/devices"
 	"github.com/itsyamin/flitnix/internal/session"
+	"github.com/itsyamin/flitnix/internal/textmsg"
 	"github.com/itsyamin/flitnix/internal/transfer"
 )
 
@@ -60,23 +67,224 @@ func newRouter(services *Services, stall, downloadStall time.Duration, grants *D
 	mux := http.NewServeMux()
 	mux.HandleFunc("/{$}", serveHome(index))
 	mux.HandleFunc("/healthz", serveHealth)
+	mux.HandleFunc("/ping", handleDiagnosticsPing(services))
 	mux.HandleFunc("/static/", serveStatic(assetsRoot))
+
+	guestIndex, err := pageAssets.ReadFile("assets/guest.html")
+	if err == nil && len(guestIndex) > 0 {
+		mux.HandleFunc("GET /guest", serveHome(guestIndex))
+	} else {
+		mux.HandleFunc("GET /guest", serveHome(index))
+	}
+
 	mux.HandleFunc("/", serveNotFound)
 
 	if services == nil {
 		// Stages before the transfer endpoints keep deterministic page-only
 		// semantics: no API surface, everything under /api/ is a 404.
 		mux.HandleFunc("/api/", serveNotFound)
+		mux.HandleFunc("/guest-api/", serveNotFound)
 	} else {
 		// The whole API router sits behind one session check, so unknown
 		// /api/* paths and method mismatches are answered only after
 		// authentication; a token holder learns nothing about the
 		// endpoint set without a live session either way.
 		api := newAPIMux(services, stall, grants)
-		mux.Handle("/api/", requireSession(services.Sessions, api.ServeHTTP))
+		mux.Handle("/api/", requireSession(services, api.ServeHTTP))
 		mux.HandleFunc("GET /api/downloads/{id}/content", serveArchiveDownload(services, grants, downloadStall))
+
+		if services.GuestManager != nil {
+			guestAPI := newGuestAPIMux(services, stall)
+			mux.Handle("/guest-api/", guestAPI)
+		} else {
+			mux.HandleFunc("/guest-api/", serveNotFound)
+		}
 	}
-	return mux
+	return securityMiddleware(mux)
+}
+
+// parseHostPort safely parses an HTTP Host authority string into host and port.
+// It strictly validates square bracket formatting for IPv6 literals and rejects
+// malformed syntax (e.g. unclosed brackets, extra colons, invalid ports).
+func parseHostPort(raw string) (host string, port string, isBracketed bool, err error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", "", false, errors.New("empty host")
+	}
+
+	// Case 1: Bracketed host (IPv6 literal, e.g. [2001:db8::1] or [2001:db8::1]:43821)
+	if strings.HasPrefix(s, "[") {
+		closeIdx := strings.Index(s, "]")
+		if closeIdx == -1 {
+			return "", "", true, errors.New("missing closing bracket in host")
+		}
+		if strings.Count(s, "[") != 1 || strings.Count(s, "]") != 1 {
+			return "", "", true, errors.New("invalid bracket syntax in host")
+		}
+		inside := s[1:closeIdx]
+		if inside == "" {
+			return "", "", true, errors.New("empty bracketed host")
+		}
+		host = inside
+		remainder := s[closeIdx+1:]
+		if remainder != "" {
+			if !strings.HasPrefix(remainder, ":") {
+				return "", "", true, errors.New("unexpected characters after closing bracket")
+			}
+			portStr := remainder[1:]
+			if portStr == "" {
+				return "", "", true, errors.New("empty port after colon")
+			}
+			p, perr := strconv.Atoi(portStr)
+			if perr != nil || p < 1 || p > 65535 {
+				return "", "", true, fmt.Errorf("invalid port %q", portStr)
+			}
+			port = portStr
+		}
+		return host, port, true, nil
+	}
+
+	// Case 2: Unbracketed host. Must not contain rogue brackets.
+	if strings.ContainsAny(s, "[]") {
+		return "", "", false, errors.New("invalid bracket in unbracketed host")
+	}
+
+	// If it contains a colon, it could be IPv4 host:port or unbracketed IPv6
+	if strings.Contains(s, ":") {
+		h, p, splitErr := net.SplitHostPort(s)
+		if splitErr == nil {
+			if p != "" {
+				portNum, perr := strconv.Atoi(p)
+				if perr != nil || portNum < 1 || portNum > 65535 {
+					return "", "", false, fmt.Errorf("invalid port %q", p)
+				}
+			}
+			return h, p, false, nil
+		}
+		// If SplitHostPort fails, check if entire string is an unbracketed IPv6 literal
+		if addr, perr := netip.ParseAddr(s); perr == nil && addr.Is6() {
+			return s, "", false, nil
+		}
+		return "", "", false, splitErr
+	}
+
+	return s, "", false, nil
+}
+
+// isAllowedHost validates that the request Host header matches an IPv4/IPv6
+// address, localhost, or RFC 2606 test domains (for httptest). Any arbitrary
+// DNS hostname is rejected to prevent DNS rebinding attacks.
+func isAllowedHost(hostHeader string) bool {
+	host, _, isBracketed, err := parseHostPort(hostHeader)
+	if err != nil || host == "" {
+		return false
+	}
+
+	// Strip IPv6 zone index if present (e.g. fe80::1%eth0 or fe80::1%25eth0)
+	cleanHost := host
+	hasZone := false
+	if zoneIdx := strings.Index(cleanHost, "%"); zoneIdx != -1 {
+		hasZone = true
+		cleanHost = cleanHost[:zoneIdx]
+	}
+
+	// Check if valid IP literal
+	if addr, perr := netip.ParseAddr(cleanHost); perr == nil {
+		if isBracketed && !addr.Is6() {
+			// RFC 3986 specifies brackets only for IPv6 literals
+			return false
+		}
+		if hasZone && !addr.Is6() {
+			// Zone identifier is only valid on IPv6
+			return false
+		}
+		return true
+	}
+
+	// Hostnames cannot be bracketed or contain zone identifiers
+	if isBracketed || hasZone {
+		return false
+	}
+
+	// Allowed test/local domain names for development and automated testing
+	lower := strings.ToLower(host)
+	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") {
+		return true
+	}
+	if lower == "example.com" || strings.HasSuffix(lower, ".example.com") || strings.HasSuffix(lower, ".test") {
+		return true
+	}
+
+	return false
+}
+
+// equalHostPort compares two Host authority strings (e.g. from Origin and Host headers),
+// accounting for IPv6 normalization, bracket syntax, and case-insensitivity.
+func equalHostPort(h1, h2 string) bool {
+	host1, port1, _, err1 := parseHostPort(h1)
+	host2, port2, _, err2 := parseHostPort(h2)
+	if err1 != nil || err2 != nil {
+		return strings.EqualFold(h1, h2)
+	}
+
+	if port1 != port2 {
+		return false
+	}
+
+	c1 := host1
+	if idx := strings.Index(c1, "%"); idx != -1 {
+		c1 = c1[:idx]
+	}
+	c2 := host2
+	if idx := strings.Index(c2, "%"); idx != -1 {
+		c2 = c2[:idx]
+	}
+
+	ip1, err1 := netip.ParseAddr(c1)
+	ip2, err2 := netip.ParseAddr(c2)
+	if err1 == nil && err2 == nil {
+		if ip1.Is4In6() {
+			ip1 = ip1.Unmap()
+		}
+		if ip2.Is4In6() {
+			ip2 = ip2.Unmap()
+		}
+		return ip1 == ip2
+	}
+
+	return strings.EqualFold(host1, host2)
+}
+
+// securityMiddleware rejects requests with untrusted Host headers (DNS rebinding)
+// and rejects cross-origin state-changing requests (CSRF).
+func securityMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isAllowedHost(r.Host) {
+			writeError(w, http.StatusBadRequest, "invalid host header")
+			return
+		}
+
+		// Cross-origin defense for state-changing operations
+		if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch || r.Method == http.MethodDelete {
+			if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+				writeError(w, http.StatusForbidden, "cross-origin request forbidden")
+				return
+			}
+			if origin := r.Header.Get("Origin"); origin != "" {
+				if origin == "null" {
+					writeError(w, http.StatusForbidden, "cross-origin request forbidden")
+					return
+				}
+				u, err := url.Parse(origin)
+				if err != nil || u.Host == "" || !equalHostPort(u.Host, r.Host) {
+					writeError(w, http.StatusForbidden, "cross-origin request forbidden")
+					return
+				}
+			}
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 // newAPIMux registers the transfer endpoints. Authentication is applied at
@@ -96,7 +304,35 @@ func newAPIMux(services *Services, stall time.Duration, grants *DownloadGrantSto
 	mux.HandleFunc("GET /api/sources", serveSourcesList(services))
 	mux.HandleFunc("POST /api/download-grants", createDownloadGrant(services, grants))
 	mux.HandleFunc("GET /api/download-progress/{id}", serveDownloadProgress(services, grants))
+	mux.HandleFunc("POST /api/text", handleTextMessageSend(services))
+	mux.HandleFunc("GET /api/text", handleTextMessageList(services))
+	mux.HandleFunc("GET /api/diagnostics/ping", handleDiagnosticsPing(services))
+	mux.HandleFunc("POST /api/diagnostics/ping", handleDiagnosticsPing(services))
+
+	// Trusted Devices Pairing & Management Endpoints (behind requireSession)
+	mux.HandleFunc("POST /api/pair/challenge", handlePairChallenge(services))
+	mux.HandleFunc("POST /api/pair/reveal", handlePairReveal(services))
+	mux.HandleFunc("POST /api/pair/request", handlePairRequest(services))
+	mux.HandleFunc("POST /api/pair/rearm", handlePairRearm(services))
+	mux.HandleFunc("POST /api/auth/challenge", handleAuthChallenge(services))
+	mux.HandleFunc("GET /api/devices", handleDevicesList(services))
+	mux.HandleFunc("DELETE /api/devices/{id}", handleDeviceRemove(services))
+	mux.HandleFunc("PUT /api/devices/{id}/auto-approve", handleDeviceSetAutoApprove(services))
+
 	return mux
+}
+
+func handleDiagnosticsPing(services *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if services != nil {
+			services.RecordContact("ping")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":    "ok",
+			"timestamp": time.Now().UTC().Format(time.RFC3339),
+		})
+	}
 }
 
 // ---- request authentication ----
@@ -114,7 +350,7 @@ type sessCtxKey struct{}
 // expired, revoked) answers 401 with a deliberately generic message so the
 // response never reveals why a token is dead. Only the authenticated handler
 // sees the session; failures here never log any token material.
-func requireSession(m *session.Manager, next http.HandlerFunc) http.Handler {
+func requireSession(svcs *Services, next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
 		auth = strings.TrimSpace(auth)
@@ -128,7 +364,7 @@ func requireSession(m *session.Manager, next http.HandlerFunc) http.Handler {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		sess, err := m.Validate(token)
+		sess, err := svcs.Sessions.Validate(token)
 		if err != nil {
 			// The message stays generic. The machine-readable code lets the
 			// phone page tell a session that really ended (expired or
@@ -138,6 +374,7 @@ func requireSession(m *session.Manager, next http.HandlerFunc) http.Handler {
 			writeUnauthorized(w, err)
 			return
 		}
+		svcs.RecordContact("api")
 		next(w, r.WithContext(context.WithValue(r.Context(), sessCtxKey{}, sess)))
 	})
 }
@@ -219,35 +456,53 @@ func isReadTimeout(err error) bool {
 
 // ---- transfer-stall deadlines ----
 
-// stallBodyReader wraps an upload body with a rolling read deadline: every
-// Read first extends the deadline by the stall window. A sender that keeps
+// stallBodyReader wraps an upload body with a rolling read deadline: it
+// extends the read deadline by the stall window at throttled intervals
+// (on first read, after 256 KiB read, or at least every 250 ms). A sender that keeps
 // pushing bytes is never cut; one that stalls inside the request stream is.
 // Setting the deadline is best effort (see the package timeout policy).
 type stallBodyReader struct {
 	io.ReadCloser
-	rc    *http.ResponseController
-	stall time.Duration // <= 0 disables
+	rc         *http.ResponseController
+	stall      time.Duration // <= 0 disables
+	lastExtend time.Time
+	bytesSince int64
 }
 
 func (b *stallBodyReader) Read(p []byte) (int, error) {
 	if b.stall > 0 {
-		_ = b.rc.SetReadDeadline(time.Now().Add(b.stall))
+		now := time.Now()
+		b.bytesSince += int64(len(p))
+		if b.lastExtend.IsZero() || b.bytesSince >= 256*1024 || now.Sub(b.lastExtend) >= 250*time.Millisecond {
+			_ = b.rc.SetReadDeadline(now.Add(b.stall))
+			b.lastExtend = now
+			b.bytesSince = 0
+		}
 	}
 	return b.ReadCloser.Read(p)
 }
 
-// stallWriter wraps a download response with a rolling write deadline: every
-// Write first extends the deadline by the stall window. A receiver that
-// drains at any speed is never cut; one that stops reading is.
+// stallWriter wraps a download response with a rolling write deadline: it
+// extends the write deadline by the stall window at throttled intervals
+// (on first write, after 256 KiB written, or at least every 250 ms). A receiver
+// that drains at any speed is never cut; one that stops reading is cut after the stall window.
 type stallWriter struct {
-	w     http.ResponseWriter
-	rc    *http.ResponseController
-	stall time.Duration // <= 0 disables
+	w          http.ResponseWriter
+	rc         *http.ResponseController
+	stall      time.Duration // <= 0 disables
+	lastExtend time.Time
+	bytesSince int64
 }
 
 func (d *stallWriter) Write(p []byte) (int, error) {
 	if d.stall > 0 {
-		_ = d.rc.SetWriteDeadline(time.Now().Add(d.stall))
+		now := time.Now()
+		d.bytesSince += int64(len(p))
+		if d.lastExtend.IsZero() || d.bytesSince >= 256*1024 || now.Sub(d.lastExtend) >= 250*time.Millisecond {
+			_ = d.rc.SetWriteDeadline(now.Add(d.stall))
+			d.lastExtend = now
+			d.bytesSince = 0
+		}
 	}
 	return d.w.Write(p)
 }
@@ -323,8 +578,9 @@ func handleUploadDeclare(svcs *Services, _ time.Duration) http.HandlerFunc {
 		}
 
 		var meta struct {
-			Name string `json:"name"`
-			Size int64  `json:"size"`
+			Name   string `json:"name"`
+			Size   int64  `json:"size"`
+			SHA256 string `json:"sha256,omitempty"`
 		}
 		dec := json.NewDecoder(bytes.NewReader(body))
 		dec.DisallowUnknownFields()
@@ -333,9 +589,85 @@ func handleUploadDeclare(svcs *Services, _ time.Duration) http.HandlerFunc {
 			return
 		}
 
-		up, err := svcs.Transfers.Declare(sess.Key(), meta.Name, meta.Size)
+		authDeviceID := r.Header.Get("X-Flitnix-Device-ID")
+		authNonce := r.Header.Get("X-Flitnix-Nonce")
+		authTimestamp := r.Header.Get("X-Flitnix-Timestamp")
+		authSig := r.Header.Get("X-Flitnix-Signature")
+
+		autoApproveUpload := false
+		if authDeviceID != "" {
+			if svcs.Devices == nil || svcs.HostIdentity == nil {
+				writeError(w, http.StatusUnauthorized, "trusted devices not enabled")
+				return
+			}
+			dev, exists := svcs.Devices.Get(authDeviceID)
+			if !exists {
+				writeError(w, http.StatusUnauthorized, "device not enrolled")
+				return
+			}
+			ts, tsErr := strconv.ParseInt(authTimestamp, 10, 64)
+			if tsErr != nil {
+				writeError(w, http.StatusUnauthorized, "invalid timestamp")
+				return
+			}
+			now := time.Now().UTC()
+			claimedTime := time.Unix(ts, 0).UTC()
+			diff := now.Sub(claimedTime)
+			if diff < 0 {
+				diff = -diff
+			}
+			if diff > 60*time.Second {
+				writeError(w, http.StatusUnauthorized, "challenge expired or clock skew")
+				return
+			}
+
+			if meta.SHA256 == "" {
+				writeError(w, http.StatusBadRequest, "unbound upload: missing sha256 digest")
+				return
+			}
+
+			cManifest := &transfer.CanonicalManifest{
+				Kind: string(transfer.BatchKindFiles),
+				Items: []transfer.CanonicalManifestItem{
+					{
+						DisplayName: meta.Name,
+						Sequence:    1,
+						SHA256:      meta.SHA256,
+						Size:        strconv.FormatInt(meta.Size, 10),
+					},
+				},
+			}
+			_, manifestHashHex, cErr := transfer.ComputeManifestSHA256(cManifest)
+			if cErr != nil {
+				writeError(w, http.StatusBadRequest, "failed to compute manifest digest: "+cErr.Error())
+				return
+			}
+
+			authPayload := devices.BuildAuthV2Payload(svcs.HostIdentity.HostID, authDeviceID, ts, authNonce, manifestHashHex)
+			validSig, sigErr := svcs.Devices.VerifySignature(authDeviceID, authPayload, authSig)
+			if sigErr != nil || !validSig {
+				writeError(w, http.StatusUnauthorized, "invalid manifest signature")
+				return
+			}
+
+			if err := svcs.Devices.ValidateAndConsumeTransferChallenge(svcs.HostIdentity.HostID, authDeviceID, authNonce, ts, 60*time.Second); err != nil {
+				writeError(w, http.StatusUnauthorized, "challenge nonce invalid or replayed: "+err.Error())
+				return
+			}
+
+			if dev.AutoApprove {
+				autoApproveUpload = true
+			}
+		}
+
+		up, err := svcs.Transfers.DeclareWithDigest(sess.Key(), meta.Name, meta.Size, meta.SHA256, authDeviceID)
 		switch {
 		case err == nil:
+			if autoApproveUpload {
+				if decidedUp, decErr := svcs.Transfers.Decide(up.ID, true); decErr == nil {
+					up = decidedUp
+				}
+			}
 		case errors.Is(err, transfer.ErrInvalidUpload),
 			errors.Is(err, transfer.ErrInvalidFilename):
 			writeError(w, http.StatusBadRequest, "invalid filename or size")
@@ -403,6 +735,16 @@ func handleUploadContent(svcs *Services, stall time.Duration) http.HandlerFunc {
 			return
 		}
 		id := r.PathValue("id")
+		var devID string
+		if upRec, ok := svcs.Transfers.Get(id); ok {
+			devID = upRec.DeviceID
+			if devID != "" && svcs.Devices != nil {
+				if _, exists := svcs.Devices.Get(devID); !exists {
+					writeError(w, http.StatusUnauthorized, "device revoked")
+					return
+				}
+			}
+		}
 		sess.Begin()
 		defer sess.End()
 		body := &stallBodyReader{
@@ -410,7 +752,14 @@ func handleUploadContent(svcs *Services, stall time.Duration) http.HandlerFunc {
 			rc:         http.NewResponseController(w),
 			stall:      stall,
 		}
-		res, err := svcs.Transfers.SubmitContent(id, sess.Key(), body, nil)
+		res, err := svcs.Transfers.SubmitContentWithPublish(id, sess.Key(), body, nil, func() error {
+			if devID != "" && svcs.Devices != nil {
+				if _, exists := svcs.Devices.Get(devID); !exists {
+					return errors.New("device revoked mid-transfer")
+				}
+			}
+			return nil
+		})
 		if err != nil {
 			writeUploadStreamError(w, err)
 			return
@@ -457,6 +806,77 @@ func handleBatchCreate(svcs *Services) http.HandlerFunc {
 			return
 		}
 		manifest = validated.BatchManifest
+
+		authDeviceID := r.Header.Get("X-Flitnix-Device-ID")
+		authNonce := r.Header.Get("X-Flitnix-Nonce")
+		authTimestamp := r.Header.Get("X-Flitnix-Timestamp")
+		authSig := r.Header.Get("X-Flitnix-Signature")
+
+		autoApproveBatch := false
+		if authDeviceID != "" {
+			if svcs.Devices == nil || svcs.HostIdentity == nil {
+				writeError(w, http.StatusUnauthorized, "trusted devices not enabled")
+				return
+			}
+			dev, exists := svcs.Devices.Get(authDeviceID)
+			if !exists {
+				writeError(w, http.StatusUnauthorized, "device not enrolled")
+				return
+			}
+			ts, tsErr := strconv.ParseInt(authTimestamp, 10, 64)
+			if tsErr != nil {
+				writeError(w, http.StatusUnauthorized, "invalid timestamp")
+				return
+			}
+			now := time.Now().UTC()
+			claimedTime := time.Unix(ts, 0).UTC()
+			diff := now.Sub(claimedTime)
+			if diff < 0 {
+				diff = -diff
+			}
+			if diff > 60*time.Second {
+				writeError(w, http.StatusUnauthorized, "challenge expired or clock skew")
+				return
+			}
+
+			// Gate 6: Manifest Binds RFC 8785 SHA-256 Digests
+			for _, item := range manifest.Items {
+				if item.SHA256 == "" {
+					writeError(w, http.StatusBadRequest, "unbound manifest: missing sha256 digests")
+					return
+				}
+			}
+			cManifest, cErr := transfer.CanonicalManifestFromBatch(manifest, nil)
+			if cErr != nil {
+				writeError(w, http.StatusBadRequest, "failed to canonicalize manifest: "+cErr.Error())
+				return
+			}
+			_, manifestHashHex, cErr := transfer.ComputeManifestSHA256(cManifest)
+			if cErr != nil {
+				writeError(w, http.StatusBadRequest, "failed to compute manifest digest: "+cErr.Error())
+				return
+			}
+
+			// Gate 5: Ed25519 Signature Matches dev.PublicKey
+			authPayload := devices.BuildAuthV2Payload(svcs.HostIdentity.HostID, authDeviceID, ts, authNonce, manifestHashHex)
+			validSig, sigErr := svcs.Devices.VerifySignature(authDeviceID, authPayload, authSig)
+			if sigErr != nil || !validSig {
+				writeError(w, http.StatusUnauthorized, "invalid manifest signature")
+				return
+			}
+
+			// Gate 7: Single-Use Nonce Invalidation
+			if err := svcs.Devices.ValidateAndConsumeTransferChallenge(svcs.HostIdentity.HostID, authDeviceID, authNonce, ts, 60*time.Second); err != nil {
+				writeError(w, http.StatusUnauthorized, "challenge nonce invalid or replayed: "+err.Error())
+				return
+			}
+
+			// Gate 3: dev.AutoApprove == true
+			if dev.AutoApprove {
+				autoApproveBatch = true
+			}
+		}
+
 		var resolvedRoot string
 		if manifest.Kind == transfer.BatchKindFolder {
 			resolvedRoot, err = svcs.Transfers.Store().AllocateFolderRoot(manifest.RootName)
@@ -498,7 +918,7 @@ func handleBatchCreate(svcs *Services) http.HandlerFunc {
 			if manifest.Kind == transfer.BatchKindFolder {
 				root, relative = resolvedRoot, item.RelativePath
 			}
-			up, declareErr := svcs.Transfers.DeclareBatchItem(sess.Key(), root, relative, item.DisplayName, item.DeclaredSize)
+			up, declareErr := svcs.Transfers.DeclareBatchItemWithDigest(sess.Key(), root, relative, item.DisplayName, item.DeclaredSize, item.SHA256, authDeviceID)
 			if declareErr != nil {
 				abort(declareErr)
 				return
@@ -508,6 +928,19 @@ func handleBatchCreate(svcs *Services) http.HandlerFunc {
 				abort(mapErr)
 				return
 			}
+		}
+		if autoApproveBatch {
+			if decErr := svcs.Transfers.DecideBatchItems(declared, true); decErr != nil {
+				abort(decErr)
+				return
+			}
+			approvedView, appErr := svcs.Coordinator.ApproveBatch(sess.Key(), view.ID)
+			if appErr == nil {
+				view = approvedView
+			}
+		}
+		if svcs.OnBatchPending != nil {
+			svcs.OnBatchPending(sess.Key(), view, r.RemoteAddr)
 		}
 		writeJSON(w, http.StatusCreated, view)
 	}
@@ -633,6 +1066,16 @@ func handleBatchContent(svcs *Services, stall time.Duration) http.HandlerFunc {
 			writeBatchError(w, err)
 			return
 		}
+		var devID string
+		if upRec, ok := svcs.Transfers.Get(contentID); ok {
+			devID = upRec.DeviceID
+			if devID != "" && svcs.Devices != nil {
+				if _, exists := svcs.Devices.Get(devID); !exists {
+					writeError(w, http.StatusUnauthorized, "device revoked")
+					return
+				}
+			}
+		}
 		if err := svcs.Coordinator.RegisterCancellation(sess.Key(), lease, func() { _ = svcs.Transfers.Cancel(contentID) }); err != nil {
 			// A cancel won the race between the claim and this registration.
 			// The cancel is authoritative: withdraw the record instead of
@@ -660,6 +1103,11 @@ func handleBatchContent(svcs *Services, stall time.Duration) http.HandlerFunc {
 					shortKey(sess.Key()), shortID(itemID), lastMilestone*25)
 			}
 		}, func() error {
+			if devID != "" && svcs.Devices != nil {
+				if _, exists := svcs.Devices.Get(devID); !exists {
+					return errors.New("device revoked mid-transfer")
+				}
+			}
 			return svcs.Coordinator.MarkItemPublishing(sess.Key(), lease)
 		})
 		if errors.Is(streamErr, transfer.ErrCanceled) {
@@ -759,6 +1207,8 @@ func writeUploadStreamError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "body exceeds the approved size")
 	case errors.Is(err, transfer.ErrTruncated):
 		writeError(w, http.StatusBadRequest, "body ended before the approved size")
+	case errors.Is(err, transfer.ErrDigestMismatch):
+		writeError(w, http.StatusBadRequest, "digest mismatch: content does not match expected sha256")
 	default:
 		writeError(w, http.StatusInternalServerError, "receiving the upload failed")
 	}
@@ -793,8 +1243,8 @@ func serveFilesList(svcs *Services) http.HandlerFunc {
 }
 
 // downloadCopySize bounds each chunk the download loop moves between disk
-// and network. Small and fixed: bounded memory, progress-friendly.
-const downloadCopySize = 64 * 1024
+// and network.
+const downloadCopySize = 256 * 1024
 
 // serveFileDownload serves GET /api/files/{id}/download: streams one file
 // with Content-Length and a Content-Disposition carrying the sanitized
@@ -815,12 +1265,7 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 			return
 		}
 
-		info, err := os.Stat(sf.Path)
-		if err != nil || !info.Mode().IsRegular() {
-			writeError(w, http.StatusNotFound, "shared file no longer available")
-			return
-		}
-		f, err := os.Open(sf.Path)
+		f, info, err := openTrustedSource(sf.Path)
 		if err != nil {
 			writeError(w, http.StatusNotFound, "shared file no longer available")
 			return
@@ -828,6 +1273,7 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 		defer f.Close()
 
 		size := info.Size()
+
 		var downloadID string
 		if svcs.Downloads != nil {
 			dl, trackErr := svcs.Downloads.Start(sf.ID, sf.Name, sess.Key(), size)
@@ -843,6 +1289,7 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 		w.Header().Set("Accept-Ranges", "none")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Content-Disposition", contentDisposition(sf.Name))
+		w.Header().Set("Trailer", "Content-Digest, X-Content-SHA256")
 		w.WriteHeader(http.StatusOK)
 
 		// Pin for the streaming duration, then stream. Writes carry a
@@ -857,8 +1304,13 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 			stall: stall,
 		}
 
-		buf := make([]byte, downloadCopySize)
+		bufPtr := transfer.GetCopyBuffer()
+		defer transfer.PutCopyBuffer(bufPtr)
+		buf := *bufPtr
+		streamHasher := sha256.New()
 		var written int64
+		var lastReported int64
+		var lastProgressTime time.Time
 		for written < size {
 			// A direct download is an authenticated transfer, so a session
 			// that was revoked while the body was streaming must stop here
@@ -878,10 +1330,14 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 			}
 			n, rerr := f.Read(buf)
 			if n > 0 {
+				streamHasher.Write(buf[:n])
 				wn, werr := out.Write(buf[:n])
 				written += int64(wn)
-				if svcs.Downloads != nil {
+				now := time.Now()
+				if svcs.Downloads != nil && (written-lastReported >= 256*1024 || now.Sub(lastProgressTime) >= 250*time.Millisecond || written == size) {
 					svcs.Downloads.Progress(downloadID, written)
+					lastReported = written
+					lastProgressTime = now
 				}
 				if werr != nil || wn != n {
 					// Body is committed; the client sees the cut stream.
@@ -893,7 +1349,7 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 			}
 			if rerr != nil {
 				if rerr == io.EOF && written == size {
-					return
+					break
 				}
 				// Short file (shrank mid-stream) or a disk read error:
 				// the headers already declared `size`, so abort the
@@ -906,8 +1362,15 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 				return
 			}
 		}
+
+		actualSHA256 := hex.EncodeToString(streamHasher.Sum(nil))
+		if digestHdr := transfer.FormatContentDigest(actualSHA256); digestHdr != "" {
+			w.Header().Set("Content-Digest", digestHdr)
+		}
+		w.Header().Set("X-Content-SHA256", actualSHA256)
+
 		if svcs.Downloads != nil {
-			svcs.Downloads.Finish(downloadID, written)
+			svcs.Downloads.FinishWithDigest(downloadID, written, actualSHA256)
 		}
 	}
 }
@@ -1017,4 +1480,402 @@ func writeError(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+type textSendRequest struct {
+	Content string `json:"content"`
+}
+
+func handleTextMessageSend(svcs *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess := sessionFrom(r)
+		if sess == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if svcs.TextMessages == nil {
+			writeError(w, http.StatusNotFound, "text messaging unavailable")
+			return
+		}
+
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, textmsg.MaxContentBytes+1024))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "reading message body")
+			return
+		}
+
+		if !utf8.Valid(body) {
+			writeError(w, http.StatusBadRequest, "invalid UTF-8 content")
+			return
+		}
+
+		var req textSendRequest
+		dec := json.NewDecoder(bytes.NewReader(body))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid message JSON")
+			return
+		}
+
+		msg, err := svcs.TextMessages.Add(sess.Key(), "phone", req.Content)
+		if err != nil {
+			switch {
+			case errors.Is(err, textmsg.ErrEmptyContent):
+				writeError(w, http.StatusBadRequest, "empty message")
+			case errors.Is(err, textmsg.ErrContentTooLarge):
+				writeError(w, http.StatusRequestEntityTooLarge, "message exceeds 64 KiB")
+			case errors.Is(err, textmsg.ErrInvalidUTF8):
+				writeError(w, http.StatusBadRequest, "invalid UTF-8 content")
+			default:
+				writeError(w, http.StatusInternalServerError, "failed to save message")
+			}
+			return
+		}
+
+		writeJSON(w, http.StatusCreated, msg)
+	}
+}
+
+func handleTextMessageList(svcs *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess := sessionFrom(r)
+		if sess == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if svcs.TextMessages == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"messages": []textmsg.Message{}})
+			return
+		}
+
+		msgs := svcs.TextMessages.List(sess.Key())
+		writeJSON(w, http.StatusOK, map[string]any{"messages": msgs})
+	}
+}
+
+// ---- Trusted Devices Pairing & Management Handlers ----
+
+func handlePairChallenge(svcs *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess := sessionFrom(r)
+		if sess == nil || svcs == nil || svcs.Pairing == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		var req struct {
+			ClientPublicKey  string `json:"clientPublicKey"`
+			ClientCommitment string `json:"clientCommitment"`
+		}
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid pairing challenge payload")
+			return
+		}
+		if req.ClientPublicKey == "" || req.ClientCommitment == "" {
+			writeError(w, http.StatusBadRequest, "clientPublicKey and clientCommitment are required")
+			return
+		}
+
+		sessDigest := sess.Digest()
+		resp, err := svcs.Pairing.InitChallenge(sessDigest[:], req.ClientPublicKey, req.ClientCommitment)
+		if err != nil {
+			switch {
+			case errors.Is(err, devices.ErrPairingLocked):
+				writeJSON(w, http.StatusTooManyRequests, map[string]string{
+					"code":  "pairing_locked",
+					"error": err.Error(),
+				})
+			case errors.Is(err, devices.ErrPairingInProgress):
+				writeJSON(w, http.StatusTooManyRequests, map[string]string{
+					"code":  "pairing_in_progress",
+					"error": err.Error(),
+				})
+			case errors.Is(err, devices.ErrPairingInProgress):
+				writeJSON(w, http.StatusTooManyRequests, map[string]string{
+					"code":  "pairing_in_progress",
+					"error": "Another pairing attempt is currently in progress",
+				})
+			case errors.Is(err, devices.ErrInvalidKey), errors.Is(err, devices.ErrInvalidCommitment):
+				writeError(w, http.StatusBadRequest, err.Error())
+			default:
+				writeError(w, http.StatusInternalServerError, err.Error())
+			}
+			return
+		}
+
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+func handlePairReveal(svcs *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess := sessionFrom(r)
+		if sess == nil || svcs == nil || svcs.Pairing == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		var req struct {
+			PairingNonce       string `json:"pairingNonce"`
+			ClientEphemeralKey string `json:"clientEphemeralKey"`
+			ClientSalt         string `json:"clientSalt"`
+		}
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid pairing reveal payload")
+			return
+		}
+
+		sessDigest := sess.Digest()
+		resp, err := svcs.Pairing.Reveal(sessDigest[:], req.PairingNonce, req.ClientEphemeralKey, req.ClientSalt)
+		if err != nil {
+			switch {
+			case errors.Is(err, devices.ErrPairingLocked):
+				writeJSON(w, http.StatusTooManyRequests, map[string]string{
+					"code":  "pairing_locked",
+					"error": err.Error(),
+				})
+			case errors.Is(err, devices.ErrPairingInProgress):
+				writeJSON(w, http.StatusTooManyRequests, map[string]string{
+					"code":  "pairing_in_progress",
+					"error": err.Error(),
+				})
+			case errors.Is(err, devices.ErrInvalidCommitment):
+				writeJSON(w, http.StatusBadRequest, map[string]string{
+					"code":  "invalid_commitment",
+					"error": "invalid client commitment opening",
+				})
+			case errors.Is(err, devices.ErrWrongPairingState):
+				writeJSON(w, http.StatusConflict, map[string]string{
+					"code":  "wrong_state",
+					"error": err.Error(),
+				})
+			case errors.Is(err, devices.ErrPairingExpired):
+				writeJSON(w, http.StatusNotFound, map[string]string{
+					"code":  "pairing_expired",
+					"error": err.Error(),
+				})
+			case errors.Is(err, devices.ErrSASDerivationExhausted):
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
+					"code":  "sas_derivation_exhaustion",
+					"error": err.Error(),
+				})
+			default:
+				writeError(w, http.StatusBadRequest, err.Error())
+			}
+			return
+		}
+
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+func handlePairRequest(svcs *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess := sessionFrom(r)
+		if sess == nil || svcs == nil || svcs.Pairing == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		var req struct {
+			DeviceName      string `json:"deviceName"`
+			ClientPublicKey string `json:"clientPublicKey"`
+			PairingNonce    string `json:"pairingNonce"`
+			ClientProof     string `json:"clientProof"`
+		}
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid pairing request payload")
+			return
+		}
+
+		sessDigest := sess.Digest()
+		reqID, decisionChan, expiresAt, err := svcs.Pairing.PrepareApproval(
+			sessDigest[:], req.DeviceName, req.ClientPublicKey, req.PairingNonce, req.ClientProof,
+		)
+		if err != nil {
+			switch {
+			case errors.Is(err, devices.ErrPairingLocked):
+				writeJSON(w, http.StatusTooManyRequests, map[string]string{
+					"code":  "pairing_locked",
+					"error": err.Error(),
+				})
+			case errors.Is(err, devices.ErrPairingInProgress):
+				writeJSON(w, http.StatusTooManyRequests, map[string]string{
+					"code":  "pairing_in_progress",
+					"error": err.Error(),
+				})
+			case errors.Is(err, devices.ErrWrongPairingState):
+				writeJSON(w, http.StatusConflict, map[string]string{
+					"code":  "handshake_not_ready",
+					"error": "pairing challenge has not completed reveal phase",
+				})
+			case errors.Is(err, devices.ErrPairingExpired):
+				writeJSON(w, http.StatusConflict, map[string]string{
+					"code":  "pairing_expired",
+					"error": "pairing challenge expired or not found",
+				})
+			case errors.Is(err, devices.ErrInvalidSignature):
+				writeJSON(w, http.StatusBadRequest, map[string]string{
+					"code":  "invalid_signature",
+					"error": "client proof signature verification failed",
+				})
+			default:
+				writeError(w, http.StatusBadRequest, err.Error())
+			}
+			return
+		}
+
+		// Wait for desktop operator approval without holding coordinator lock
+		remaining := time.Until(expiresAt)
+		if remaining <= 0 {
+			remaining = 100 * time.Millisecond
+		}
+
+		select {
+		case approved := <-decisionChan:
+			resp, completeErr := svcs.Pairing.CompleteEnrollment(reqID, approved)
+			if completeErr != nil {
+				if errors.Is(completeErr, devices.ErrPairingDenied) {
+					writeJSON(w, http.StatusForbidden, map[string]string{
+						"code":  "pairing_denied",
+						"error": completeErr.Error(),
+					})
+					return
+				}
+				writeError(w, http.StatusBadRequest, completeErr.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, resp)
+
+		case <-time.After(remaining):
+			svcs.Pairing.CancelRequest(reqID)
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"code":  "pairing_expired",
+				"error": "pairing challenge expired waiting for host approval",
+			})
+
+		case <-r.Context().Done():
+			svcs.Pairing.CancelRequest(reqID)
+			return
+		}
+	}
+}
+
+func handlePairRearm(svcs *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess := sessionFrom(r)
+		if sess == nil || svcs == nil || svcs.Pairing == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		svcs.Pairing.ReArmPairing()
+		writeJSON(w, http.StatusOK, map[string]string{"status": "rearmed"})
+	}
+}
+
+func handleAuthChallenge(svcs *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess := sessionFrom(r)
+		if sess == nil || svcs == nil || svcs.Devices == nil || svcs.HostIdentity == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		var req struct {
+			DeviceID string `json:"deviceId"`
+		}
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid auth challenge request")
+			return
+		}
+		if _, exists := svcs.Devices.Get(req.DeviceID); !exists {
+			writeJSON(w, http.StatusNotFound, map[string]string{
+				"code":  "device_not_found",
+				"error": "device not enrolled",
+			})
+			return
+		}
+
+		nonce, ts, err := svcs.Devices.CreateTransferChallenge(svcs.HostIdentity.HostID, req.DeviceID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		chalPayload := devices.BuildSrvChalPayload(svcs.HostIdentity.HostID, req.DeviceID, nonce, ts)
+		sig := svcs.HostIdentity.Sign(chalPayload)
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"hostId":        svcs.HostIdentity.HostID,
+			"deviceId":      req.DeviceID,
+			"transferNonce": nonce,
+			"timestamp":     ts,
+			"hostSignature": sig,
+		})
+	}
+}
+
+func handleDevicesList(svcs *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess := sessionFrom(r)
+		if sess == nil || svcs == nil || svcs.Devices == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		list := svcs.Devices.List()
+		writeJSON(w, http.StatusOK, list)
+	}
+}
+
+func handleDeviceRemove(svcs *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess := sessionFrom(r)
+		if sess == nil || svcs == nil || svcs.Devices == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		id := r.PathValue("id")
+		if err := svcs.Devices.Remove(id); err != nil {
+			if errors.Is(err, devices.ErrDeviceNotFound) {
+				writeError(w, http.StatusNotFound, "device not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
+	}
+}
+
+func handleDeviceSetAutoApprove(svcs *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess := sessionFrom(r)
+		if sess == nil || svcs == nil || svcs.Devices == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		id := r.PathValue("id")
+		var req struct {
+			AutoApprove bool `json:"autoApprove"`
+		}
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		if err := svcs.Devices.SetAutoApprove(id, req.AutoApprove); err != nil {
+			if errors.Is(err, devices.ErrDeviceNotFound) {
+				writeError(w, http.StatusNotFound, "device not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "updated", "autoApprove": req.AutoApprove})
+	}
 }

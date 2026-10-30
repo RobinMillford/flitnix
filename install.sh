@@ -20,7 +20,7 @@ set -eu
 
 REPO="RobinMillford/flitnix"
 GITHUB_URL="${FLITNIX_BASE_URL:-https://github.com/${REPO}}"
-DEFAULT_VERSION="0.1.0"
+DEFAULT_VERSION="0.2.0"
 
 TARGET_VERSION=""
 DRY_RUN=0
@@ -333,6 +333,44 @@ run_elevated() {
     fi
 }
 
+install_user_nautilus_script() {
+    target_user_home="${HOME}"
+    target_user=""
+    if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+        target_user_home="$(getent passwd "${SUDO_USER}" 2>/dev/null | cut -d: -f6 || echo "${HOME}")"
+        target_user="${SUDO_USER}"
+    fi
+
+    if [ -d "${target_user_home}" ]; then
+        nautilus_scripts_dir="${target_user_home}/.local/share/nautilus/scripts"
+        mkdir -p "${nautilus_scripts_dir}" 2>/dev/null || true
+        if [ -w "${nautilus_scripts_dir}" ] || [ "$(id -u)" -eq 0 ]; then
+            script_dest="${nautilus_scripts_dir}/Share with Flitnix"
+            cat << 'SCRIPT_EOF' > "${script_dest}"
+#!/usr/bin/env bash
+# Share with Flitnix - GNOME Files (Nautilus) script
+# Passes selected files and folders, or current folder if none selected.
+
+if [ "$#" -gt 0 ]; then
+    exec flitnix "$@"
+elif [ -n "${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-}" ]; then
+    mapfile -t paths <<< "${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS}"
+    exec flitnix "${paths[@]}"
+elif [ -n "${NAUTILUS_SCRIPT_CURRENT_URI:-}" ]; then
+    exec flitnix "${NAUTILUS_SCRIPT_CURRENT_URI}"
+else
+    exec flitnix
+fi
+SCRIPT_EOF
+            chmod 0755 "${script_dest}"
+            if [ -n "${target_user}" ] && [ "$(id -u)" -eq 0 ] && command -v chown >/dev/null 2>&1; then
+                chown -R "${target_user}:" "${target_user_home}/.local/share/nautilus" 2>/dev/null || true
+            fi
+            log_info "Configured GNOME Files (Nautilus) script: ${script_dest}"
+        fi
+    fi
+}
+
 # Install based on package format
 if [ "${OS}" = "linux" ]; then
     case "${PKG_FORMAT}" in
@@ -344,6 +382,7 @@ if [ "${OS}" = "linux" ]; then
                 run_elevated dpkg -i "${TMP_DIR}/${ASSET_NAME}"
             fi
             verify_installed_package "deb" "${VERSION}"
+            install_user_nautilus_script
             ;;
         rpm)
             log_info "Installing RPM package..."
@@ -355,6 +394,7 @@ if [ "${OS}" = "linux" ]; then
                 run_elevated rpm -Uvh --replacepkgs "${TMP_DIR}/${ASSET_NAME}"
             fi
             verify_installed_package "rpm" "${VERSION}"
+            install_user_nautilus_script
             ;;
         *)
             log_info "Installing from tarball archive..."
@@ -382,6 +422,19 @@ if [ "${OS}" = "linux" ]; then
                 run_elevated chmod 0755 "${TARGET_BIN_DIR}/flitnix"
                 run_elevated cp "${TMP_DIR}/extracted/flitnix/share/applications/flitnix.desktop" "${TARGET_APP_DIR}/"
                 run_elevated cp -r "${TMP_DIR}/extracted/flitnix/share/icons/"* "${TARGET_ICON_DIR}/"
+            fi
+
+            # Desktop File Manager integrations (Nautilus & Dolphin)
+            install_user_nautilus_script
+            if [ -f "${TMP_DIR}/extracted/flitnix/share/kio/servicemenus/flitnix.desktop" ]; then
+                TARGET_KIO_DIR="${PREFIX}/share/kio/servicemenus"
+                if [ "$(id -u)" -eq 0 ] || [ -w "${PREFIX}" ]; then
+                    mkdir -p "${TARGET_KIO_DIR}"
+                    cp "${TMP_DIR}/extracted/flitnix/share/kio/servicemenus/flitnix.desktop" "${TARGET_KIO_DIR}/flitnix.desktop"
+                else
+                    run_elevated mkdir -p "${TARGET_KIO_DIR}"
+                    run_elevated cp "${TMP_DIR}/extracted/flitnix/share/kio/servicemenus/flitnix.desktop" "${TARGET_KIO_DIR}/flitnix.desktop"
+                fi
             fi
 
             if command -v update-desktop-database >/dev/null 2>&1; then

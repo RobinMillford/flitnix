@@ -63,7 +63,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/itsyamin/flitnix/internal/audit"
+	"github.com/itsyamin/flitnix/internal/devices"
+	"github.com/itsyamin/flitnix/internal/guest"
 	"github.com/itsyamin/flitnix/internal/session"
+	"github.com/itsyamin/flitnix/internal/textmsg"
 	"github.com/itsyamin/flitnix/internal/transfer"
 )
 
@@ -132,11 +136,22 @@ type Config struct {
 // application is the composition root: it owns these instances (and the
 // receive Store inside the transfer Service) and handed to Config.
 type Services struct {
-	Sessions    *session.Manager
-	Transfers   *transfer.Service
-	Coordinator *transfer.Coordinator
-	Registry    *transfer.Registry
-	Downloads   *transfer.DownloadRegistry
+	Sessions       *session.Manager
+	Transfers      *transfer.Service
+	Coordinator    *transfer.Coordinator
+	Registry       *transfer.Registry
+	Downloads      *transfer.DownloadRegistry
+	GuestManager   *guest.Manager
+	TextMessages   *textmsg.Store
+	Audit          *audit.Store
+	Devices        *devices.Store
+	HostIdentity   *devices.HostIdentity
+	Pairing        *devices.PairingCoordinator
+	OnPhoneContact func(source string)
+
+	// OnBatchPending, when non-nil, receives notice of a newly declared batch
+	// with its session key, initial view, and remote client address.
+	OnBatchPending func(sessionKey string, batch transfer.BatchView, remoteAddr string)
 
 	// Diagnose, when non-nil, receives low-volume transfer diagnostics at
 	// meaningful transitions: one line when an item is claimed, milestones
@@ -146,6 +161,12 @@ type Services struct {
 	// no session keys beyond a bounded prefix, no paths or file names.
 	// A nil hook disables diagnostics (page-only and test servers).
 	Diagnose func(format string, args ...any)
+}
+
+func (s *Services) RecordContact(source string) {
+	if s != nil && s.OnPhoneContact != nil {
+		s.OnPhoneContact(source)
+	}
 }
 
 // normalize fills in zero-value defaults.

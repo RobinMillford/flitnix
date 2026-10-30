@@ -48,6 +48,9 @@
       window.location.pathname + window.location.search);
   }
 
+  // Handshake ping to verify phone-to-desktop reachability
+  fetch("/ping").catch(function () {});
+
   // ------------------------------------------------------------------
   // Handles
   // ------------------------------------------------------------------
@@ -66,6 +69,14 @@
   var refreshBtn = document.getElementById("refresh-btn");
   var downloadSelectedBtn = document.getElementById("download-selected-btn");
   var filesRefreshGeneration = 0;
+
+  var textForm = document.getElementById("text-form");
+  var textInput = document.getElementById("text-input");
+  var textSendBtn = document.getElementById("text-send-btn");
+  var textMessagesEl = document.getElementById("text-messages");
+  var textCharCount = document.getElementById("text-char-count");
+  var textMessagesCache = [];
+  var textPollTimer = null;
 
   var appState = { ended: false };
   var queue = [];      // upload jobs, FIFO
@@ -89,6 +100,14 @@
     while (v >= 1000 && u < units.length - 1) { v /= 1000; u += 1; }
     var digits = u === 0 || v >= 100 ? 0 : v >= 10 ? 1 : 2;
     return v.toFixed(digits) + " " + units[u];
+  }
+
+  function fmtEta(seconds) {
+    if (typeof seconds !== "number" || !isFinite(seconds) || seconds <= 0) return "< 1s";
+    if (seconds < 60) return seconds + "s";
+    var m = Math.floor(seconds / 60);
+    var s = seconds % 60;
+    return m + "m " + (s < 10 ? "0" : "") + s + "s";
   }
 
   function setStatus(stateName, text) {
@@ -260,9 +279,18 @@
       : (job.phase === "done" ? 100 : 0);
     if (job.phase === "done") renderedPercent = 100;
     r.fill.style.width = renderedPercent + "%";
-    r.bar.setAttribute("aria-valuenow", String(renderedPercent));
+    var ariaStep = job.phase === "done" ? 100 : Math.floor(renderedPercent / 20) * 20;
+    if (r.bar.getAttribute("aria-valuenow") !== String(ariaStep)) {
+      r.bar.setAttribute("aria-valuenow", String(ariaStep));
+    }
     if (job.phase === "sending" && job.uploaded > 0 && job.size > 0) {
       text += " " + renderedPercent + "%";
+      if (job.speed > 0) {
+        text += " · " + fmtBytes(job.speed) + "/s";
+        if (job.eta != null && job.eta > 0) {
+          text += " · ETA " + fmtEta(job.eta);
+        }
+      }
     }
     r.state.textContent = text;
     r.err.hidden = !job.err;
@@ -356,6 +384,7 @@
   }
 
   function teardownJobs() {
+    if (textPollTimer) { clearInterval(textPollTimer); textPollTimer = null; }
     queue.forEach(function (job) {
       job.removed = true;
       if (job.timer) { clearTimeout(job.timer); job.timer = null; }
@@ -776,12 +805,26 @@
       var xhr = new XMLHttpRequest();
       job.xhr = xhr;
       var lastPaint = 0;
+      var lastLoaded = 0;
+      var lastTime = Date.now();
+      var currentSpeed = 0;
       xhr.open("PUT", "/api/batches/" + encodeURIComponent(job.batchID) +
         "/items/" + encodeURIComponent(job.itemID) + "/content");
       xhr.upload.addEventListener("progress", function (ev) {
         if (!ev.lengthComputable) return;
         job.uploaded = Math.min(job.size, ev.loaded);
         var now = Date.now();
+        var dt = (now - lastTime) / 1000;
+        if (dt >= 0.25) {
+          var instant = (ev.loaded - lastLoaded) / dt;
+          currentSpeed = currentSpeed === 0 ? instant : (0.7 * currentSpeed + 0.3 * instant);
+          job.speed = currentSpeed;
+          lastLoaded = ev.loaded;
+          lastTime = now;
+          if (currentSpeed > 0 && job.size > job.uploaded) {
+            job.eta = Math.round((job.size - job.uploaded) / currentSpeed);
+          }
+        }
         if (now - lastPaint >= PAINT_MIN_MS || ev.loaded === ev.total) { lastPaint = now; paint(job); }
       });
       xhr.setRequestHeader("Authorization", "Bearer " + token);
@@ -873,6 +916,160 @@
     return li;
   }
 
+  var downloadIntegrityEl = document.getElementById("download-integrity");
+
+  function renderDownloadIntegrityCard(grant, sources, btn) {
+    if (!downloadIntegrityEl) return null;
+    downloadIntegrityEl.hidden = false;
+    downloadIntegrityEl.innerHTML = "";
+
+    var header = el("div", "download-integrity__header");
+    var title = el("h3", "download-integrity__title", grant.filename || "Downloaded file");
+    var badge = el("span", "download-integrity__badge badge--downloading", "Downloading");
+    header.appendChild(title);
+    header.appendChild(badge);
+    downloadIntegrityEl.appendChild(header);
+
+    var msg = el("p", "download-integrity__msg", "Downloading file from desktop…");
+    downloadIntegrityEl.appendChild(msg);
+
+    var hashbox = el("div", "download-integrity__hashbox");
+    var code = el("code", "", "Expected SHA-256: " + (grant.sha256 ? grant.sha256 : "Calculating…"));
+    hashbox.appendChild(code);
+    var copyBtn = null;
+    function addCopyBtn(digest) {
+      if (copyBtn) return;
+      copyBtn = el("button", "btn btn--small btn--ghost", "Copy");
+      copyBtn.type = "button";
+      copyBtn.addEventListener("click", function () {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(digest).then(function () {
+            copyBtn.textContent = "Copied!";
+            setTimeout(function () { copyBtn.textContent = "Copy"; }, 2000);
+          });
+        }
+      });
+      hashbox.appendChild(copyBtn);
+    }
+    if (grant.sha256) {
+      addCopyBtn(grant.sha256);
+    }
+    downloadIntegrityEl.appendChild(hashbox);
+
+    var actions = el("div", "download-integrity__actions");
+    downloadIntegrityEl.appendChild(actions);
+
+    return {
+      setBadge: function (text, className) {
+        badge.textContent = text;
+        badge.className = "download-integrity__badge " + className;
+      },
+      setMessage: function (text) {
+        msg.textContent = text;
+      },
+      setDigest: function (digest) {
+        code.textContent = "Expected SHA-256: " + digest;
+        addCopyBtn(digest);
+      },
+      setActions: function (nodes) {
+        actions.innerHTML = "";
+        nodes.forEach(function (n) { actions.appendChild(n); });
+      }
+    };
+  }
+
+  function verifyPickedFile(file, expectedHex, card, sources, btn) {
+    if (!expectedHex) {
+      card.setBadge("Verification unavailable", "badge--unavailable");
+      card.setMessage("No expected checksum was provided by the server.");
+      return;
+    }
+    var hasher = (typeof sha256 !== "undefined" && sha256.create) ? sha256.create() : null;
+    if (!hasher) {
+      card.setBadge("Verification unavailable in this browser", "badge--unavailable");
+      card.setMessage("Incremental cryptographic hashing is not available in this browser.");
+      return;
+    }
+
+    card.setBadge("Verifying…", "badge--verifying");
+    card.setMessage("Reading and hashing \"" + file.name + "\" in bounded 64 KB chunks… (0%)");
+    card.setActions([]);
+
+    var totalSize = file.size;
+    var processed = 0;
+    var lastUpdate = 0;
+
+    function finishHash() {
+      var actualDigest = hasher.hex().toLowerCase();
+      var wantDigest = expectedHex.toLowerCase();
+      if (actualDigest === wantDigest) {
+        card.setBadge("Verified", "badge--verified");
+        card.setMessage("Verified — Exact SHA-256 match! Received bytes are identical to source (" + actualDigest.slice(0, 16) + "…).");
+      } else {
+        card.setBadge("Verification failed", "badge--failed");
+        card.setMessage("Verification failed — Checksum mismatch! Actual: " + actualDigest.slice(0, 16) + "…, Expected: " + wantDigest.slice(0, 16) + "…");
+        var retry = el("button", "btn btn--small", "Retry Download");
+        retry.type = "button";
+        retry.addEventListener("click", function () { downloadSources(sources, btn); });
+        card.setActions([retry]);
+      }
+    }
+
+    if (typeof file.stream === "function") {
+      var reader = file.stream().getReader();
+      function readChunk() {
+        reader.read().then(function (result) {
+          if (result.done) {
+            finishHash();
+            return;
+          }
+          hasher.update(result.value);
+          processed += result.value.length;
+          var now = Date.now();
+          if (now - lastUpdate > 150) {
+            lastUpdate = now;
+            var pct = totalSize > 0 ? Math.min(100, Math.round((processed / totalSize) * 100)) : 100;
+            card.setMessage("Reading and hashing \"" + file.name + "\" in bounded 64 KB chunks… (" + pct + "%)");
+          }
+          readChunk();
+        }).catch(function (err) {
+          card.setBadge("Verification failed", "badge--failed");
+          card.setMessage("Error reading file stream: " + (err && err.message ? err.message : err));
+        });
+      }
+      readChunk();
+    } else {
+      var chunkSize = 64 * 1024;
+      var offset = 0;
+      function readSlice() {
+        if (offset >= totalSize) {
+          finishHash();
+          return;
+        }
+        var slice = file.slice(offset, offset + chunkSize);
+        var fr = new FileReader();
+        fr.onload = function (e) {
+          hasher.update(new Uint8Array(e.target.result));
+          offset += chunkSize;
+          processed = Math.min(totalSize, offset);
+          var now = Date.now();
+          if (now - lastUpdate > 150) {
+            lastUpdate = now;
+            var pct = totalSize > 0 ? Math.min(100, Math.round((processed / totalSize) * 100)) : 100;
+            card.setMessage("Reading and hashing \"" + file.name + "\" in bounded 64 KB chunks… (" + pct + "%)");
+          }
+          readSlice();
+        };
+        fr.onerror = function () {
+          card.setBadge("Verification failed", "badge--failed");
+          card.setMessage("File read error during checksum verification.");
+        };
+        fr.readAsArrayBuffer(slice);
+      }
+      readSlice();
+    }
+  }
+
   function downloadSources(sources, btn) {
     btn.disabled = true;
     var prev = btn.textContent;
@@ -901,8 +1098,93 @@
       }
       return res.json().then(function (grant) {
         if (!grant || !grant.downloadUrl) throw new Error("The desktop returned an invalid download grant.");
-        startNativeDownload(grant.downloadUrl, grant.progressId);
-        if (grant.progressId) watchDownloadProgress(grant.progressId);
+        var card = renderDownloadIntegrityCard(grant, sources, btn);
+
+        // Check if browser supports showSaveFilePicker in secure context
+        if (typeof window.showSaveFilePicker === "function") {
+          window.showSaveFilePicker({ suggestedName: grant.filename }).then(function (handle) {
+            if (card) {
+              card.setBadge("Downloading", "badge--downloading");
+              card.setMessage("Streaming to storage and hashing incrementally…");
+            }
+            return handle.createWritable().then(function (writable) {
+              return fetch(grant.downloadUrl).then(function (resp) {
+                if (!resp.ok) throw new Error("HTTP " + resp.status);
+                var streamHasher = (typeof sha256 !== "undefined" && sha256.create) ? sha256.create() : null;
+                var reader = resp.body.getReader();
+                var received = 0;
+                var lastUpdate = 0;
+                function pump() {
+                  return reader.read().then(function (result) {
+                    if (result.done) {
+                      return writable.close().then(function () {
+                        if (card) card.setBadge("Verifying…", "badge--verifying");
+                        var checkDigest = grant.sha256;
+                        function verifyStream() {
+                          if (streamHasher && checkDigest) {
+                            var actualHex = streamHasher.hex().toLowerCase();
+                            if (actualHex === checkDigest.toLowerCase()) {
+                              if (card) {
+                                card.setBadge("Verified", "badge--verified");
+                                card.setMessage("Verified — Exact SHA-256 match! Saved directly to disk (" + actualHex.slice(0, 16) + "…).");
+                              }
+                            } else {
+                              if (card) {
+                                card.setBadge("Verification failed", "badge--failed");
+                                card.setMessage("Verification failed — Streamed checksum mismatch!");
+                                var retry = el("button", "btn btn--small", "Retry Download");
+                                retry.type = "button";
+                                retry.addEventListener("click", function () { downloadSources(sources, btn); });
+                                card.setActions([retry]);
+                              }
+                            }
+                          } else if (card) {
+                            card.setBadge("Downloaded", "badge--waiting");
+                            card.setMessage("File saved directly to disk.");
+                          }
+                        }
+                        if (!checkDigest && grant.progressId) {
+                          api("/api/download-progress/" + encodeURIComponent(grant.progressId)).then(function (p) {
+                            if (p && p.sha256) checkDigest = p.sha256;
+                            if (card && card.setDigest && checkDigest) card.setDigest(checkDigest);
+                            verifyStream();
+                          }).catch(verifyStream);
+                        } else {
+                          verifyStream();
+                        }
+                      });
+                    }
+                    if (streamHasher) streamHasher.update(result.value);
+                    received += result.value.length;
+                    var now = Date.now();
+                    if (now - lastUpdate > 200) {
+                      lastUpdate = now;
+                      if (card) card.setMessage("Streaming and hashing incrementally… (" + formatBytes(received) + ")");
+                    }
+                    return writable.write(result.value).then(pump);
+                  });
+                }
+                return pump();
+              });
+            });
+          }).catch(function (e) {
+            // User cancelled picker or browser refused stream -> fall back to native download
+            if (e && e.name === "AbortError") {
+              if (card) {
+                card.setBadge("Canceled", "badge--canceled");
+                card.setMessage("Download save prompt was canceled.");
+              }
+              return;
+            }
+            // Fall back to native download
+            startNativeDownload(grant.downloadUrl, grant.progressId);
+            if (grant.progressId) watchDownloadProgress(grant.progressId, grant, card, sources, btn);
+          });
+        } else {
+          // Native download fallback (mobile browsers / HTTP)
+          startNativeDownload(grant.downloadUrl, grant.progressId);
+          if (grant.progressId) watchDownloadProgress(grant.progressId, grant, card, sources, btn);
+        }
       });
     }).catch(function (err) {
       if (err && err.message === "silent") return;
@@ -951,7 +1233,7 @@
   // Follows one archive/file download. It polls only while the download is
   // live and stops at the first terminal answer; a transient failure retries
   // with a bounded backoff instead of abandoning the watch.
-  function watchDownloadProgress(id) {
+  function watchDownloadProgress(id, grant, card, sources, btn) {
     var failures = 0;
     function tick() {
       if (appState.ended) return;
@@ -960,16 +1242,47 @@
         setReconnecting(false, "download");
         if (p.state === "failed" || p.state === "expired") {
           removeDownloadFrame(id);
-          // Report the reason on the list's status line, then let the list
-          // reload into its own state after the message has been read. Without
-          // the reload the failure copy stayed above a populated file list for
-          // the rest of the session, contradicting every later download.
+          if (card) {
+            card.setBadge("Canceled or interrupted", "badge--canceled");
+            card.setMessage("Download was interrupted or canceled: " + (p.error || "source unavailable"));
+            if (sources && btn) {
+              var retryBtn = el("button", "btn btn--small", "Retry Download");
+              retryBtn.type = "button";
+              retryBtn.addEventListener("click", function () { downloadSources(sources, btn); });
+              card.setActions([retryBtn]);
+            }
+          }
           filesEmptyEl.hidden = false;
           filesEmptyEl.textContent = "Download failed: " + (p.error || "source unavailable");
           setTimeout(function () { if (!appState.ended) refreshFiles(); }, 3500);
           return;
         }
-        if (p.state === "completed") { removeDownloadFrame(id); return; }
+        if (p.state === "completed") {
+          removeDownloadFrame(id);
+          if (card && grant) {
+            var finalDigest = (p && p.sha256) || grant.sha256;
+            if (finalDigest && card.setDigest) {
+              card.setDigest(finalDigest);
+            }
+            card.setBadge("Checksum available", "badge--waiting");
+            card.setMessage("Checksum available; download not automatically verified by native browser. You can verify your saved file below:");
+            var verifyLabel = el("label", "btn btn--small", "Verify Downloaded File");
+            var fileInput = document.createElement("input");
+            fileInput.type = "file";
+            fileInput.hidden = true;
+            fileInput.addEventListener("change", function () {
+              if (fileInput.files && fileInput.files[0]) {
+                verifyPickedFile(fileInput.files[0], finalDigest, card, sources, btn);
+              }
+            });
+            verifyLabel.appendChild(fileInput);
+            var redownloadBtn = el("button", "btn btn--small btn--ghost", "Download Again");
+            redownloadBtn.type = "button";
+            redownloadBtn.addEventListener("click", function () { downloadSources(sources, btn); });
+            card.setActions([verifyLabel, redownloadBtn]);
+          }
+          return;
+        }
         setTimeout(tick, PROGRESS_POLL_MS);
       }).catch(function (err) {
         if (appState.ended || (err && err.silent)) return;
@@ -1030,6 +1343,113 @@
   }
 
   // ------------------------------------------------------------------
+  // Quick Text & Link Sharing
+  // ------------------------------------------------------------------
+  function renderTextMessages(messages) {
+    if (!textMessagesEl) return;
+    textMessagesEl.innerHTML = "";
+    if (!messages || !messages.length) {
+      var emptyLi = el("li", "muted", "No messages yet. Send a note or link to get started.");
+      emptyLi.style.padding = "0.5rem 0";
+      textMessagesEl.appendChild(emptyLi);
+      return;
+    }
+    messages.forEach(function (msg) {
+      var li = el("li", "text-msg");
+      var hdr = el("div", "text-msg__header");
+      var senderBadge = el("span", "text-msg__badge text-msg__badge--" + (msg.sender === "desktop" ? "desktop" : "phone"), msg.sender === "desktop" ? "Desktop" : "Phone");
+      var timeStr = "";
+      try {
+        timeStr = new Date(msg.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      } catch (e) { timeStr = ""; }
+      var timeSpan = el("span", "", timeStr);
+      hdr.appendChild(senderBadge);
+      hdr.appendChild(timeSpan);
+      li.appendChild(hdr);
+
+      var body = el("div", "text-msg__content", msg.content);
+      li.appendChild(body);
+
+      var actions = el("div", "text-msg__actions");
+      var copyBtn = el("button", "text-msg__btn", "Copy");
+      copyBtn.type = "button";
+      copyBtn.addEventListener("click", function () {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(msg.content).then(function () {
+            copyBtn.textContent = "Copied!";
+            setTimeout(function () { copyBtn.textContent = "Copy"; }, 1500);
+          });
+        }
+      });
+      actions.appendChild(copyBtn);
+
+      if (msg.isLink && msg.url) {
+        var openBtn = el("a", "text-msg__btn", "Open Link");
+        openBtn.href = msg.url;
+        openBtn.target = "_blank";
+        openBtn.rel = "noopener noreferrer";
+        actions.appendChild(openBtn);
+      }
+      li.appendChild(actions);
+      textMessagesEl.appendChild(li);
+    });
+  }
+
+  function fetchTextMessages() {
+    if (appState.ended || !token) return;
+    api("/api/text").then(function (messages) {
+      if (appState.ended) return;
+      textMessagesCache = messages || [];
+      renderTextMessages(textMessagesCache);
+    }).catch(function () {
+      // transient failures are ignored during background polling
+    });
+  }
+
+  function scheduleTextPoll() {
+    if (appState.ended) return;
+    fetchTextMessages();
+    textPollTimer = setInterval(function () {
+      if (appState.ended) {
+        if (textPollTimer) { clearInterval(textPollTimer); textPollTimer = null; }
+        return;
+      }
+      fetchTextMessages();
+    }, 2500);
+  }
+
+  function initQuickText() {
+    if (!textForm || !textInput) return;
+    textInput.addEventListener("input", function () {
+      var len = textInput.value.length;
+      if (textCharCount) {
+        textCharCount.textContent = len > 1024 ? Math.round(len / 1024) + " KB / 64 KB" : len + " / 64 KB";
+      }
+      if (textSendBtn) textSendBtn.disabled = len === 0 || len > 65536;
+    });
+
+    textForm.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var text = textInput.value.trim();
+      if (!text || text.length > 65536) return;
+      if (textSendBtn) textSendBtn.disabled = true;
+      api("/api/text", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: text })
+      }).then(function () {
+        textInput.value = "";
+        if (textCharCount) textCharCount.textContent = "0 / 64 KB";
+        if (textSendBtn) textSendBtn.disabled = true;
+        fetchTextMessages();
+      }).catch(function (err) {
+        if (textSendBtn) textSendBtn.disabled = false;
+        alert("Failed to send text: " + ((err && err.message) || "Unknown error"));
+      });
+    });
+  }
+
+  // ------------------------------------------------------------------
   // Boot
   // ------------------------------------------------------------------
   function boot() {
@@ -1085,6 +1505,8 @@
     setStatus("ready", "Connected — pick files to send or download the shared ones");
     flowEl.hidden = false;
     refreshFiles();
+    initQuickText();
+    scheduleTextPoll();
   }
 
   boot();

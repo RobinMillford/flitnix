@@ -36,14 +36,32 @@ Flitnix combines the performance and concurrency safety of Go with a modern Svel
 
 ## Key Features
 
-- **No Mobile App Required**: Simply scan a QR code using your phone's camera. The transfer interface opens directly in Safari, Chrome, Firefox, or any modern mobile browser.
-- **Pure Local Network (Zero Cloud)**: All transfers stream directly between your devices on the local subnet. Your files never touch external servers or cloud relays.
-- **Two-Way Transfers**: Send files from phone to desktop with real-time progress, or drop desktop files onto Flitnix to download them on your phone.
+- **Guest Drop Box (Multi-Device Upload Room)**:
+  - Collect photos, videos, and documents from an entire group, classroom, or meeting without requiring anyone to install an app.
+  - Guests scan a single QR code with their phone camera to request entry.
+  - Dual host-approval gates: approve guests to join, then approve incoming files before they download.
+  - Strict destination isolation: each guest's uploads are placed in their own private subfolder (`Flitnix Guest Drop/<Room>/<Guest>/`).
+  - Upload-only security: guests cannot see or download files shared by the host or other guests.
+- **Connection Doctor**:
+  - One-click desktop diagnostics resolving connectivity issues between mobile devices and your computer.
+  - Runs 7 automated checks: network adapter presence, IPv4 address validation, port 43821 availability, `/healthz` HTTP loopback probe, Wi-Fi client isolation warnings, host binding reachability, and multi-homed routing guidance.
+  - Human-readable remediation advice with instant **Recheck** and **Regenerate QR** shortcuts.
+- **Quick Text & Link Transfer**:
+  - Instant, bidirectional note and URL sharing between desktop and phone.
+  - Strictly bounded to 64 KiB with UTF-8 validation and HTML-neutralized plain text rendering.
+  - Protocol-safe link detection (`http://` and `https://` only) with one-click safe link opening (`noopener,noreferrer`) and clipboard copying.
+- **Smoothed Progress & Safe Transfer Recovery**:
+  - Rolling delta Exponential Moving Average (EMA) speed calculation eliminates erratic Wi-Fi throughput spikes.
+  - Real-time ETA estimation for active uploads and downloads.
+  - Safe zero-byte retry cleanly resets failed transfers without partial byte corruption.
+- **No Mobile App Required**:
+  - The mobile interface runs in any modern browser (Safari, Chrome, Firefox) without App Store downloads or user accounts.
+- **Pure Local Network (Zero Cloud)**:
+  - All transfers stream directly over your local Wi-Fi or mobile hotspot. No external cloud relays or tracking.
 - **Rock-Solid Reliability**:
   - Two-phase publication reservation ensures cancellation requests and successful disk commits never produce corrupted or ghost files.
   - Safe session teardown prevents revoked sessions or network drops from leaving dangling locks or orphaned temporary files.
-  - Automated network adapter discovery with native Wi-Fi SSID identification on Linux, Windows, and macOS.
-- **Lightweight & Fast**: Built with Go and native webview technologies for minimal memory footprint and blistering LAN transfer speeds.
+  - Native Wi-Fi SSID identification on Linux, Windows, and macOS.
 
 ---
 
@@ -189,6 +207,7 @@ For detailed test coverage information and subsystem test layouts, see the [Test
 
 ## Project Documentation
 
+- [Architecture & Subsystem Design](docs/architecture.md) — Deep dive into Guest Drop Box, Connection Doctor, Quick Text, and reliability engines.
 - [Contributing Guidelines](CONTRIBUTING.md) — How to develop, submit bug reports, and create pull requests.
 - [Security Policy](SECURITY.md) — How to report security vulnerabilities responsibly.
 - [Changelog](CHANGELOG.md) — Version history and release notes.

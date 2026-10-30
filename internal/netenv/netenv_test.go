@@ -68,7 +68,18 @@ func TestEnumerateFiltersUnsuitableAddresses(t *testing.T) {
 	if len(views) != 1 {
 		t.Fatalf("got %d views %+v, want exactly 1", len(views), views)
 	}
-	want := View{Name: "br0", IP: "192.168.4.10", CIDR: "192.168.4.10/24", FriendlyName: "Network connection", Type: "Network", FriendlyNameSource: "Unavailable", Active: true}
+	want := View{
+		Name:               "br0",
+		IP:                 "192.168.4.10",
+		CIDR:               "192.168.4.10/24",
+		Family:             "IPv4",
+		Scope:              "private",
+		SuitableForQR:      true,
+		FriendlyName:       "Network connection",
+		Type:               "Network",
+		FriendlyNameSource: "Unavailable",
+		Active:             true,
+	}
 	if views[0] != want {
 		t.Fatalf("got %+v, want %+v", views[0], want)
 	}
@@ -90,6 +101,14 @@ func TestEnumerateFiltersUnsuitableRanges(t *testing.T) {
 		{"protocol", ipnetNet(192, 0, 0, 8)},
 		{"reserved", ipnetNet(240, 1, 2, 3)},
 		{"broadcast", ipaddrNet(255, 255, 255, 255)},
+		{"ipv6-unspecified", &net.IPNet{IP: net.ParseIP("::"), Mask: net.CIDRMask(128, 128)}},
+		{"ipv6-loopback", &net.IPNet{IP: net.ParseIP("::1"), Mask: net.CIDRMask(128, 128)}},
+		{"ipv6-link-local", &net.IPNet{IP: net.ParseIP("fe80::1"), Mask: net.CIDRMask(64, 128)}},
+		{"ipv6-multicast", &net.IPNet{IP: net.ParseIP("ff02::1"), Mask: net.CIDRMask(8, 128)}},
+		{"ipv6-discard", &net.IPNet{IP: net.ParseIP("100::1"), Mask: net.CIDRMask(64, 128)}},
+		{"ipv6-benchmark", &net.IPNet{IP: net.ParseIP("2001:2::1"), Mask: net.CIDRMask(48, 128)}},
+		{"ipv6-teredo", &net.IPNet{IP: net.ParseIP("2001::1"), Mask: net.CIDRMask(32, 128)}},
+		{"ipv6-6to4", &net.IPNet{IP: net.ParseIP("2002::1"), Mask: net.CIDRMask(16, 128)}},
 	}
 	for _, tc := range ranges {
 		src := fakeSource(
@@ -121,6 +140,103 @@ func TestEnumerateSkipsIPv6AndKeepsUsable(t *testing.T) {
 	}
 	if len(views) != 1 || views[0].IP != "10.42.0.8" {
 		t.Fatalf("got %+v, want only the IPv4 address", views)
+	}
+}
+
+func TestEnumerateIncludesGlobalAndULAv6(t *testing.T) {
+	v6Global := &net.IPNet{
+		IP:   net.ParseIP("2001:db8::10"),
+		Mask: net.CIDRMask(64, 128),
+	}
+	v6ULA := &net.IPNet{
+		IP:   net.ParseIP("fd12:3456::10"),
+		Mask: net.CIDRMask(64, 128),
+	}
+	v6LinkLocal := &net.IPNet{
+		IP:   net.ParseIP("fe80::1"),
+		Mask: net.CIDRMask(64, 128),
+	}
+	src := fakeSource(
+		[]net.Interface{upIf("eth0")},
+		map[string][]net.Addr{"eth0": {v6LinkLocal, v6Global, v6ULA, ipnetNet(192, 168, 1, 5)}},
+	)
+	views, err := Enumerate(src)
+	if err != nil {
+		t.Fatalf("Enumerate: %v", err)
+	}
+	if len(views) != 3 {
+		t.Fatalf("got %d views %+v, want 3 (1 IPv4 + 2 IPv6, link-local excluded)", len(views), views)
+	}
+	// Deterministic sorting: IPv4 before IPv6
+	if views[0].IP != "192.168.1.5" || views[0].Family != "IPv4" || !views[0].SuitableForQR {
+		t.Errorf("views[0] = %+v, want IPv4 192.168.1.5", views[0])
+	}
+	if views[1].IP != "2001:db8::10" || views[1].Family != "IPv6" || views[1].Scope != "global" || !views[1].SuitableForQR {
+		t.Errorf("views[1] = %+v, want global IPv6 2001:db8::10", views[1])
+	}
+	if views[2].IP != "fd12:3456::10" || views[2].Family != "IPv6" || views[2].Scope != "unique-local" || !views[2].SuitableForQR {
+		t.Errorf("views[2] = %+v, want ULA IPv6 fd12:3456::10", views[2])
+	}
+}
+
+func TestEnumerateDeduplicatesIPv4MappedIPv6(t *testing.T) {
+	v4 := ipnetNet(192, 168, 1, 10)
+	v4Mapped := &net.IPNet{
+		IP:   net.ParseIP("::ffff:192.168.1.10"),
+		Mask: net.CIDRMask(120, 128),
+	}
+	src := fakeSource(
+		[]net.Interface{upIf("eth0")},
+		map[string][]net.Addr{"eth0": {v4, v4Mapped}},
+	)
+	views, err := Enumerate(src)
+	if err != nil {
+		t.Fatalf("Enumerate: %v", err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("got %d views %+v, want exactly 1 deduplicated IPv4 view", len(views), views)
+	}
+	if views[0].IP != "192.168.1.10" || views[0].Family != "IPv4" {
+		t.Fatalf("unexpected view: %+v", views[0])
+	}
+}
+
+func TestInspectInterfacesSurfacesUnsuitableCandidatesWithWarnings(t *testing.T) {
+	src := fakeSource(
+		[]net.Interface{upIf("eth0"), upIf("lo")},
+		map[string][]net.Addr{
+			"eth0": {
+				ipnetNet(192, 168, 1, 10),
+				&net.IPNet{IP: net.ParseIP("fe80::1"), Mask: net.CIDRMask(64, 128)},
+			},
+			"lo": {
+				ipnetNet(127, 0, 0, 1),
+				&net.IPNet{IP: net.ParseIP("::1"), Mask: net.CIDRMask(128, 128)},
+			},
+		},
+	)
+	views, err := InspectInterfaces(src)
+	if err != nil {
+		t.Fatalf("InspectInterfaces: %v", err)
+	}
+	if len(views) != 4 {
+		t.Fatalf("got %d views, want 4", len(views))
+	}
+	byIP := make(map[string]View)
+	for _, v := range views {
+		byIP[v.IP] = v
+	}
+	if !byIP["192.168.1.10"].SuitableForQR {
+		t.Errorf("expected 192.168.1.10 to be suitable")
+	}
+	if byIP["fe80::1"].SuitableForQR || byIP["fe80::1"].Scope != "link-local" || byIP["fe80::1"].Warning == "" {
+		t.Errorf("expected fe80::1 to be marked unsuitable link-local with warning: %+v", byIP["fe80::1"])
+	}
+	if byIP["127.0.0.1"].SuitableForQR || byIP["127.0.0.1"].Scope != "loopback" {
+		t.Errorf("expected 127.0.0.1 to be marked unsuitable loopback: %+v", byIP["127.0.0.1"])
+	}
+	if byIP["::1"].SuitableForQR || byIP["::1"].Scope != "loopback" {
+		t.Errorf("expected ::1 to be marked unsuitable loopback: %+v", byIP["::1"])
 	}
 }
 
@@ -176,17 +292,31 @@ func TestPickDefault(t *testing.T) {
 }
 
 func TestInterfaceForRevalidation(t *testing.T) {
+	v6 := &net.IPNet{
+		IP:   net.ParseIP("fd12:3456::10"),
+		Mask: net.CIDRMask(64, 128),
+	}
 	src := fakeSource(
 		[]net.Interface{upIf("wlo1")},
-		map[string][]net.Addr{"wlo1": {ipnetNet(10, 42, 0, 8)}},
+		map[string][]net.Addr{"wlo1": {ipnetNet(10, 42, 0, 8), v6}},
 	)
 
 	if v, err := InterfaceFor(src, "10.42.0.8"); err != nil || v.Name != "wlo1" {
 		t.Fatalf("valid IP: got %+v err %v", v, err)
 	}
+	if v, err := InterfaceFor(src, "fd12:3456::10"); err != nil || v.Name != "wlo1" || v.Family != "IPv6" {
+		t.Fatalf("valid IPv6: got %+v err %v", v, err)
+	}
+	if v, err := InterfaceFor(src, "[fd12:3456::10]"); err != nil || v.Name != "wlo1" || v.Family != "IPv6" {
+		t.Fatalf("valid bracketed IPv6: got %+v err %v", v, err)
+	}
 	_, err := InterfaceFor(src, "10.42.0.200")
 	if !errors.Is(err, ErrGone) {
 		t.Fatalf("absent IP: got %v, want ErrGone", err)
+	}
+	_, err = InterfaceFor(src, "2001:db8::99")
+	if !errors.Is(err, ErrGone) {
+		t.Fatalf("absent IPv6: got %v, want ErrGone", err)
 	}
 	if _, err := InterfaceFor(src, "not-an-ip"); err == nil {
 		t.Fatal("invalid IP must error")
@@ -209,11 +339,19 @@ func TestListenAddr(t *testing.T) {
 	if err != nil || got != "10.42.0.8:43821" {
 		t.Fatalf("got %q err %v", got, err)
 	}
+	gotV6, err := ListenAddr("2001:db8::1", 43821)
+	if err != nil || gotV6 != "[2001:db8::1]:43821" {
+		t.Fatalf("IPv6 ListenAddr: got %q, want [2001:db8::1]:43821, err %v", gotV6, err)
+	}
+	gotBracketedV6, err := ListenAddr("[2001:db8::1]", 43821)
+	if err != nil || gotBracketedV6 != "[2001:db8::1]:43821" {
+		t.Fatalf("bracketed IPv6 ListenAddr: got %q, want [2001:db8::1]:43821, err %v", gotBracketedV6, err)
+	}
 	for _, bad := range []struct {
 		ip   string
 		port int
 	}{
-		{"fe80::1", 43821},
+		{"not-an-ip", 43821},
 		{"::ffff:10.0.0.1", 43821},
 		{"10.0.0.1", 0},
 		{"10.0.0.1", 70000},
@@ -233,6 +371,20 @@ func TestTransferURL(t *testing.T) {
 	want := "http://192.168.1.42:43821/#abc-_43chars-token-value"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+
+	gotV6, err := TransferURL("2001:db8::1", 43821, "my-token")
+	if err != nil {
+		t.Fatalf("TransferURL IPv6: %v", err)
+	}
+	wantV6 := "http://[2001:db8::1]:43821/#my-token"
+	if gotV6 != wantV6 {
+		t.Fatalf("got %q, want %q", gotV6, wantV6)
+	}
+
+	// Link-local IPv6 must be rejected with clear scope error
+	if _, err := TransferURL("fe80::1", 43821, "my-token"); err == nil {
+		t.Fatal("expected link-local IPv6 to be rejected by TransferURL")
 	}
 
 	badTokens := []string{"", " ", "#tok", "a#b", "a b", "x\ny"}

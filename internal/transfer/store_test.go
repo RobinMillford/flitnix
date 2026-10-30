@@ -358,3 +358,42 @@ func TestStoreDoesNotPublishPartFilesAsFinalNames(t *testing.T) {
 		}
 	}
 }
+
+func TestStore_SetDir(t *testing.T) {
+	st := newTestStore(t)
+	oldDir := st.Dir()
+
+	newDir := filepath.Join(t.TempDir(), "custom_downloads")
+	if err := st.SetDir(newDir); err != nil {
+		t.Fatalf("SetDir failed: %v", err)
+	}
+
+	if st.Dir() != newDir {
+		t.Fatalf("st.Dir() = %q, want %q", st.Dir(), newDir)
+	}
+
+	// Open and commit a part file in the new directory
+	p, err := st.OpenPart("dynamic.txt")
+	if err != nil {
+		t.Fatalf("OpenPart failed: %v", err)
+	}
+	writeAll(t, p, []byte("hello"))
+	committedPath, err := p.Commit()
+	if err != nil {
+		t.Fatalf("Commit failed: %v", err)
+	}
+	if !strings.HasPrefix(committedPath, newDir) {
+		t.Fatalf("committedPath %q not in newDir %q", committedPath, newDir)
+	}
+	if strings.HasPrefix(committedPath, oldDir) {
+		t.Fatalf("committedPath %q in oldDir %q", committedPath, oldDir)
+	}
+
+	// Reset with empty dir should derive default
+	if err := st.SetDir(""); err != nil {
+		t.Fatalf("SetDir with empty string failed: %v", err)
+	}
+	if st.Dir() == newDir {
+		t.Fatalf("st.Dir() was not reset: still %q", st.Dir())
+	}
+}

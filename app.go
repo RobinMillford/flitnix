@@ -21,18 +21,28 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	stdlibRuntime "runtime"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/itsyamin/flitnix/internal/audit"
+	"github.com/itsyamin/flitnix/internal/devices"
+	"github.com/itsyamin/flitnix/internal/doctor"
+	"github.com/itsyamin/flitnix/internal/guest"
 	"github.com/itsyamin/flitnix/internal/netenv"
 	"github.com/itsyamin/flitnix/internal/qr"
 	"github.com/itsyamin/flitnix/internal/server"
 	"github.com/itsyamin/flitnix/internal/session"
+	"github.com/itsyamin/flitnix/internal/settings"
+	"github.com/itsyamin/flitnix/internal/textmsg"
 	"github.com/itsyamin/flitnix/internal/transfer"
+	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -54,6 +64,86 @@ type SessionView struct {
 	Address       string `json:"address,omitempty"`
 }
 
+type GuestRoomView struct {
+	ID              string                      `json:"id"`
+	Date            string                      `json:"date"`
+	DestinationRoot string                      `json:"destinationRoot"`
+	RoomFolder      string                      `json:"roomFolder"`
+	Title           string                      `json:"title"`
+	Description     string                      `json:"description,omitempty"`
+	Deadline        *time.Time                  `json:"deadline,omitempty"`
+	CollisionPolicy string                      `json:"collisionPolicy"`
+	State           string                      `json:"state"`
+	DurationSeconds int                         `json:"durationSeconds"`
+	CreatedAt       time.Time                   `json:"createdAt"`
+	ExpiresAt       time.Time                   `json:"expiresAt"`
+	InviteSecret    string                      `json:"inviteSecret,omitempty"`
+	InviteURL       string                      `json:"inviteUrl,omitempty"`
+	QRDataURL       string                      `json:"qrDataUrl,omitempty"`
+	FormSchema      []guest.FormField           `json:"formSchema,omitempty"`
+	Roster          []guest.ExpectedParticipant `json:"roster,omitempty"`
+	HasRoster       bool                        `json:"hasRoster"`
+}
+
+type GuestRoomConfigView struct {
+	DestinationDir       string                      `json:"destinationDir"`
+	DurationMinutes      int                         `json:"durationMinutes"`
+	Title                string                      `json:"title"`
+	Description          string                      `json:"description,omitempty"`
+	DeadlineRFC3339      string                      `json:"deadlineRFC3339,omitempty"`
+	CollisionPolicy      string                      `json:"collisionPolicy"` // "preserve_both" or "reject"
+	FormSchema           []guest.FormField           `json:"formSchema,omitempty"`
+	ExpectedParticipants []guest.ExpectedParticipant `json:"expectedParticipants,omitempty"`
+}
+
+type GuestView struct {
+	ID            string    `json:"id"`
+	Nickname      string    `json:"nickname"`
+	ParticipantID string    `json:"participantId,omitempty"`
+	State         string    `json:"state"`
+	CreatedAt     time.Time `json:"createdAt"`
+}
+
+type GuestUploadView struct {
+	ID          string            `json:"id"`
+	GuestID     string            `json:"guestId"`
+	GuestName   string            `json:"guestName"`
+	FileName    string            `json:"fileName"`
+	Size        int64             `json:"size"`
+	State       string            `json:"state"`
+	Transferred int64             `json:"transferred"`
+	Speed       float64           `json:"speed"`
+	CreatedAt   time.Time         `json:"createdAt"`
+	CompletedAt time.Time         `json:"completedAt,omitempty"`
+	SHA256      string            `json:"sha256,omitempty"`
+	Error       string            `json:"error,omitempty"`
+	FormValues  map[string]string `json:"formValues,omitempty"`
+}
+
+type GuestRoomStateView struct {
+	Room             *GuestRoomView              `json:"room"`
+	PendingGuests    []GuestView                 `json:"pendingGuests"`
+	ApprovedGuests   []GuestView                 `json:"approvedGuests"`
+	PendingUploads   []GuestUploadView           `json:"pendingUploads"`
+	CompletedUploads []GuestUploadView           `json:"completedUploads"`
+	RecentUploads    []GuestUploadView           `json:"recentUploads"`
+	Roster           []guest.ExpectedParticipant `json:"roster,omitempty"`
+}
+
+type AuditListResult struct {
+	Entries []audit.Entry `json:"entries"`
+	Total   int           `json:"total"`
+}
+
+type TextMessageView struct {
+	ID        string    `json:"id"`
+	Sender    string    `json:"sender"`
+	Content   string    `json:"content"`
+	IsLink    bool      `json:"isLink"`
+	URL       string    `json:"url,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
 // UploadView is the UI projection of an incoming upload (pending approval,
 // in flight or finished). Received file paths are deliberately not part of
 // the projection: the UI names uploads by their opaque ID and state.
@@ -65,6 +155,7 @@ type UploadView struct {
 	State    string    `json:"state"`
 	Uploaded int64     `json:"uploaded"`
 	Speed    float64   `json:"speed"`
+	SHA256   string    `json:"sha256,omitempty"`
 	Reason   string    `json:"reason,omitempty"`
 }
 
@@ -80,6 +171,7 @@ type DownloadView struct {
 	State    string    `json:"state"`
 	Written  int64     `json:"written"`
 	Speed    float64   `json:"speed"`
+	SHA256   string    `json:"sha256,omitempty"`
 	Reason   string    `json:"reason,omitempty"`
 }
 
@@ -135,16 +227,41 @@ type BatchView struct {
 	Error              string          `json:"error,omitempty"`
 }
 
+// SettingsView is the UI projection of persistent user settings.
+type SettingsView struct {
+	Version            int    `json:"version"`
+	Theme              string `json:"theme"`
+	Locale             string `json:"locale"`
+	DownloadDir        string `json:"downloadDir"`
+	EffectiveDir       string `json:"effectiveDir"`
+	AutoStartSession   bool   `json:"autoStartSession"`
+	PreferredInterface string `json:"preferredInterface"`
+}
+
 // App owns the Flitnix core instances and the desktop lifecycle.
 type App struct {
 	ctx context.Context
 
-	store       *transfer.Store
-	sessions    *session.Manager
-	transfers   *transfer.Service
-	coordinator *transfer.Coordinator
-	registry    *transfer.Registry
-	downloads   *transfer.DownloadRegistry
+	store         *transfer.Store
+	settingsStore *settings.Store
+	sessions      *session.Manager
+	transfers     *transfer.Service
+	coordinator   *transfer.Coordinator
+	registry      *transfer.Registry
+	downloads     *transfer.DownloadRegistry
+	guestMgr      *guest.Manager
+	textStore     *textmsg.Store
+	auditStore    *audit.Store
+	templateStore *guest.TemplateStore
+	devicesStore  *devices.Store
+	hostIdentity  *devices.HostIdentity
+	pairing       *devices.PairingCoordinator
+	startupMu     sync.Mutex
+	startupDone   bool
+	initialShares []string
+
+	phoneContactMu   sync.Mutex
+	lastPhoneContact *time.Time
 
 	// source supplies live network-interface state for the session
 	// address decisions; tests inject synthetic interfaces.
@@ -159,25 +276,77 @@ type App struct {
 	srv         *server.Server
 	serveCancel context.CancelFunc
 	serveDone   chan error
+
+	bgCancel     context.CancelFunc
+	bgWg         sync.WaitGroup
+	shutdownOnce sync.Once
 }
 
-// NewApp constructs the application: receive store on the default directory
-// (~/Downloads/Flitnix), a fresh session manager, transfer service and
-// shared-file registry. The HTTP server is not started here; it starts
+func resolveDataDir() string {
+	dir, err := os.UserConfigDir()
+	if err != nil || dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			return filepath.Join(os.TempDir(), "flitnix")
+		}
+		return filepath.Join(home, ".config", "flitnix")
+	}
+	return filepath.Join(dir, "flitnix")
+}
+
+// NewApp constructs the application: receive store configured from persistent
+// settings (or default ~/Downloads/Flitnix), a fresh session manager, transfer
+// service and shared-file registry. The HTTP server is not started here; it starts
 // lazily when the first session is created and stops again when the last
 // session ends.
 func NewApp() (*App, error) {
-	store, err := transfer.NewStore(transfer.StoreConfig{})
+	dataDir := resolveDataDir()
+	settingsStore, err := settings.NewStore(filepath.Join(dataDir, "settings.json"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "flitnix: settings store initialization warning: %v\n", err)
+		settingsStore, _ = settings.NewStore("")
+	}
+	initialDir := ""
+	if settingsStore != nil {
+		initialDir = settingsStore.Get().DownloadDir
+	}
+	store, err := transfer.NewStore(transfer.StoreConfig{Dir: initialDir})
 	if err != nil {
 		return nil, err
 	}
+	auditStore, err := audit.NewStore(filepath.Join(dataDir, "audit.jsonl"), 10000)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "flitnix: audit store initialization warning: %v\n", err)
+	}
+	templateStore, err := guest.NewTemplateStore(filepath.Join(dataDir, "templates.json"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "flitnix: template store initialization warning: %v\n", err)
+	}
+	devicesStore, err := devices.NewStore(filepath.Join(dataDir, "devices.json"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "flitnix: devices store initialization warning: %v\n", err)
+	}
+	hostIdentity, err := devices.LoadOrCreateHostIdentity(filepath.Join(dataDir, "host_identity.json"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "flitnix: host identity initialization warning: %v\n", err)
+	}
+	pairingCoord := devices.NewPairingCoordinator(hostIdentity, devicesStore)
+
 	a := &App{
-		store:       store,
-		transfers:   transfer.NewService(transfer.Config{Store: store}),
-		coordinator: transfer.NewCoordinator(transfer.CoordinatorConfig{}),
-		registry:    transfer.NewRegistry(),
-		downloads:   transfer.NewDownloadRegistry(),
-		source:      netenv.DefaultSource(),
+		store:         store,
+		settingsStore: settingsStore,
+		transfers:     transfer.NewService(transfer.Config{Store: store}),
+		coordinator:   transfer.NewCoordinator(transfer.CoordinatorConfig{}),
+		registry:      transfer.NewRegistry(),
+		downloads:     transfer.NewDownloadRegistry(),
+		guestMgr:      guest.NewManager(),
+		textStore:     textmsg.NewStore(),
+		auditStore:    auditStore,
+		templateStore: templateStore,
+		devicesStore:  devicesStore,
+		hostIdentity:  hostIdentity,
+		pairing:       pairingCoord,
+		source:        netenv.DefaultSource(),
 	}
 	a.sessions = session.NewManager(session.Config{OnExpire: a.releaseSession, OnEnd: a.logSessionEnd})
 	return a, nil
@@ -204,12 +373,141 @@ func (a *App) releaseSession(key string) {
 	for _, source := range a.registry.ListSourceSession(key) {
 		a.registry.RemoveSource(source.ID)
 	}
+	a.textStore.Clear(key)
 }
 
 // startup records the Wails runtime context so bound methods can call the
 // runtime (native file dialogs).
 func (a *App) startup(ctx context.Context) {
+	a.startupMu.Lock()
 	a.ctx = ctx
+	initial := a.initialShares
+	a.startupDone = true
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	a.bgCancel = bgCancel
+	a.startupMu.Unlock()
+
+	ensureLinuxNautilusScript()
+
+	if len(initial) > 0 {
+		_, _ = a.AddDroppedSources(initial)
+	}
+
+	if a.settingsStore != nil && a.settingsStore.Get().AutoStartSession {
+		a.bgWg.Add(1)
+		go func() {
+			defer a.bgWg.Done()
+			select {
+			case <-bgCtx.Done():
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
+			if a.sessions.Len() == 0 {
+				_, _ = a.StartSession("")
+			}
+		}()
+	}
+}
+
+// ensureLinuxNautilusScript ensures the "Share with Flitnix" Nautilus script
+// is installed in ~/.local/share/nautilus/scripts if GNOME/Nautilus is present.
+func ensureLinuxNautilusScript() {
+	if stdlibRuntime.GOOS != "linux" {
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	scriptsDir := filepath.Join(home, ".local", "share", "nautilus", "scripts")
+	nautilusDir := filepath.Join(home, ".local", "share", "nautilus")
+	desktopEnv := strings.ToLower(os.Getenv("XDG_CURRENT_DESKTOP"))
+	// Only auto-provision if Nautilus data directory exists or user is in a GNOME desktop session
+	if _, err := os.Stat(nautilusDir); os.IsNotExist(err) && !strings.Contains(desktopEnv, "gnome") {
+		return
+	}
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		return
+	}
+	scriptPath := filepath.Join(scriptsDir, "Share with Flitnix")
+	if _, err := os.Stat(scriptPath); err == nil {
+		return // already present
+	}
+	content := `#!/usr/bin/env bash
+# Share with Flitnix - GNOME Files (Nautilus) script
+# Passes selected files and folders, or current folder if none selected.
+
+if [ "$#" -gt 0 ]; then
+    exec flitnix "$@"
+elif [ -n "${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-}" ]; then
+    mapfile -t paths <<< "${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS}"
+    exec flitnix "${paths[@]}"
+elif [ -n "${NAUTILUS_SCRIPT_CURRENT_URI:-}" ]; then
+    exec flitnix "${NAUTILUS_SCRIPT_CURRENT_URI}"
+else
+    exec flitnix
+fi
+`
+	_ = os.WriteFile(scriptPath, []byte(content), 0o755)
+}
+
+// onSecondInstanceLaunch is invoked when a second instance of Flitnix launches.
+// It extracts file and folder arguments from the second instance, normalizes them
+// relative to the second instance's working directory, queues them into the share
+// registry, and restores/shows the application window.
+func (a *App) onSecondInstanceLaunch(data options.SecondInstanceData) {
+	normPaths := ExtractSharePaths(data.Args, data.WorkingDirectory, func(raw string, err error) {
+		fmt.Fprintf(os.Stderr, "flitnix: second-instance invalid path %q: %v\n", raw, err)
+	})
+
+	if len(normPaths) > 0 {
+		a.startupMu.Lock()
+		if !a.startupDone {
+			a.initialShares = append(a.initialShares, normPaths...)
+			a.startupMu.Unlock()
+			a.bringToFront()
+			return
+		}
+		a.startupMu.Unlock()
+
+		_, _ = a.AddDroppedSources(normPaths)
+	}
+
+	a.bringToFront()
+}
+
+// onMacFileOpen is invoked when macOS opens files with the running application.
+func (a *App) onMacFileOpen(filePath string) {
+	normPaths := ExtractSharePaths([]string{filePath}, "", func(raw string, err error) {
+		fmt.Fprintf(os.Stderr, "flitnix: mac open-file invalid path %q: %v\n", raw, err)
+	})
+
+	if len(normPaths) > 0 {
+		a.startupMu.Lock()
+		if !a.startupDone {
+			a.initialShares = append(a.initialShares, normPaths...)
+			a.startupMu.Unlock()
+			a.bringToFront()
+			return
+		}
+		a.startupMu.Unlock()
+
+		_, _ = a.AddDroppedSources(normPaths)
+	}
+
+	a.bringToFront()
+}
+
+// bringToFront restores a minimized window and brings it to the foreground.
+func (a *App) bringToFront() {
+	a.startupMu.Lock()
+	ctx := a.ctx
+	a.startupMu.Unlock()
+
+	if ctx != nil && ctx.Value("frontend") != nil {
+		runtime.WindowUnminimise(ctx)
+		runtime.WindowShow(ctx)
+	}
 }
 
 // shortKey returns a bounded prefix of a session's non-secret key for log
@@ -247,16 +545,29 @@ func (a *App) logTransferDiagnostics(format string, args ...any) {
 // moment ends canceled (never half-published), matching the core's
 // shutdown contract.
 func (a *App) shutdown(ctx context.Context) {
-	fmt.Fprintf(os.Stderr, "flitnix: the desktop is shutting down; ending every session: shutdown\n")
-	for _, s := range a.sessions.ActiveSessions() {
-		a.transfers.CancelSession(s.Key())
-		_ = a.coordinator.CloseSession(s.Key())
-		a.discardEmptyRoots(s.Key())
-		a.downloads.CancelSession(s.Key())
-	}
-	a.sessions.Close()
-	a.registry.Clear()
-	a.stopServer()
+	a.shutdownOnce.Do(func() {
+		fmt.Fprintf(os.Stderr, "flitnix: the desktop is shutting down; ending every session: shutdown\n")
+		a.startupMu.Lock()
+		if a.bgCancel != nil {
+			a.bgCancel()
+		}
+		a.startupMu.Unlock()
+		a.bgWg.Wait()
+
+		for _, s := range a.sessions.ActiveSessions() {
+			a.transfers.CancelSession(s.Key())
+			_ = a.coordinator.CloseSession(s.Key())
+			a.discardEmptyRoots(s.Key())
+			a.downloads.CancelSession(s.Key())
+		}
+		a.sessions.Close()
+		a.registry.Clear()
+		a.guestMgr.Close()
+		if a.auditStore != nil {
+			a.auditStore.Close()
+		}
+		a.stopServer()
+	})
 }
 
 // ---- HTTP server lifecycle (lazy start, address-aware reuse) ----
@@ -292,12 +603,19 @@ func (a *App) startServerLocked(listen string) error {
 	srv := server.New(server.Config{
 		ListenAddr: listen,
 		Services: &server.Services{
-			Sessions:    a.sessions,
-			Transfers:   a.transfers,
-			Coordinator: a.coordinator,
-			Registry:    a.registry,
-			Downloads:   a.downloads,
-			Diagnose:    a.logTransferDiagnostics,
+			Sessions:       a.sessions,
+			Transfers:      a.transfers,
+			Coordinator:    a.coordinator,
+			Registry:       a.registry,
+			Downloads:      a.downloads,
+			GuestManager:   a.guestMgr,
+			TextMessages:   a.textStore,
+			Audit:          a.auditStore,
+			Devices:        a.devicesStore,
+			HostIdentity:   a.hostIdentity,
+			Pairing:        a.pairing,
+			OnPhoneContact: a.recordPhoneContact,
+			Diagnose:       a.logTransferDiagnostics,
 		},
 	})
 	serveCtx, cancel := context.WithCancel(context.Background())
@@ -420,6 +738,25 @@ func (a *App) resolveInterface(ip string) (netenv.View, error) {
 		return netenv.View{}, fmt.Errorf("flitnix: could not read the network interfaces: %w", err)
 	}
 	if ip == "" {
+		if a.settingsStore != nil {
+			pref := a.settingsStore.Get().PreferredInterface
+			if pref != "" {
+				var match *netenv.View
+				for _, v := range views {
+					if v.Name == pref {
+						if v.Family == "IPv4" || match == nil {
+							vCopy := v
+							match = &vCopy
+						}
+					}
+				}
+				if match != nil {
+					return *match, nil
+				}
+				// If preferred interface is not currently available, fall back
+				// safely to PickDefault below without hardcoded addresses or interfaces.
+			}
+		}
 		view, pickErr := netenv.PickDefault(views)
 		switch {
 		case errors.Is(pickErr, netenv.ErrAmbiguous):
@@ -430,6 +767,14 @@ func (a *App) resolveInterface(ip string) (netenv.View, error) {
 		return view, nil
 	}
 	view, pickErr := netenv.InterfaceFor(a.source, ip)
+	if pickErr != nil {
+		// If caller passed an interface name instead of an IP literal, match by name.
+		for _, v := range views {
+			if v.Name == ip {
+				return v, nil
+			}
+		}
+	}
 	switch {
 	case errors.Is(pickErr, netenv.ErrGone):
 		return netenv.View{}, fmt.Errorf("flitnix: the selected network is no longer reachable: %w", pickErr)
@@ -526,7 +871,9 @@ func (a *App) EndSession(key string) error {
 	a.sessions.RevokeSession(target)
 	if a.sessions.Len() == 0 {
 		a.registry.Clear()
-		a.stopServer()
+		if !a.isGuestRoomActive() {
+			a.stopServer()
+		}
 	}
 	return nil
 }
@@ -952,7 +1299,7 @@ func (a *App) PickFolderForSharing() (SharedSourceView, error) {
 }
 
 // AddDroppedSources registers native paths delivered by Wails file-drop
-// integration. Each path is handled independently so one invalid drop does
+// integration or external launches. Each path is handled independently so one invalid drop does
 // not remove or invalidate existing selections.
 func (a *App) AddDroppedSources(paths []string) ([]SharedSourceView, error) {
 	views := make([]SharedSourceView, 0, len(paths))
@@ -1024,6 +1371,146 @@ func (a *App) RevokeSharedSource(id string) error {
 // files.
 func (a *App) ReceiveDirectory() string { return a.store.Dir() }
 
+// GetSettings returns the user settings and current effective download directory.
+func (a *App) GetSettings() SettingsView {
+	if a.settingsStore == nil {
+		return SettingsView{
+			Version:      settings.CurrentSchemaVersion,
+			Theme:        settings.ThemeSystem,
+			Locale:       "system",
+			EffectiveDir: a.store.Dir(),
+		}
+	}
+	s := a.settingsStore.Get()
+	return SettingsView{
+		Version:            s.Version,
+		Theme:              s.Theme,
+		Locale:             s.Locale,
+		DownloadDir:        s.DownloadDir,
+		EffectiveDir:       a.store.Dir(),
+		AutoStartSession:   s.AutoStartSession,
+		PreferredInterface: s.PreferredInterface,
+	}
+}
+
+// hasActiveTransfers reports whether any transfers (standalone or batches) are currently
+// in progress, transferring, or pending.
+func (a *App) hasActiveTransfers() bool {
+	if a.transfers != nil {
+		counts := a.transfers.Counts()
+		if counts.Uploading > 0 {
+			return true
+		}
+		for _, u := range a.transfers.List() {
+			if u.State == transfer.StateUploading || u.State == transfer.StateApproved {
+				return true
+			}
+		}
+	}
+	if a.coordinator != nil {
+		for _, key := range a.coordinator.SessionKeys() {
+			batches, err := a.coordinator.ListBatches(key)
+			if err == nil {
+				for _, b := range batches {
+					if b.State == transfer.BatchStateTransferring ||
+						b.State == transfer.BatchStateQueued ||
+						b.State == transfer.BatchStateApproved {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+// SaveSettings updates the persistent settings and applies them to active subsystems.
+func (a *App) SaveSettings(view SettingsView) error {
+	if a.settingsStore == nil {
+		return errors.New("flitnix: settings store not available")
+	}
+	theme := strings.ToLower(strings.TrimSpace(view.Theme))
+	if theme != "" && theme != settings.ThemeSystem && theme != settings.ThemeDark && theme != settings.ThemeLight {
+		return settings.ErrInvalidTheme
+	}
+	if view.DownloadDir != "" {
+		info, err := os.Stat(view.DownloadDir)
+		if err == nil && !info.IsDir() {
+			return errors.New("flitnix: download path cannot be a regular file")
+		}
+	}
+	if a.settingsStore != nil {
+		currentDir := a.settingsStore.Get().DownloadDir
+		if view.DownloadDir != currentDir && a.hasActiveTransfers() {
+			return errors.New("flitnix: cannot change receive directory while transfers are active")
+		}
+	}
+	s := settings.Settings{
+		Version:            view.Version,
+		Theme:              view.Theme,
+		Locale:             view.Locale,
+		DownloadDir:        view.DownloadDir,
+		AutoStartSession:   view.AutoStartSession,
+		PreferredInterface: view.PreferredInterface,
+	}
+	if err := a.settingsStore.Save(s); err != nil {
+		return err
+	}
+	if a.store != nil {
+		if err := a.store.SetDir(s.DownloadDir); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ResetSettings resets settings to baseline defaults and re-applies default paths.
+func (a *App) ResetSettings() (SettingsView, error) {
+	if a.settingsStore == nil {
+		return SettingsView{}, errors.New("flitnix: settings store not available")
+	}
+	if a.hasActiveTransfers() {
+		if a.settingsStore != nil && a.settingsStore.Get().DownloadDir != "" {
+			return SettingsView{}, errors.New("flitnix: cannot reset receive directory while transfers are active")
+		}
+	}
+	if _, err := a.settingsStore.Reset(); err != nil {
+		return SettingsView{}, err
+	}
+	if a.store != nil {
+		_ = a.store.SetDir("")
+	}
+	return a.GetSettings(), nil
+}
+
+// SelectDownloadDirectory opens the native directory dialog for choosing the download directory.
+func (a *App) SelectDownloadDirectory() (string, error) {
+	if a.ctx == nil {
+		return "", errors.New("flitnix: application context not initialized")
+	}
+	defaultDir := ""
+	if a.store != nil {
+		defaultDir = a.store.Dir()
+	}
+	dir, err := runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
+		Title:            "Select Download Directory",
+		DefaultDirectory: defaultDir,
+	})
+	if err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// OpenDownloadFolder opens the active download directory in the native file manager.
+func (a *App) OpenDownloadFolder() error {
+	dir := a.store.Dir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("flitnix: cannot create download directory: %w", err)
+	}
+	return openFolderInOS(dir)
+}
+
 // ---- Projections ----
 
 func sessionView(s *session.Session, token string) SessionView {
@@ -1045,6 +1532,7 @@ func uploadView(u transfer.Upload) UploadView {
 		State:    string(u.State),
 		Uploaded: u.Uploaded,
 		Speed:    u.Speed,
+		SHA256:   u.SHA256,
 		Reason:   u.Reason,
 	}
 }
@@ -1103,7 +1591,7 @@ func downloadView(d transfer.Download) DownloadView {
 		ID: d.ID, FileID: d.FileID, Name: d.Name, Kind: d.Kind, Size: d.Size,
 		Created: d.Created, Started: d.Started, Finished: d.Finished,
 		State: string(d.State), Written: d.Written,
-		Speed: d.Speed, Reason: d.Reason,
+		Speed: d.Speed, SHA256: d.SHA256, Reason: d.Reason,
 	}
 }
 
@@ -1113,4 +1601,742 @@ func downloadViews(list []transfer.Download) []DownloadView {
 		out = append(out, downloadView(d))
 	}
 	return out
+}
+
+// ---- Guest Drop Box methods ----
+
+func (a *App) StartGuestRoom(destinationDir string, durationMinutes int) (GuestRoomView, error) {
+	return a.StartGuestRoomWithConfig(GuestRoomConfigView{
+		DestinationDir:  destinationDir,
+		DurationMinutes: durationMinutes,
+		CollisionPolicy: "preserve_both",
+	})
+}
+
+func (a *App) StartGuestRoomWithConfig(cfg GuestRoomConfigView) (GuestRoomView, error) {
+	if cfg.DestinationDir == "" {
+		cfg.DestinationDir = a.store.Dir()
+	}
+
+	a.srvMu.Lock()
+	var listen string
+	if a.srv != nil && a.srv.Addr() != nil {
+		listen = a.srv.Addr().String()
+	}
+	a.srvMu.Unlock()
+
+	if listen == "" {
+		ifaces, err := a.ListNetworkInterfaces()
+		if err != nil || len(ifaces) == 0 {
+			return GuestRoomView{}, errors.New("flitnix: no usable network interface found; connect to a network first")
+		}
+		addr, err := netenv.ListenAddr(ifaces[0].IP, server.DefaultPort)
+		if err != nil {
+			return GuestRoomView{}, fmt.Errorf("flitnix: cannot form the guest room address: %w", err)
+		}
+		listen = addr
+	}
+
+	if err := a.ensureServer(listen); err != nil {
+		return GuestRoomView{}, err
+	}
+
+	duration := time.Duration(cfg.DurationMinutes) * time.Minute
+	if duration <= 0 {
+		duration = 1 * time.Hour
+	}
+
+	policy := guest.CollisionPolicy(cfg.CollisionPolicy)
+	if policy != guest.CollisionReject {
+		policy = guest.CollisionPreserveBoth
+	}
+
+	var deadline *time.Time
+	if cfg.DeadlineRFC3339 != "" {
+		parsed, err := time.Parse(time.RFC3339, cfg.DeadlineRFC3339)
+		if err == nil {
+			deadline = &parsed
+		}
+	}
+
+	room, err := a.guestMgr.CreateRoomWithConfig(guest.RoomConfig{
+		DestinationRoot:      cfg.DestinationDir,
+		Duration:             duration,
+		Title:                cfg.Title,
+		Description:          cfg.Description,
+		Deadline:             deadline,
+		CollisionPolicy:      policy,
+		FormSchema:           cfg.FormSchema,
+		ExpectedParticipants: cfg.ExpectedParticipants,
+	})
+	if err != nil {
+		return GuestRoomView{}, err
+	}
+
+	if a.auditStore != nil {
+		a.auditStore.Record(audit.Entry{
+			EventType: audit.EventRoomCreated,
+			RoomID:    room.ID,
+			Outcome:   audit.OutcomeSuccess,
+			Details:   fmt.Sprintf("title: %s, policy: %s", room.Title, room.CollisionPolicy),
+		})
+	}
+
+	a.srvMu.Lock()
+	srvURL := a.srv.URL()
+	a.srvMu.Unlock()
+
+	inviteURL := fmt.Sprintf("%s/guest#%s", srvURL, room.InviteSecret)
+	qrPNG, err := qr.PNG(inviteURL, qr.DefaultSize)
+	var qrDataURL string
+	if err == nil {
+		qrDataURL = "data:image/png;base64," + base64.StdEncoding.EncodeToString(qrPNG)
+	}
+
+	v := room.View()
+	return GuestRoomView{
+		ID:              v.ID,
+		Date:            v.Date,
+		DestinationRoot: v.DestinationRoot,
+		RoomFolder:      v.RoomFolder,
+		Title:           v.Title,
+		Description:     v.Description,
+		Deadline:        v.Deadline,
+		CollisionPolicy: string(v.CollisionPolicy),
+		State:           string(v.State),
+		DurationSeconds: v.DurationSeconds,
+		CreatedAt:       v.CreatedAt,
+		ExpiresAt:       v.ExpiresAt,
+		InviteSecret:    v.InviteSecret,
+		InviteURL:       inviteURL,
+		QRDataURL:       qrDataURL,
+		FormSchema:      v.FormSchema,
+		Roster:          v.Roster,
+		HasRoster:       v.HasRoster,
+	}, nil
+}
+
+func (a *App) GetGuestRoomState() (GuestRoomStateView, error) {
+	room := a.guestMgr.ActiveRoom()
+	if room == nil {
+		return GuestRoomStateView{}, nil
+	}
+
+	a.srvMu.Lock()
+	var srvURL string
+	if a.srv != nil {
+		srvURL = a.srv.URL()
+	}
+	a.srvMu.Unlock()
+
+	var qrDataURL string
+	inviteURL := ""
+	if srvURL != "" {
+		inviteURL = fmt.Sprintf("%s/guest#%s", srvURL, room.InviteSecret)
+		qrPNG, err := qr.PNG(inviteURL, qr.DefaultSize)
+		if err == nil {
+			qrDataURL = "data:image/png;base64," + base64.StdEncoding.EncodeToString(qrPNG)
+		}
+	}
+
+	rv := room.View()
+	roomView := &GuestRoomView{
+		ID:              rv.ID,
+		Date:            rv.Date,
+		DestinationRoot: rv.DestinationRoot,
+		RoomFolder:      rv.RoomFolder,
+		Title:           rv.Title,
+		Description:     rv.Description,
+		Deadline:        rv.Deadline,
+		CollisionPolicy: string(rv.CollisionPolicy),
+		State:           string(rv.State),
+		DurationSeconds: rv.DurationSeconds,
+		CreatedAt:       rv.CreatedAt,
+		ExpiresAt:       rv.ExpiresAt,
+		InviteSecret:    rv.InviteSecret,
+		InviteURL:       inviteURL,
+		QRDataURL:       qrDataURL,
+		FormSchema:      rv.FormSchema,
+		Roster:          rv.Roster,
+		HasRoster:       rv.HasRoster,
+	}
+
+	var pendingGuests []GuestView
+	var approvedGuests []GuestView
+	for _, g := range room.ListGuests() {
+		gv := GuestView{
+			ID:            g.ID,
+			Nickname:      g.Nickname,
+			ParticipantID: g.ParticipantID,
+			State:         string(g.State),
+			CreatedAt:     g.CreatedAt,
+		}
+		if g.State == guest.GuestPending {
+			pendingGuests = append(pendingGuests, gv)
+		} else if g.State == guest.GuestApproved {
+			approvedGuests = append(approvedGuests, gv)
+		}
+	}
+
+	var pendingUploads []GuestUploadView
+	var completedUploads []GuestUploadView
+	var recentUploads []GuestUploadView
+	for _, u := range room.ListUploads() {
+		uv := GuestUploadView{
+			ID:          u.ID,
+			GuestID:     u.GuestID,
+			GuestName:   u.GuestName,
+			FileName:    u.FileName,
+			Size:        u.Size,
+			State:       string(u.State),
+			Transferred: u.Transferred,
+			Speed:       u.Speed,
+			CreatedAt:   u.CreatedAt,
+			CompletedAt: u.CompletedAt,
+			SHA256:      u.SHA256,
+			Error:       u.Error,
+			FormValues:  u.FormValues,
+		}
+		recentUploads = append(recentUploads, uv)
+		if u.State == guest.UploadPendingApproval {
+			pendingUploads = append(pendingUploads, uv)
+		} else if u.State == guest.UploadCompleted {
+			completedUploads = append(completedUploads, uv)
+		}
+	}
+
+	sort.Slice(recentUploads, func(i, j int) bool {
+		return recentUploads[i].CreatedAt.After(recentUploads[j].CreatedAt)
+	})
+
+	return GuestRoomStateView{
+		Room:             roomView,
+		PendingGuests:    pendingGuests,
+		ApprovedGuests:   approvedGuests,
+		PendingUploads:   pendingUploads,
+		CompletedUploads: completedUploads,
+		RecentUploads:    recentUploads,
+		Roster:           rv.Roster,
+	}, nil
+}
+
+func (a *App) ApproveGuest(guestID string) error {
+	room := a.guestMgr.ActiveRoom()
+	if room == nil {
+		return errors.New("flitnix: no active guest room")
+	}
+	err := room.ApproveGuest(guestID)
+	if err == nil && a.auditStore != nil {
+		a.auditStore.Record(audit.Entry{
+			EventType: audit.EventGuestApproved,
+			RoomID:    room.ID,
+			GuestID:   guestID,
+			Outcome:   audit.OutcomeSuccess,
+		})
+	}
+	return err
+}
+
+func (a *App) RejectGuest(guestID string) error {
+	room := a.guestMgr.ActiveRoom()
+	if room == nil {
+		return errors.New("flitnix: no active guest room")
+	}
+	err := room.RejectGuest(guestID)
+	if err == nil && a.auditStore != nil {
+		a.auditStore.Record(audit.Entry{
+			EventType: audit.EventGuestRejected,
+			RoomID:    room.ID,
+			GuestID:   guestID,
+			Outcome:   audit.OutcomeRejected,
+		})
+	}
+	return err
+}
+
+func (a *App) RevokeGuest(guestID string) error {
+	room := a.guestMgr.ActiveRoom()
+	if room == nil {
+		return errors.New("flitnix: no active guest room")
+	}
+	err := room.RevokeGuest(guestID)
+	if err == nil && a.auditStore != nil {
+		a.auditStore.Record(audit.Entry{
+			EventType: audit.EventGuestRevoked,
+			RoomID:    room.ID,
+			GuestID:   guestID,
+			Outcome:   audit.OutcomeCanceled,
+		})
+	}
+	return err
+}
+
+func (a *App) ApproveGuestUpload(uploadID string) error {
+	room := a.guestMgr.ActiveRoom()
+	if room == nil {
+		return errors.New("flitnix: no active guest room")
+	}
+	err := room.ApproveUpload(uploadID)
+	if err == nil && a.auditStore != nil {
+		a.auditStore.Record(audit.Entry{
+			EventType: audit.EventUploadApproved,
+			RoomID:    room.ID,
+			Details:   fmt.Sprintf("upload_id: %s", uploadID),
+			Outcome:   audit.OutcomeSuccess,
+		})
+	}
+	return err
+}
+
+func (a *App) RejectGuestUpload(uploadID string) error {
+	room := a.guestMgr.ActiveRoom()
+	if room == nil {
+		return errors.New("flitnix: no active guest room")
+	}
+	err := room.RejectUpload(uploadID)
+	if err == nil && a.auditStore != nil {
+		a.auditStore.Record(audit.Entry{
+			EventType: audit.EventUploadRejected,
+			RoomID:    room.ID,
+			Details:   fmt.Sprintf("upload_id: %s", uploadID),
+			Outcome:   audit.OutcomeRejected,
+		})
+	}
+	return err
+}
+
+func (a *App) isGuestRoomActive() bool {
+	if a.guestMgr == nil {
+		return false
+	}
+	room := a.guestMgr.ActiveRoom()
+	if room == nil {
+		return false
+	}
+	room.CheckExpiry()
+	v := room.View()
+	return v.State == guest.RoomActive || v.State == guest.RoomExpiring
+}
+
+func (a *App) EndGuestRoom() error {
+	room := a.guestMgr.ActiveRoom()
+	var roomID string
+	if room != nil {
+		roomID = room.ID
+	}
+	err := a.guestMgr.EndRoom()
+	if a.sessions.Len() == 0 {
+		a.stopServer()
+	}
+	if a.auditStore != nil && roomID != "" {
+		a.auditStore.Record(audit.Entry{
+			EventType: audit.EventRoomEnded,
+			RoomID:    roomID,
+			Outcome:   audit.OutcomeSuccess,
+		})
+	}
+	return err
+}
+
+func (a *App) PickGuestDestination() (string, error) {
+	if a.ctx == nil {
+		return a.store.Dir(), nil
+	}
+	dir, err := runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Choose Guest Drop Box Destination",
+	})
+	if err != nil {
+		return "", err
+	}
+	if dir == "" {
+		return a.store.Dir(), nil
+	}
+	return dir, nil
+}
+
+func openFolderInOS(folder string) error {
+	var cmd *exec.Cmd
+	switch stdlibRuntime.GOOS {
+	case "windows":
+		cmd = exec.Command("explorer.exe", folder)
+	case "darwin":
+		cmd = exec.Command("open", folder)
+	default:
+		cmd = exec.Command("xdg-open", folder)
+	}
+	return cmd.Start()
+}
+
+func (a *App) OpenGuestFolder() error {
+	room := a.guestMgr.ActiveRoom()
+	if room == nil {
+		return errors.New("flitnix: no active guest room")
+	}
+	folder := room.RoomFolder
+	_ = os.MkdirAll(folder, 0700)
+	return openFolderInOS(folder)
+}
+
+// ---- Expected Participants (Roster) methods ----
+
+func (a *App) AddExpectedParticipant(name, email, identifier string) error {
+	room := a.guestMgr.ActiveRoom()
+	if room == nil {
+		return errors.New("flitnix: no active guest room")
+	}
+	idVal := identifier
+	if idVal == "" {
+		idVal = email
+	}
+	_, err := room.AddParticipant(name, idVal)
+	return err
+}
+
+func (a *App) RemoveExpectedParticipant(participantID string) error {
+	room := a.guestMgr.ActiveRoom()
+	if room == nil {
+		return errors.New("flitnix: no active guest room")
+	}
+	return room.RemoveParticipant(participantID)
+}
+
+func (a *App) UpdateExpectedParticipant(participant guest.ExpectedParticipant) error {
+	room := a.guestMgr.ActiveRoom()
+	if room == nil {
+		return errors.New("flitnix: no active guest room")
+	}
+	return room.UpdateParticipant(participant.ID, participant.Name, participant.Identifier)
+}
+
+// ---- Guest Room Templates & Presets ----
+
+func (a *App) ListGuestPresets() []guest.Preset {
+	return guest.DefaultPresets()
+}
+
+func (a *App) ListGuestTemplates() []guest.Template {
+	if a.templateStore == nil {
+		return nil
+	}
+	return a.templateStore.List()
+}
+
+func (a *App) SaveGuestTemplate(t guest.Template) error {
+	if a.templateStore == nil {
+		return errors.New("flitnix: template store not initialized")
+	}
+	return a.templateStore.Save(t)
+}
+
+func (a *App) DeleteGuestTemplate(id string) error {
+	if a.templateStore == nil {
+		return errors.New("flitnix: template store not initialized")
+	}
+	return a.templateStore.Delete(id)
+}
+
+func (a *App) DuplicateGuestTemplate(id string, newName string) (guest.Template, error) {
+	if a.templateStore == nil {
+		return guest.Template{}, errors.New("flitnix: template store not initialized")
+	}
+	tpl, err := a.templateStore.Duplicate(id, newName)
+	if err != nil {
+		return guest.Template{}, err
+	}
+	return *tpl, nil
+}
+
+func (a *App) StartGuestRoomFromTemplate(templateID string, destinationOverride string) (GuestRoomView, error) {
+	if a.templateStore == nil {
+		return GuestRoomView{}, errors.New("flitnix: template store not initialized")
+	}
+	tpl, ok := a.templateStore.Get(templateID)
+	if !ok {
+		return GuestRoomView{}, errors.New("flitnix: template not found")
+	}
+	dest := tpl.DestinationRoot
+	if destinationOverride != "" {
+		dest = destinationOverride
+	}
+	return a.StartGuestRoomWithConfig(GuestRoomConfigView{
+		DestinationDir:       dest,
+		DurationMinutes:      tpl.DurationMinutes,
+		Title:                tpl.Title,
+		Description:          tpl.Description,
+		CollisionPolicy:      string(tpl.CollisionPolicy),
+		FormSchema:           tpl.FormSchema,
+		ExpectedParticipants: tpl.ExpectedParticipants,
+	})
+}
+
+// ---- Collection ZIP Export ----
+
+func (a *App) PickExportDestination() (string, error) {
+	room := a.guestMgr.ActiveRoom()
+	defaultName := "flitnix-submissions.zip"
+	if room != nil && room.Title != "" {
+		clean := strings.Map(func(r rune) rune {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+				return r
+			}
+			return '_'
+		}, room.Title)
+		clean = strings.Trim(clean, "_")
+		if clean != "" {
+			defaultName = fmt.Sprintf("%s-submissions.zip", clean)
+		}
+	}
+
+	if a.ctx == nil {
+		return filepath.Join(a.store.Dir(), defaultName), nil
+	}
+
+	target, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:           "Export Collection Archive",
+		DefaultFilename: defaultName,
+		Filters: []runtime.FileFilter{
+			{DisplayName: "ZIP Archives (*.zip)", Pattern: "*.zip"},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	return target, nil
+}
+
+func (a *App) ExportGuestCollection(targetZipPath string) (guest.ExportResult, error) {
+	room := a.guestMgr.ActiveRoom()
+	if room == nil {
+		return guest.ExportResult{}, errors.New("flitnix: no active guest room")
+	}
+	if targetZipPath == "" {
+		return guest.ExportResult{}, errors.New("flitnix: export target path cannot be empty")
+	}
+
+	res, err := guest.ExportRoomToZip(room, targetZipPath)
+	if err != nil {
+		if a.auditStore != nil {
+			a.auditStore.Record(audit.Entry{
+				EventType: audit.EventExportFailed,
+				RoomID:    room.ID,
+				Outcome:   audit.OutcomeFailed,
+				Details:   fmt.Sprintf("error: %s, target: %s", err.Error(), targetZipPath),
+			})
+		}
+		return guest.ExportResult{}, err
+	}
+
+	if a.auditStore != nil {
+		a.auditStore.Record(audit.Entry{
+			EventType: audit.EventExportCompleted,
+			RoomID:    room.ID,
+			Outcome:   audit.OutcomeSuccess,
+			Details:   fmt.Sprintf("target: %s, files: %d, bytes: %d", targetZipPath, res.TotalFiles, res.TotalBytes),
+		})
+	}
+
+	return *res, nil
+}
+
+// ---- Searchable Local Audit History ----
+
+func (a *App) ListAuditEvents(filter audit.Filter) (AuditListResult, error) {
+	if a.auditStore == nil {
+		return AuditListResult{}, nil
+	}
+	entries, total := a.auditStore.Query(filter)
+	return AuditListResult{
+		Entries: entries,
+		Total:   total,
+	}, nil
+}
+
+func (a *App) ClearAuditHistory() error {
+	if a.auditStore == nil {
+		return nil
+	}
+	return a.auditStore.Clear()
+}
+
+// ---- Connection Doctor methods ----
+
+func (a *App) recordPhoneContact(source string) {
+	a.phoneContactMu.Lock()
+	now := time.Now()
+	a.lastPhoneContact = &now
+	a.phoneContactMu.Unlock()
+}
+
+func (a *App) RunConnectionDiagnostics() doctor.DiagnosticReport {
+	a.srvMu.Lock()
+	serverRunning := a.srv != nil
+	var serverAddr string
+	if a.srv != nil && a.srv.Addr() != nil {
+		serverAddr = a.srv.Addr().String()
+	}
+	a.srvMu.Unlock()
+
+	var activeIP string
+	var activeIface string
+	for _, s := range a.ListSessions() {
+		if s.Address != "" {
+			activeIP = s.Address
+		}
+		if s.InterfaceName != "" {
+			activeIface = s.InterfaceName
+		}
+	}
+	if activeIP == "" && serverAddr != "" {
+		host, _, err := net.SplitHostPort(serverAddr)
+		if err == nil {
+			activeIP = host
+		}
+	}
+
+	a.phoneContactMu.Lock()
+	lastContact := a.lastPhoneContact
+	a.phoneContactMu.Unlock()
+
+	return doctor.RunDiagnostics(doctor.Params{
+		NetSource:        a.source,
+		ServerRunning:    serverRunning,
+		ServerAddr:       serverAddr,
+		ActiveIP:         activeIP,
+		ActiveIface:      activeIface,
+		LastPhoneContact: lastContact,
+	})
+}
+
+// ---- Quick Text & Link Transfer methods ----
+
+func (a *App) SendTextMessage(sessionKey, content string) (TextMessageView, error) {
+	if sessionKey == "" {
+		sessions := a.sessions.ActiveSessions()
+		if len(sessions) == 0 {
+			return TextMessageView{}, errors.New("flitnix: no active pairing session; start one first")
+		}
+		sessionKey = sessions[0].Key()
+	} else {
+		found := false
+		for _, s := range a.sessions.ActiveSessions() {
+			if s.Key() == sessionKey {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return TextMessageView{}, errors.New("flitnix: no active pairing session matches that identifier")
+		}
+	}
+
+	msg, err := a.textStore.Add(sessionKey, "desktop", content)
+	if err != nil {
+		return TextMessageView{}, err
+	}
+	return TextMessageView{
+		ID:        msg.ID,
+		Sender:    msg.Sender,
+		Content:   msg.Content,
+		IsLink:    msg.IsLink,
+		URL:       msg.URL,
+		CreatedAt: msg.CreatedAt,
+	}, nil
+}
+
+func (a *App) ListTextMessages(sessionKey string) []TextMessageView {
+	if sessionKey == "" {
+		sessions := a.sessions.ActiveSessions()
+		if len(sessions) == 0 {
+			return []TextMessageView{}
+		}
+		sessionKey = sessions[0].Key()
+	} else {
+		found := false
+		for _, s := range a.sessions.ActiveSessions() {
+			if s.Key() == sessionKey {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return []TextMessageView{}
+		}
+	}
+
+	msgs := a.textStore.List(sessionKey)
+	res := make([]TextMessageView, len(msgs))
+	for i, m := range msgs {
+		res[i] = TextMessageView{
+			ID:        m.ID,
+			Sender:    m.Sender,
+			Content:   m.Content,
+			IsLink:    m.IsLink,
+			URL:       m.URL,
+			CreatedAt: m.CreatedAt,
+		}
+	}
+	return res
+}
+
+func (a *App) ClearTextMessages(sessionKey string) error {
+	if sessionKey == "" {
+		sessions := a.sessions.ActiveSessions()
+		if len(sessions) > 0 {
+			sessionKey = sessions[0].Key()
+		}
+	}
+	if sessionKey != "" {
+		a.textStore.Clear(sessionKey)
+	}
+	return nil
+}
+
+// ---- Cryptographically Trusted Devices ----
+
+func (a *App) ListTrustedDevices() []devices.Device {
+	if a.devicesStore == nil {
+		return nil
+	}
+	return a.devicesStore.List()
+}
+
+func (a *App) RemoveTrustedDevice(id string) error {
+	if a.devicesStore == nil {
+		return nil
+	}
+	return a.devicesStore.Remove(id)
+}
+
+func (a *App) SetDeviceAutoApprove(id string, autoApprove bool) error {
+	if a.devicesStore == nil {
+		return nil
+	}
+	return a.devicesStore.SetAutoApprove(id, autoApprove)
+}
+
+func (a *App) ApprovePairing(requestID string) error {
+	if a.pairing == nil {
+		return errors.New("pairing coordinator unavailable")
+	}
+	return a.pairing.ApprovePairing(requestID)
+}
+
+func (a *App) DenyPairing(requestID string) error {
+	if a.pairing == nil {
+		return errors.New("pairing coordinator unavailable")
+	}
+	return a.pairing.DenyPairing(requestID)
+}
+
+func (a *App) ReArmPairing() {
+	if a.pairing != nil {
+		a.pairing.ReArmPairing()
+	}
+}
+
+func (a *App) GetPairingStatus() devices.PairingStatusView {
+	if a.pairing == nil {
+		return devices.PairingStatusView{}
+	}
+	return a.pairing.GetPairingStatus()
 }

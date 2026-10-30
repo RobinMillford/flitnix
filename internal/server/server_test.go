@@ -293,6 +293,29 @@ func TestServeBindsSpecificLoopbackIPv4(t *testing.T) {
 	checkBound(t, startBound(t, listen), listen)
 }
 
+// TestServeBindsSpecificLoopbackIPv6 tests that the server binds an explicit
+// IPv6 loopback address [::1], verifies URL() formatting with brackets, and
+// confirms that HTTP GET /healthz succeeds over IPv6.
+// If the test environment lacks IPv6 support, it skips with an explicit reason.
+func TestServeBindsSpecificLoopbackIPv6(t *testing.T) {
+	testLn, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Skipf("skipping IPv6 test: host environment does not support IPv6 socket binding: %v", err)
+	}
+	_ = testLn.Close()
+
+	listen := net.JoinHostPort("::1", "43821")
+	if blk, err := net.Listen("tcp", listen); err != nil {
+		listen = "[::1]:0"
+	} else {
+		_ = blk.Close()
+	}
+
+	s := startBound(t, listen)
+	actualAddr := s.Addr().String()
+	checkBound(t, s, actualAddr)
+}
+
 // TestServePortInUseOnSpecificAddress makes sure the occupied-port error
 // also surfaces when binding an explicit interface address rather than
 // the loopback default.
