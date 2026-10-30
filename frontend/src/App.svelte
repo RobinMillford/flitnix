@@ -24,12 +24,16 @@
     ListAuditEvents, ClearAuditHistory,
     RunConnectionDiagnostics, SendTextMessage, ListTextMessages, ClearTextMessages,
     ListTrustedDevices, RemoveTrustedDevice, SetDeviceAutoApprove,
+    ApprovePairing, DenyPairing, GetPairingStatus, ReArmPairing,
     GetSettings, SaveSettings, ResetSettings, SelectDownloadDirectory, OpenDownloadFolder
   } from '../wailsjs/go/main/App.js'
 
   let activeTab: 'personal' | 'guest' | 'templates' | 'audit' | 'devices' | 'settings' = 'personal'
   let trustedDevices: devices.Device[] = []
   let loadingDevices = false
+  let pairingStatus: devices.PairingStatusView | null = null
+  let pairingActionLoading = false
+  let rearmingLoading = false
 
   // Persistent Settings state
   let settingsState: main.SettingsView = {
@@ -188,14 +192,15 @@
     () => Promise.all([
       ListSessions(), ListPendingUploads(), RecentUploads(), RecentDownloads(),
       ListSharedFiles(), ListSharedSources(), ReceiveDirectory(), ServerAddress(),
-      ListPendingBatches(), ListBatches(), GetGuestRoomState()
+      ListPendingBatches(), ListBatches(), GetGuestRoomState(), GetPairingStatus()
     ]),
-    ([s, p, u, d, f, sourceList, dir, addr, b, allBatches, grState]) => {
+    ([s, p, u, d, f, sourceList, dir, addr, b, allBatches, grState, pStatus]) => {
       sessions = s ?? []; pending = p ?? []; uploads = u ?? []; downloads = d ?? []
       files = f ?? []; sources = sourceList ?? []; pendingBatches = b ?? []
       batches = allBatches ?? []
       receiveDir = dir; serverAddress = addr ?? ''
       guestRoomState = grState ?? null
+      pairingStatus = pStatus ?? null
       if (!guestDestDir && dir) guestDestDir = dir
 
       const currentPendingTotal = (pending?.length ?? 0) + (pendingBatches?.length ?? 0) + (guestRoomState?.pendingUploads?.length ?? 0)
@@ -601,12 +606,58 @@
   async function loadTrustedDevices(): Promise<void> {
     loadingDevices = true
     try {
-      const res = await ListTrustedDevices()
+      const [res, pStatus] = await Promise.all([
+        ListTrustedDevices(),
+        GetPairingStatus()
+      ])
       trustedDevices = res ?? []
+      pairingStatus = pStatus ?? null
     } catch (err) {
       report(err)
     } finally {
       loadingDevices = false
+    }
+  }
+
+  async function handleApprovePairing(reqId: string): Promise<void> {
+    if (!reqId || pairingActionLoading) return
+    pairingActionLoading = true
+    try {
+      await ApprovePairing(reqId)
+      pairingStatus = await GetPairingStatus()
+      if (activeTab === 'devices') {
+        await loadTrustedDevices()
+      }
+    } catch (err) {
+      report(err)
+    } finally {
+      pairingActionLoading = false
+    }
+  }
+
+  async function handleDenyPairing(reqId: string): Promise<void> {
+    if (!reqId || pairingActionLoading) return
+    pairingActionLoading = true
+    try {
+      await DenyPairing(reqId)
+      pairingStatus = await GetPairingStatus()
+    } catch (err) {
+      report(err)
+    } finally {
+      pairingActionLoading = false
+    }
+  }
+
+  async function handleReArmPairing(): Promise<void> {
+    if (rearmingLoading) return
+    rearmingLoading = true
+    try {
+      await ReArmPairing()
+      pairingStatus = await GetPairingStatus()
+    } catch (err) {
+      report(err)
+    } finally {
+      rearmingLoading = false
     }
   }
 
@@ -616,6 +667,59 @@
       await loadTrustedDevices()
     } catch (err) {
       report(err)
+    }
+  }
+
+  let deviceToRevoke: devices.Device | null = null
+  let revokingDevice = false
+  let personalCopiedLink = false
+
+  function askRevokeDevice(dev: devices.Device): void {
+    deviceToRevoke = dev
+  }
+
+  async function confirmRevokeDevice(): Promise<void> {
+    if (!deviceToRevoke) return
+    revokingDevice = true
+    try {
+      await RemoveTrustedDevice(deviceToRevoke.id)
+      await loadTrustedDevices()
+      deviceToRevoke = null
+    } catch (err) {
+      report(err)
+    } finally {
+      revokingDevice = false
+    }
+  }
+
+  function copyPersonalLink(): void {
+    const url = `http://${hostPort()}`
+    copyTextToClipboard(url)
+    personalCopiedLink = true
+    setTimeout(() => { personalCopiedLink = false }, 2500)
+  }
+
+  function pageTitle(tab: string): string {
+    switch (tab) {
+      case 'personal': return tFn('nav.personal')
+      case 'guest': return tFn('nav.guest')
+      case 'templates': return tFn('nav.templates')
+      case 'audit': return tFn('nav.audit')
+      case 'devices': return tFn('nav.devices')
+      case 'settings': return tFn('nav.settings')
+      default: return tFn('app.title')
+    }
+  }
+
+  function pageDescription(tab: string): string {
+    switch (tab) {
+      case 'personal': return tFn('header.personalDesc')
+      case 'guest': return tFn('header.guestDesc')
+      case 'templates': return tFn('header.templatesDesc')
+      case 'audit': return tFn('header.auditDesc')
+      case 'devices': return tFn('header.devicesDesc')
+      case 'settings': return tFn('header.settingsDesc')
+      default: return tFn('app.tagline')
     }
   }
 
@@ -837,25 +941,22 @@
   })
 </script>
 
-<main class="shell">
-  <header class="topbar">
-    <div>
-      <div class="brand"><img class="brand-logo" src={logoUrl} alt="Flitnix"/><h1>{$t('app.title')}</h1></div>
-      <p>{$t('app.tagline')}</p>
-    </div>
-    <div class="topbar-actions" style="display: flex; align-items: center; gap: 12px;">
-      <div class:online={sessions.length > 0} class="status">
-        <span class="status-dot"></span>{sessions.length > 0 ? $t('app.sessionActive') : $t('app.sessionInactive')}
+<div class="app-shell">
+  <!-- SIDEBAR -->
+  <aside class="app-sidebar" aria-label={$t('nav.tabsLabel')}>
+    <div class="sidebar-brand">
+      <img class="brand-logo-img" src={logoUrl} alt="Flitnix" />
+      <div class="brand-info">
+        <h1>{$t('app.title')}</h1>
+        <span>{$t('sidebar.sectionMain')}</span>
       </div>
     </div>
-    <div class="sr-only" role="status" aria-live="polite" aria-atomic="true">
-      {liveAnnouncement}
-    </div>
-  </header>
 
-  <!-- Navigation bar with Tabs and Connection Doctor launcher -->
-  <nav class="nav-bar" aria-label={$t('nav.tabsLabel')}>
-    <div class="tab-list" role="tablist" aria-label={$t('nav.tabsLabel')} aria-orientation="horizontal" tabindex="-1" on:keydown={handleTabKeydown}>
+    <!-- Navigation Tab List -->
+    <nav class="sidebar-nav-container" aria-label={$t('nav.tabsLabel')}>
+      <div class="sidebar-nav" role="tablist" aria-label={$t('nav.tabsLabel')} aria-orientation="vertical" tabindex="-1" on:keydown={handleTabKeydown}>
+        <div class="sidebar-section-title">{$t('sidebar.sectionMain')}</div>
+
       <button
         type="button"
         id="tab-personal"
@@ -863,11 +964,19 @@
         aria-selected={activeTab === 'personal'}
         aria-controls="panel-personal"
         tabindex={activeTab === 'personal' ? 0 : -1}
-        class="tab-btn"
+        class="nav-tab-btn"
         class:active={activeTab === 'personal'}
         on:click={() => switchTab('personal')}
       >
-        <span>{$t('nav.personal')}</span>
+        <span class="nav-tab-icon" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="17 1 21 5 17 9"></polyline>
+            <path d="M3 11V9a4 4 0 0 1 4-4h14"></path>
+            <polyline points="7 23 3 19 7 15"></polyline>
+            <path d="M21 13v2a4 4 0 0 1-4 4H3"></path>
+          </svg>
+        </span>
+        <span class="nav-tab-label">{$t('nav.personal')}</span>
         {#if pending.length + pendingBatches.length > 0}
           <span class="tab-badge">{pending.length + pendingBatches.length}</span>
         {/if}
@@ -880,11 +989,18 @@
         aria-selected={activeTab === 'guest'}
         aria-controls="panel-guest"
         tabindex={activeTab === 'guest' ? 0 : -1}
-        class="tab-btn"
+        class="nav-tab-btn"
         class:active={activeTab === 'guest'}
         on:click={() => switchTab('guest')}
       >
-        <span>{$t('nav.guest')}</span>
+        <span class="nav-tab-icon" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="7 10 12 15 17 10"></polyline>
+            <line x1="12" y1="15" x2="12" y2="3"></line>
+          </svg>
+        </span>
+        <span class="nav-tab-label">{$t('nav.guest')}</span>
         {#if guestPendingCount > 0}
           <span class="tab-badge">{guestPendingCount}</span>
         {/if}
@@ -897,12 +1013,21 @@
         aria-selected={activeTab === 'templates'}
         aria-controls="panel-templates"
         tabindex={activeTab === 'templates' ? 0 : -1}
-        class="tab-btn"
+        class="nav-tab-btn"
         class:active={activeTab === 'templates'}
         on:click={() => switchTab('templates')}
       >
-        <span>{$t('nav.templates')}</span>
+        <span class="nav-tab-icon" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+            <line x1="3" y1="9" x2="21" y2="9"></line>
+            <line x1="9" y1="21" x2="9" y2="9"></line>
+          </svg>
+        </span>
+        <span class="nav-tab-label">{$t('nav.templates')}</span>
       </button>
+
+      <div class="sidebar-section-title">{$t('sidebar.sectionSecurity')}</div>
 
       <button
         type="button"
@@ -911,11 +1036,16 @@
         aria-selected={activeTab === 'audit'}
         aria-controls="panel-audit"
         tabindex={activeTab === 'audit' ? 0 : -1}
-        class="tab-btn"
+        class="nav-tab-btn"
         class:active={activeTab === 'audit'}
         on:click={() => switchTab('audit')}
       >
-        <span>{$t('nav.audit')}</span>
+        <span class="nav-tab-icon" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+          </svg>
+        </span>
+        <span class="nav-tab-label">{$t('nav.audit')}</span>
       </button>
 
       <button
@@ -925,15 +1055,24 @@
         aria-selected={activeTab === 'devices'}
         aria-controls="panel-devices"
         tabindex={activeTab === 'devices' ? 0 : -1}
-        class="tab-btn"
+        class="nav-tab-btn"
         class:active={activeTab === 'devices'}
         on:click={() => switchTab('devices')}
       >
-        <span>{$t('nav.devices')}</span>
-        {#if trustedDevices.length > 0}
-          <span class="tab-badge">{trustedDevices.length}</span>
+        <span class="nav-tab-icon" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+            <line x1="8" y1="21" x2="16" y2="21"></line>
+            <line x1="12" y1="17" x2="12" y2="21"></line>
+          </svg>
+        </span>
+        <span class="nav-tab-label">{$t('nav.devices')}</span>
+        {#if pairingStatus?.requiresApproval}
+          <span class="tab-badge" style="background: var(--warning); color: #000;">1</span>
         {/if}
       </button>
+
+      <div class="sidebar-section-title">{$t('sidebar.sectionSystem')}</div>
 
       <button
         type="button"
@@ -942,26 +1081,78 @@
         aria-selected={activeTab === 'settings'}
         aria-controls="panel-settings"
         tabindex={activeTab === 'settings' ? 0 : -1}
-        class="tab-btn"
+        class="nav-tab-btn"
         class:active={activeTab === 'settings'}
         on:click={() => switchTab('settings')}
       >
-        <span>{$t('nav.settings')}</span>
+        <span class="nav-tab-icon" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+          </svg>
+        </span>
+        <span class="nav-tab-label">{$t('nav.settings')}</span>
       </button>
+      </div>
+    </nav>
+
+    <!-- SIDEBAR FOOTER -->
+    <div class="sidebar-footer">
+      <button
+        type="button"
+        class="doctor-nav-btn"
+        on:click={openDoctor}
+        aria-label={$t('nav.doctorLabel', { status: doctorReport?.overallStatus || 'ready' })}
+      >
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span class="status-indicator-dot" class:warn={doctorReport?.overallStatus === 'WARNING'} class:fail={doctorReport?.overallStatus === 'FAIL'}></span>
+          <span>{$t('nav.doctor')}</span>
+        </div>
+        <span class="status-tag {doctorReport?.overallStatus?.toLowerCase() || 'ready'}">
+          {doctorReport?.overallStatus || 'Ready'}
+        </span>
+      </button>
+      <div class="sidebar-app-version">
+        Flitnix {$t('sidebar.version')}
+      </div>
     </div>
+  </aside>
 
-    <button
-      type="button"
-      class="doctor-launch-btn"
-      on:click={openDoctor}
-      aria-label={$t('nav.doctorLabel', { status: doctorReport?.overallStatus || 'ready' })}
-    >
-      <span class="doctor-dot" class:warn={doctorReport?.overallStatus === 'WARNING'} class:fail={doctorReport?.overallStatus === 'FAIL'}></span>
-      <span>{$t('nav.doctor')}</span>
-    </button>
-  </nav>
+  <!-- MAIN VIEWPORT -->
+  <div class="main-viewport">
+    <header class="main-header">
+      <div class="header-title-area">
+        <h2>{pageTitle(activeTab)}</h2>
+        <p>{pageDescription(activeTab)}</p>
+      </div>
 
-  {#if errorText}<div class="alert" role="alert"><span>{errorText}</span><button on:click={() => errorText = ''} aria-label={$t('app.dismiss')}>×</button></div>{/if}
+      <div class="header-actions">
+        {#if currentNetwork}
+          <div class="network-header-pill" title="{currentNetwork.friendlyName || currentNetwork.name} ({currentNetwork.ip})">
+            <span class="pulse-dot"></span>
+            <span>{currentNetwork.friendlyName || currentNetwork.type || 'Connected'}</span>
+          </div>
+        {/if}
+
+        <div class="status-pill" class:online={sessions.length > 0}>
+          <span class="pulse-dot"></span>
+          <span>{sessions.length > 0 ? $t('app.sessionActive') : $t('app.sessionInactive')}</span>
+        </div>
+      </div>
+
+      <div class="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {liveAnnouncement}
+      </div>
+    </header>
+
+    <div class="main-content-scroll">
+      <div class="main-content-inner">
+        {#if errorText}
+          <div class="alert danger" role="alert">
+            <span>{errorText}</span>
+            <button type="button" class="alert-dismiss" on:click={() => errorText = ''} aria-label={$t('app.dismiss')}>×</button>
+          </div>
+        {/if}
 
   <!-- Connection Doctor Modal -->
   {#if doctorOpen}
@@ -1028,6 +1219,139 @@
     </div>
   {/if}
 
+  <!-- Incoming Pairing Modal -->
+  {#if pairingStatus?.requiresApproval && pairingStatus?.requestId}
+    <div
+      class="modal-overlay"
+      role="presentation"
+      on:click|self={() => pairingStatus?.requestId && handleDenyPairing(pairingStatus.requestId)}
+    >
+      <div
+        class="pairing-dialog"
+        role="dialog"
+        aria-labelledby="pairing-title"
+        aria-modal="true"
+        use:focusTrap={{ onEscape: () => pairingStatus?.requestId && handleDenyPairing(pairingStatus.requestId) }}
+      >
+        <div class="pairing-header">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <span class="doctor-dot" style="background: var(--primary);"></span>
+            <h2 id="pairing-title">{$t('devices.pairingModalTitle')}</h2>
+          </div>
+          <button
+            type="button"
+            class="button ghost small"
+            on:click={() => pairingStatus?.requestId && handleDenyPairing(pairingStatus.requestId)}
+            disabled={pairingActionLoading}
+            aria-label={$t('app.close')}
+          >✕</button>
+        </div>
+
+        <div class="pairing-body">
+          <p class="muted" style="margin: 0;">
+            {$t('devices.pairingModalDesc')}
+          </p>
+
+          <div class="pairing-sas-card">
+            <span class="pairing-sas-label">{$t('devices.pairingSasLabel')}</span>
+            <span class="pairing-sas-value">{pairingStatus.sas || '------'}</span>
+            <span style="font-size: 12px; color: var(--text-tertiary); margin-top: 6px;">
+              {$t('devices.pairingSasHelp')}
+            </span>
+          </div>
+
+          <table class="pairing-details-table">
+            <tbody>
+              <tr>
+                <td>{$t('devices.deviceName')}:</td>
+                <td><strong>{pairingStatus.deviceName || 'Unknown Device'}</strong></td>
+              </tr>
+              <tr>
+                <td>{$t('devices.fingerprint')}:</td>
+                <td><code>{pairingStatus.clientId ? pairingStatus.clientId.slice(0, 16) + '…' : '—'}</code></td>
+              </tr>
+              {#if pairingStatus.remainingSeconds !== undefined}
+                <tr>
+                  <td>Expires in:</td>
+                  <td><span class="badge warning">{$t('devices.pairingExpiresIn', { seconds: pairingStatus.remainingSeconds })}</span></td>
+                </tr>
+              {/if}
+            </tbody>
+          </table>
+
+          <div class="pairing-notice">
+            {$t('devices.autoApproveNotice')}
+          </div>
+        </div>
+
+        <div class="pairing-footer">
+          <button
+            type="button"
+            class="button ghost"
+            on:click={() => pairingStatus?.requestId && handleDenyPairing(pairingStatus.requestId)}
+            disabled={pairingActionLoading}
+          >
+            {$t('devices.deny')}
+          </button>
+          <button
+            type="button"
+            class="button primary"
+            on:click={() => pairingStatus?.requestId && handleApprovePairing(pairingStatus.requestId)}
+            disabled={pairingActionLoading}
+          >
+            {pairingActionLoading ? $t('devices.processing') : $t('devices.allowAndPair')}
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- Device Revocation Confirmation Modal -->
+  {#if deviceToRevoke}
+    <div
+      class="modal-overlay"
+      role="presentation"
+      on:click|self={() => deviceToRevoke = null}
+    >
+      <div
+        class="confirm-dialog"
+        role="dialog"
+        aria-labelledby="revoke-modal-title"
+        aria-modal="true"
+        use:focusTrap={{ onEscape: () => deviceToRevoke = null }}
+      >
+        <div class="confirm-header">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <div class="confirm-icon danger">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+              </svg>
+            </div>
+            <h3 id="revoke-modal-title">{$t('devices.revokeConfirmTitle')}</h3>
+          </div>
+          <button type="button" class="button ghost small" on:click={() => deviceToRevoke = null} aria-label={$t('app.close')}>✕</button>
+        </div>
+        <div class="confirm-body">
+          <p class="muted" style="margin: 0; font-size: 14px;">
+            {$t('devices.revokeConfirmMsg', { name: deviceToRevoke.name })}
+          </p>
+          <div class="confirm-device-preview">
+            <strong>{deviceToRevoke.name}</strong>
+            <code>{deviceToRevoke.id}</code>
+          </div>
+        </div>
+        <div class="confirm-footer">
+          <button type="button" class="button ghost" on:click={() => deviceToRevoke = null} disabled={revokingDevice}>
+            {$t('devices.cancel')}
+          </button>
+          <button type="button" class="button danger" on:click={confirmRevokeDevice} disabled={revokingDevice}>
+            {revokingDevice ? $t('devices.processing') : $t('devices.confirmRevoke')}
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
   <!-- TAB 1: PERSONAL TRANSFER -->
   {#if activeTab === 'personal'}
     <div id="panel-personal" role="tabpanel" aria-labelledby="tab-personal" tabindex="0">
@@ -1089,15 +1413,50 @@
         {#if sessions.length && qrUrl}
           <div class="pairing">
             <img class="qr" src={qrUrl} alt="Pairing QR code" />
-            <div><strong>{$t('connection.scanToConnect')}</strong><p class="muted">http://{hostPort()}</p><p class="muted">{$t('connection.incomingApprovalNotice')}</p>
-              <div class="button-row"><button class="button ghost" on:click={() => fetchQR(qrKey)}>{$t('connection.regenerate')}</button><button class="button danger" on:click={() => endSession(qrKey)} disabled={isBusy(`end:${qrKey}`)}>{$t('connection.stopSession')}</button></div>
+            <div style="flex: 1; min-width: 0;">
+              <strong>{$t('connection.scanToConnect')}</strong>
+              <p class="muted" style="margin: 4px 0 8px;">{$t('connection.incomingApprovalNotice')}</p>
+              <div class="pairing-url-box">
+                <span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                  http://{hostPort()}
+                </span>
+                <button
+                  type="button"
+                  class="button ghost small"
+                  style="padding: 3px 8px; font-size: 11px;"
+                  on:click={copyPersonalLink}
+                >
+                  {personalCopiedLink ? '✓ Copied' : 'Copy'}
+                </button>
+              </div>
+              <div class="button-row">
+                <button class="button ghost small" on:click={() => fetchQR(qrKey)}>{$t('connection.regenerate')}</button>
+                <button class="button danger small" on:click={() => endSession(qrKey)} disabled={isBusy(`end:${qrKey}`)}>{$t('connection.stopSession')}</button>
+              </div>
             </div>
           </div>
-        {:else if sessions.length}<p class="muted">{qrError || $t('connection.preparingQR')}</p>{/if}
+        {:else if sessions.length}
+          <div class="empty">{qrError || $t('connection.preparingQR')}</div>
+        {:else}
+          <div class="empty-state">
+            <div class="empty-state-icon">📡</div>
+            <div class="empty-state-title">{$t('connection.readyToPair')}</div>
+            <div class="empty-state-desc">{$t('connection.chooseInterfacePrompt')}</div>
+            <div style="margin-top: 14px;">
+              <button
+                class="button primary large"
+                on:click={startSession}
+                disabled={starting || (interfaces.length > 1 && !selectedIp)}
+              >
+                {starting ? $t('connection.starting') : $t('connection.startSession')}
+              </button>
+            </div>
+          </div>
+        {/if}
       </div>
-      {#if !sessions.length}<div class="empty compact">{$t('connection.chooseInterfacePrompt')}</div>{/if}
-      <div class="button-row"><button class="button primary" on:click={startSession} disabled={starting || (interfaces.length > 1 && !selectedIp)}>{starting ? $t('connection.starting') : $t('connection.startSession')}</button></div>
-      <div class="notice">{$t('connection.plainHttpNotice')}</div>
+      {#if sessions.length}
+        <div class="notice">{$t('connection.plainHttpNotice')}</div>
+      {/if}
     </section>
 
     <div class="workflow-grid">
@@ -1861,6 +2220,25 @@
         {$t('devices.desc')}
       </p>
 
+      {#if pairingStatus?.locked}
+        <div class="alert danger" style="margin: 16px 0; display: flex; align-items: center; justify-content: space-between; gap: 16px;" role="alert">
+          <div>
+            <strong>{$t('devices.lockoutTitle')}</strong>
+            <p style="margin: 4px 0 0 0; font-size: 13px;">
+              {$t('devices.lockoutDesc')} {pairingStatus.lockoutDuration ? `(${pairingStatus.lockoutDuration})` : ''}
+            </p>
+          </div>
+          <button
+            type="button"
+            class="button danger small"
+            on:click={handleReArmPairing}
+            disabled={rearmingLoading}
+          >
+            {rearmingLoading ? $t('devices.rearming') : $t('devices.rearmAction')}
+          </button>
+        </div>
+      {/if}
+
       {#if loadingDevices}
         <div class="empty">{$t('devices.refreshing')}</div>
       {:else if trustedDevices.length > 0}
@@ -1896,9 +2274,8 @@
                   <td style="text-align: right;">
                     <button
                       type="button"
-                      class="button ghost small"
-                      style="color: var(--danger-color, #e06c75);"
-                      on:click={() => removeDeviceAction(dev.id)}
+                      class="button danger small"
+                      on:click={() => askRevokeDevice(dev)}
                     >
                       {$t('devices.revoke')}
                     </button>
@@ -1915,7 +2292,7 @@
 
   <!-- TAB 6: SETTINGS -->
   {:else if activeTab === 'settings'}
-    <div class="panel" id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" tabindex="0">
+    <div id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" tabindex="0">
       <div class="section-heading">
         <div>
           <span class="eyebrow accent">{$t('settings.eyebrow')}</span>
@@ -1924,33 +2301,33 @@
       </div>
 
       {#if settingsSavedAlert}
-        <div class="alert" style="background: rgba(45, 212, 191, 0.15); border: 1px solid var(--success); color: var(--success); margin-bottom: 16px;" role="status">
+        <div class="alert success" role="status">
           <span>{settingsSavedAlert}</span>
         </div>
       {/if}
 
       {#if settingsError}
-        <div class="alert" style="background: var(--danger-bg); border: 1px solid var(--danger-border); color: var(--danger-text); margin-bottom: 16px;" role="alert">
+        <div class="alert danger" role="alert">
           <span>{settingsError}</span>
-          <button type="button" on:click={() => settingsError = ''} aria-label={$t('app.dismiss')}>×</button>
+          <button type="button" class="alert-dismiss" on:click={() => settingsError = ''} aria-label={$t('app.dismiss')}>×</button>
         </div>
       {/if}
 
-      <div style="display: flex; flex-direction: column; gap: 24px;">
-        <!-- Download Directory -->
-        <div>
-          <label for="download-dir-input" class="connection-label">{$t('settings.receiveDir')}</label>
-          <p style="margin: 0 0 10px; font-size: 13px; color: var(--text-secondary);">
-            {$t('settings.receiveDirDesc')}
-          </p>
-          <div class="form-input-row" style="margin-bottom: 8px;">
+      <div style="display: flex; flex-direction: column; gap: 18px;">
+        <!-- Download Directory Card -->
+        <div class="settings-card">
+          <div class="settings-card-header">
+            <h4>{$t('settings.receiveDir')}</h4>
+            <p>{$t('settings.receiveDirDesc')}</p>
+          </div>
+          <div class="form-input-row" style="margin-bottom: 10px;">
             <input
               id="download-dir-input"
               type="text"
               class="text-input"
               bind:value={settingsState.downloadDir}
               placeholder={settingsState.effectiveDir || 'Default: ~/Downloads/Flitnix'}
-              style="font-family: monospace; font-size: 13px;"
+              style="font-family: ui-monospace, SFMono-Regular, monospace; font-size: 13px;"
             />
             <button type="button" class="button" on:click={handleSelectDownloadDir}>
               {$t('settings.browse')}
@@ -1959,8 +2336,8 @@
               {$t('settings.openFolder')}
             </button>
           </div>
-          <div style="display: flex; gap: 12px; align-items: center;">
-            <span style="font-size: 12px; color: var(--text-tertiary);">
+          <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+            <span style="font-size: 12.5px; color: var(--text-tertiary);">
               {$t('settings.currentPath', { path: settingsState.effectiveDir || receiveDir })}
             </span>
             {#if settingsState.downloadDir}
@@ -1976,34 +2353,67 @@
           </div>
         </div>
 
-        <!-- Appearance / Theme -->
-        <div style="border-top: 1px solid var(--line); padding-top: 20px;">
-          <label for="theme-select" class="connection-label">{$t('settings.appearance')}</label>
-          <p style="margin: 0 0 10px; font-size: 13px; color: var(--text-secondary);">
-            {$t('settings.appearanceDesc')}
-          </p>
-          <div style="max-width: 280px;">
-            <select id="theme-select" class="text-input" bind:value={settingsState.theme} style="width: 100%;">
-              <option value="system">{$t('settings.themeSystem')}</option>
-              <option value="dark">{$t('settings.themeDark')}</option>
-              <option value="light">{$t('settings.themeLight')}</option>
-            </select>
+        <!-- Appearance / Theme Card -->
+        <div class="settings-card">
+          <div class="settings-card-header">
+            <h4>{$t('settings.appearance')}</h4>
+            <p>{$t('settings.appearanceDesc')}</p>
+          </div>
+          <div class="segmented-control" role="radiogroup" aria-label={$t('settings.appearance')}>
+            <button
+              type="button"
+              class="segment-btn"
+              class:active={settingsState.theme === 'system'}
+              role="radio"
+              aria-checked={settingsState.theme === 'system'}
+              on:click={() => { settingsState.theme = 'system'; applyTheme('system'); }}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
+              </svg>
+              <span>{$t('settings.themeSystem')}</span>
+            </button>
+            <button
+              type="button"
+              class="segment-btn"
+              class:active={settingsState.theme === 'light'}
+              role="radio"
+              aria-checked={settingsState.theme === 'light'}
+              on:click={() => { settingsState.theme = 'light'; applyTheme('light'); }}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+              </svg>
+              <span>{$t('settings.themeLight')}</span>
+            </button>
+            <button
+              type="button"
+              class="segment-btn"
+              class:active={settingsState.theme === 'dark'}
+              role="radio"
+              aria-checked={settingsState.theme === 'dark'}
+              on:click={() => { settingsState.theme = 'dark'; applyTheme('dark'); }}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+              </svg>
+              <span>{$t('settings.themeDark')}</span>
+            </button>
           </div>
         </div>
 
-        <!-- Language / Locale -->
-        <div style="border-top: 1px solid var(--line); padding-top: 20px;">
-          <label for="language-select" class="connection-label">{$t('settings.language')}</label>
-          <p style="margin: 0 0 10px; font-size: 13px; color: var(--text-secondary);">
-            {$t('settings.languageDesc')}
-          </p>
-          <div style="max-width: 280px;">
+        <!-- Language / Locale Card -->
+        <div class="settings-card">
+          <div class="settings-card-header">
+            <h4>{$t('settings.language')}</h4>
+            <p>{$t('settings.languageDesc')}</p>
+          </div>
+          <div style="max-width: 320px;">
             <select
               id="language-select"
               class="text-input"
               bind:value={settingsState.locale}
               on:change={() => setLocale(settingsState.locale)}
-              style="width: 100%;"
             >
               <option value="system">{$t('settings.langSystem')}</option>
               <option value="en">{$t('settings.langEn')}</option>
@@ -2011,14 +2421,14 @@
           </div>
         </div>
 
-        <!-- Preferred Network Interface -->
-        <div style="border-top: 1px solid var(--line); padding-top: 20px;">
-          <label for="iface-select" class="connection-label">{$t('settings.preferredInterface')}</label>
-          <p style="margin: 0 0 10px; font-size: 13px; color: var(--text-secondary);">
-            {$t('settings.preferredInterfaceDesc')}
-          </p>
-          <div style="max-width: 380px;">
-            <select id="iface-select" class="text-input" bind:value={settingsState.preferredInterface} style="width: 100%;">
+        <!-- Preferred Network Interface Card -->
+        <div class="settings-card">
+          <div class="settings-card-header">
+            <h4>{$t('settings.preferredInterface')}</h4>
+            <p>{$t('settings.preferredInterfaceDesc')}</p>
+          </div>
+          <div style="max-width: 420px;">
+            <select id="iface-select" class="text-input" bind:value={settingsState.preferredInterface}>
               <option value="">{$t('settings.autoInterface')}</option>
               {#each uniqueInterfaces as iface (iface.name)}
                 <option value={iface.name}>
@@ -2034,29 +2444,29 @@
           </div>
         </div>
 
-        <!-- Session Automation -->
-        <div style="border-top: 1px solid var(--line); padding-top: 20px;">
-          <span class="connection-label">{$t('settings.sessionAutomation')}</span>
-          <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; margin-top: 8px;">
+        <!-- Session Automation Card -->
+        <div class="settings-card">
+          <div class="settings-card-header">
+            <h4>{$t('settings.sessionAutomation')}</h4>
+            <p>{$t('settings.autoStartSessionDesc')}</p>
+          </div>
+          <label style="display: inline-flex; align-items: center; gap: 10px; cursor: pointer; padding: 6px 0;">
             <input
               type="checkbox"
               bind:checked={settingsState.autoStartSession}
-              style="width: 18px; height: 18px; cursor: pointer;"
+              style="width: 18px; height: 18px; accent-color: var(--primary); cursor: pointer;"
             />
             <span style="font-size: 14px; color: var(--text-main); font-weight: 600;">
               {$t('settings.autoStartSession')}
             </span>
           </label>
-          <p style="margin: 6px 0 0 28px; font-size: 13px; color: var(--text-secondary);">
-            {$t('settings.autoStartSessionDesc')}
-          </p>
         </div>
 
-        <!-- Actions -->
-        <div style="border-top: 1px solid var(--line); padding-top: 20px; display: flex; justify-content: space-between; align-items: center;">
+        <!-- Settings Actions Bar -->
+        <div class="card" style="display: flex; justify-content: space-between; align-items: center; padding: 18px 24px;">
           <button
             type="button"
-            class="button"
+            class="button primary"
             disabled={savingSettings}
             on:click={handleSaveSettings}
           >
@@ -2066,7 +2476,6 @@
           <button
             type="button"
             class="button ghost"
-            style="color: var(--text-secondary);"
             on:click={handleResetSettings}
           >
             {$t('settings.resetDefaults')}
@@ -2076,7 +2485,12 @@
     </div>
   {/if}
 
-  {#if receiveDir}
-    <footer>{$t('footer.savedPath', { path: receiveDir })}</footer>
-  {/if}
-</main>
+        {#if receiveDir}
+          <div style="margin-top: 24px; padding: 12px 16px; border-radius: 10px; background: var(--surface-secondary); border: 1px solid var(--border); font-size: 12.5px; color: var(--text-tertiary);">
+            {$t('footer.savedPath', { path: receiveDir })}
+          </div>
+        {/if}
+      </div>
+    </div>
+  </div>
+</div>

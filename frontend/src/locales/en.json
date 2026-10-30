@@ -224,7 +224,38 @@
     "enabled": "✓ Enabled",
     "disabled": "○ Disabled",
     "revoke": "Revoke",
-    "actions": "Actions"
+    "actions": "Actions",
+    "pairingModalTitle": "Incoming Pairing Request",
+    "pairingModalDesc": "A device is requesting to pair with this host. Compare the 6-digit SAS code below with the one shown on the device screen.",
+    "pairingSasLabel": "Verification Code (SAS)",
+    "pairingSasHelp": "Only click 'Allow & Pair' if the 6-digit code matches the device screen exactly.",
+    "pairingExpiresIn": "Request expires in {seconds}s",
+    "allowAndPair": "Allow & Pair",
+    "deny": "Deny",
+    "processing": "Processing…",
+    "lockoutTitle": "Pairing Locked Out",
+    "lockoutDesc": "Too many failed pairing attempts. Automated pairing is temporarily blocked to prevent brute-force attacks.",
+    "rearmAction": "Re-Arm Pairing",
+    "rearming": "Re-Arming…",
+    "autoApproveNotice": "New devices require manual confirmation for transfers until auto-approval is explicitly enabled.",
+    "revokeConfirmTitle": "Revoke Trusted Device?",
+    "revokeConfirmMsg": "Are you sure you want to revoke {name}? This device will be removed from your trusted list and will require manual verification for future connections.",
+    "cancel": "Cancel",
+    "confirmRevoke": "Revoke Device"
+  },
+  "header": {
+    "personalDesc": "Peer-to-peer file transfer over your local network",
+    "guestDesc": "Collect files from any phone browser without app installation",
+    "templatesDesc": "Preconfigured room templates and collection workflows",
+    "auditDesc": "Cryptographic logs and security audit trail",
+    "devicesDesc": "Manage cryptographically authenticated devices and pairing",
+    "settingsDesc": "Application preferences, download path, and theme"
+  },
+  "sidebar": {
+    "sectionMain": "Transfer",
+    "sectionSecurity": "Security & Logs",
+    "sectionSystem": "System",
+    "version": "v1.0.0"
   },
   "settings": {
     "eyebrow": "Preferences",

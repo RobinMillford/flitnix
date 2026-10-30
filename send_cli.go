@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/itsyamin/flitnix/internal/client"
+	"github.com/itsyamin/flitnix/internal/transfer"
 	"github.com/mattn/go-isatty"
 )
 
@@ -192,8 +193,39 @@ func runSendCLIWithStdin(args []string, stdin *os.File, stdout, stderr io.Writer
 		}
 	}
 
-	// 6. Declare batch
-	view, err := cli.DeclareBatch(ctx, localManifest.Manifest)
+	// 6. Pre-compute digests and check for trusted device authentication
+	if err := localManifest.PreComputeDigests(); err != nil {
+		fmt.Fprintf(stderr, "Error calculating file hashes: %v\n", err)
+		return ExitLocalPathError
+	}
+
+	var authHeaders *client.AuthHeaders
+	clientID, _ := client.LoadOrCreateClientIdentity("")
+	if clientID != nil {
+		chalCtx, chalCancel := context.WithTimeout(ctx, 4*time.Second)
+		chal, chalErr := cli.RequestAuthChallenge(chalCtx, clientID.DeviceID)
+		chalCancel()
+		if chalErr == nil && chal != nil {
+			cManifest, cErr := transfer.CanonicalManifestFromBatch(localManifest.Manifest, nil)
+			if cErr == nil {
+				_, manifestHashHex, mErr := transfer.ComputeManifestSHA256(cManifest)
+				if mErr == nil {
+					sig := clientID.SignAuthV2(chal.HostID, chal.Timestamp, chal.TransferNonce, manifestHashHex)
+					authHeaders = &client.AuthHeaders{
+						DeviceID:  clientID.DeviceID,
+						Nonce:     chal.TransferNonce,
+						Timestamp: chal.Timestamp,
+						Signature: sig,
+					}
+					if !*quiet && !*jsonOutput {
+						fmt.Fprintf(stdout, "Authenticated as trusted device (%s)\n", clientID.DeviceID[:8])
+					}
+				}
+			}
+		}
+	}
+
+	view, err := cli.DeclareBatchWithAuth(ctx, localManifest.Manifest, authHeaders)
 	if err != nil {
 		if errors.Is(err, client.ErrUnauthorized) || errors.Is(err, client.ErrSessionExpired) {
 			fmt.Fprintf(stderr, "Error: recipient rejected session token (%v)\n", err)

@@ -21,12 +21,12 @@ import (
 )
 
 type TLSBenchmarkResult struct {
-	Protocol         string  `json:"protocol"`
-	TransferSizeMB   float64 `json:"transfer_size_mb"`
-	DurationMs       int64   `json:"duration_ms"`
-	ThroughputMBs    float64 `json:"throughput_mbs"`
-	AllocMB          float64 `json:"alloc_mb"`
-	HandshakeTimeMs  float64 `json:"handshake_time_ms"`
+	Protocol        string  `json:"protocol"`
+	TransferSizeMB  float64 `json:"transfer_size_mb"`
+	DurationMs      int64   `json:"duration_ms"`
+	ThroughputMBs   float64 `json:"throughput_mbs"`
+	AllocMB         float64 `json:"alloc_mb"`
+	HandshakeTimeMs float64 `json:"handshake_time_ms"`
 }
 
 func main() {

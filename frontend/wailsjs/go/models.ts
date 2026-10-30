@@ -144,6 +144,36 @@ export namespace devices {
 		    return a;
 		}
 	}
+	export class PairingStatusView {
+	    locked: boolean;
+	    lockoutDuration: number;
+	    active: boolean;
+	    requiresApproval: boolean;
+	    requestId?: string;
+	    deviceName?: string;
+	    clientId?: string;
+	    sas?: string;
+	    remainingSeconds: number;
+	    failureCount: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new PairingStatusView(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.locked = source["locked"];
+	        this.lockoutDuration = source["lockoutDuration"];
+	        this.active = source["active"];
+	        this.requiresApproval = source["requiresApproval"];
+	        this.requestId = source["requestId"];
+	        this.deviceName = source["deviceName"];
+	        this.clientId = source["clientId"];
+	        this.sas = source["sas"];
+	        this.remainingSeconds = source["remainingSeconds"];
+	        this.failureCount = source["failureCount"];
+	    }
+	}
 
 }
 

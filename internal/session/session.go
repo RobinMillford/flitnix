@@ -501,6 +501,9 @@ func (s *Session) Token() string { return s.token }
 // propagating the raw token around the system.
 func (s *Session) Key() string { return hex.EncodeToString(s.digest[:]) }
 
+// Digest returns the raw 32-byte SHA-256 digest of the session token.
+func (s *Session) Digest() [32]byte { return s.digest }
+
 // Created returns the creation time.
 func (s *Session) Created() time.Time { return s.created }
 

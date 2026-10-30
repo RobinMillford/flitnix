@@ -137,6 +137,7 @@ func (c *Coordinator) CreateBatch(sessionKey string, manifest BatchManifest) (Ba
 			ID: itemID, BatchID: batchID, Sequence: sequence,
 			RelativePath: item.RelativePath, DisplayName: item.DisplayName,
 			DeclaredSize: item.Size, State: itemState,
+			SHA256: item.SHA256,
 		})
 	}
 	c.batches[batchID] = &coordinatorBatch{batch: batch}

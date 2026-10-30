@@ -1,8 +1,11 @@
 package client
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -258,4 +261,25 @@ func buildFilesManifest(paths []string) (*LocalManifest, error) {
 		LocalItems: localItems,
 		TotalBytes: totalBytes,
 	}, nil
+}
+
+// PreComputeDigests calculates the SHA-256 digest for every file in LocalItems and populates
+// both the LocalItem and the underlying Manifest item's SHA256 fields.
+func (lm *LocalManifest) PreComputeDigests() error {
+	for i := range lm.LocalItems {
+		f, err := os.Open(lm.LocalItems[i].Path)
+		if err != nil {
+			return fmt.Errorf("client: failed to open %s for hashing: %w", lm.LocalItems[i].Path, err)
+		}
+		hasher := sha256.New()
+		if _, err := io.Copy(hasher, f); err != nil {
+			f.Close()
+			return fmt.Errorf("client: failed to hash %s: %w", lm.LocalItems[i].Path, err)
+		}
+		f.Close()
+		digestHex := hex.EncodeToString(hasher.Sum(nil))
+		lm.LocalItems[i].ManifestItem.SHA256 = digestHex
+		lm.Manifest.Items[i].SHA256 = digestHex
+	}
+	return nil
 }

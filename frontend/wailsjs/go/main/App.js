@@ -22,6 +22,10 @@ export function ApproveGuestUpload(arg1) {
   return window['go']['main']['App']['ApproveGuestUpload'](arg1);
 }
 
+export function ApprovePairing(arg1) {
+  return window['go']['main']['App']['ApprovePairing'](arg1);
+}
+
 export function ApproveUpload(arg1) {
   return window['go']['main']['App']['ApproveUpload'](arg1);
 }
@@ -46,6 +50,10 @@ export function DeleteGuestTemplate(arg1) {
   return window['go']['main']['App']['DeleteGuestTemplate'](arg1);
 }
 
+export function DenyPairing(arg1) {
+  return window['go']['main']['App']['DenyPairing'](arg1);
+}
+
 export function DuplicateGuestTemplate(arg1, arg2) {
   return window['go']['main']['App']['DuplicateGuestTemplate'](arg1, arg2);
 }
@@ -68,6 +76,10 @@ export function GetBatch(arg1) {
 
 export function GetGuestRoomState() {
   return window['go']['main']['App']['GetGuestRoomState']();
+}
+
+export function GetPairingStatus() {
+  return window['go']['main']['App']['GetPairingStatus']();
 }
 
 export function GetSettings() {
@@ -144,6 +156,10 @@ export function PickFolderForSharing() {
 
 export function PickGuestDestination() {
   return window['go']['main']['App']['PickGuestDestination']();
+}
+
+export function ReArmPairing() {
+  return window['go']['main']['App']['ReArmPairing']();
 }
 
 export function ReceiveDirectory() {

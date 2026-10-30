@@ -52,6 +52,10 @@ func handleCLI(args []string, stdout, stderr io.Writer) (bool, int, []string) {
 		code := runSendCLI(args[2:], stdout, stderr)
 		return true, code, nil
 
+	case "pair":
+		code := runPairCLI(args[2:], stdout, stderr)
+		return true, code, nil
+
 	case "serve":
 		code := runServeCLI(args[2:], stdout, stderr)
 		return true, code, nil
@@ -76,11 +80,13 @@ func printHelp(out io.Writer) {
 	fmt.Fprintf(out, "Usage:\n")
 	fmt.Fprintf(out, "  flitnix [files or directories to share...]\n")
 	fmt.Fprintf(out, "  flitnix send [flags] <files or directories...>\n")
+	fmt.Fprintf(out, "  flitnix pair [flags] <session-url>\n")
 	fmt.Fprintf(out, "  flitnix doctor [--json]\n")
 	fmt.Fprintf(out, "  flitnix serve [-addr <host:port>] [-dir <receive-dir>]\n")
 	fmt.Fprintf(out, "  flitnix version\n\n")
 	fmt.Fprintf(out, "Commands:\n")
 	fmt.Fprintf(out, "  send      Send files or directories to a recipient Flitnix instance\n")
+	fmt.Fprintf(out, "  pair      Pair client as a cryptographically trusted device with host\n")
 	fmt.Fprintf(out, "  doctor    Run Connection Doctor diagnostics and report network readiness\n")
 	fmt.Fprintf(out, "  serve     Run headless transfer server on loopback or network address\n")
 	fmt.Fprintf(out, "  version   Display version and architecture information\n")

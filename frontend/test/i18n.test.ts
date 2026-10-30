@@ -8,6 +8,11 @@ test('i18n: resolves basic nested keys in canonical English catalog', () => {
   assert.equal(translate('nav.settings'), 'Settings')
   assert.equal(translate('connection.readyToPair'), 'Ready to pair')
   assert.equal(translate('settings.appearance'), 'Appearance & Theme')
+  assert.equal(translate('devices.pairingModalTitle'), 'Incoming Pairing Request')
+  assert.equal(translate('devices.allowAndPair'), 'Allow & Pair')
+  assert.equal(translate('devices.deny'), 'Deny')
+  assert.equal(translate('devices.rearmAction'), 'Re-Arm Pairing')
+  assert.equal(translate('devices.pairingExpiresIn', { seconds: 120 }), 'Request expires in 120s')
 })
 
 test('i18n: interpolates parameters safely without HTML execution', () => {

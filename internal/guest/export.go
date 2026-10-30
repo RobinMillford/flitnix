@@ -17,7 +17,7 @@ import (
 )
 
 var (
-	ErrNoCompletedUploads = errors.New("guest: room has no completed uploads to export")
+	ErrNoCompletedUploads   = errors.New("guest: room has no completed uploads to export")
 	ErrFileChangedMidExport = errors.New("guest: file changed during export")
 )
 

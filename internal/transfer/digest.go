@@ -12,7 +12,7 @@ import (
 )
 
 var (
-	ErrInvalidDigestHeader = errors.New("transfer: invalid Content-Digest header")
+	ErrInvalidDigestHeader   = errors.New("transfer: invalid Content-Digest header")
 	ErrUnsupportedDigestAlgo = errors.New("transfer: unsupported digest algorithm (only sha-256 is supported)")
 )
 
@@ -41,7 +41,8 @@ func FormatContentDigest(sha256Hex string) string {
 // the extracted SHA-256 digest as a lowercase 64-character hex string.
 //
 // It accepts formats conforming to RFC 9530, e.g.:
-//   sha-256=:X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE=:
+//
+//	sha-256=:X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE=:
 //
 // If legacy Digest header format (e.g. "SHA-256=<base64>") is encountered, it
 // is also handled as a fallback.

@@ -38,11 +38,11 @@ const (
 type Outcome string
 
 const (
-	OutcomeSuccess Outcome = "success"
-	OutcomeFailed  Outcome = "failed"
+	OutcomeSuccess  Outcome = "success"
+	OutcomeFailed   Outcome = "failed"
 	OutcomeRejected Outcome = "rejected"
 	OutcomeCanceled Outcome = "canceled"
-	OutcomeInfo    Outcome = "info"
+	OutcomeInfo     Outcome = "info"
 )
 
 // Entry represents one immutable audit log record.
