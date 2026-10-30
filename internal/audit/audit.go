@@ -81,6 +81,7 @@ type Store struct {
 	logChan    chan Entry
 	closed     chan struct{}
 	closeOnce  sync.Once
+	workerDone chan struct{}
 }
 
 func randomID() string {
@@ -116,6 +117,7 @@ func NewStore(filePath string, maxEntries int) (*Store, error) {
 		entries:    make([]Entry, 0, 100),
 		logChan:    make(chan Entry, 256),
 		closed:     make(chan struct{}),
+		workerDone: make(chan struct{}),
 	}
 
 	if filePath != "" {
@@ -157,6 +159,8 @@ func (s *Store) loadExisting() error {
 }
 
 func (s *Store) worker() {
+	defer close(s.workerDone)
+
 	var file *os.File
 	if s.filePath != "" {
 		f, err := os.OpenFile(s.filePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
@@ -178,6 +182,9 @@ func (s *Store) worker() {
 						_, _ = file.Write(append(data, '\n'))
 					}
 				default:
+					if file != nil {
+						_ = file.Sync()
+					}
 					return
 				}
 			}
@@ -191,6 +198,12 @@ func (s *Store) worker() {
 }
 
 func (s *Store) Record(e Entry) {
+	select {
+	case <-s.closed:
+		return
+	default:
+	}
+
 	if e.ID == "" {
 		e.ID = randomID()
 	}
@@ -210,6 +223,8 @@ func (s *Store) Record(e Entry) {
 	s.mu.Unlock()
 
 	select {
+	case <-s.closed:
+		return
 	case s.logChan <- e:
 	default:
 		// Do not block file transfer if audit channel fills up
@@ -282,4 +297,5 @@ func (s *Store) Close() {
 	s.closeOnce.Do(func() {
 		close(s.closed)
 	})
+	<-s.workerDone
 }
