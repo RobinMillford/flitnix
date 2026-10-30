@@ -3,9 +3,12 @@ package server
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -79,7 +82,8 @@ func TestSingleFileDirectDownloadContentDigest(t *testing.T) {
 }
 
 // TestSingleFileGrantDownloadContentDigest tests that single-file downloads
-// via one-use download grants provide Content-Digest and grant JSON sha256.
+// via one-use download grants provide immediate grant creation (empty grant sha256),
+// inline single-pass Content-Digest trailer, and final sha256 via download progress.
 func TestSingleFileGrantDownloadContentDigest(t *testing.T) {
 	env := newTestEnv(t)
 	tok := env.token()
@@ -99,9 +103,9 @@ func TestSingleFileGrantDownloadContentDigest(t *testing.T) {
 	if g.Archive {
 		t.Fatal("expected single file grant, got archive=true")
 	}
-	wantHex := hex.EncodeToString(func() []byte { s := sha256.Sum256(content); return s[:] }())
-	if g.SHA256 != wantHex {
-		t.Fatalf("grant metadata sha256 = %q, want %q", g.SHA256, wantHex)
+	// In single-pass immediate start, grant creation returns immediately without pre-hashing
+	if g.SHA256 != "" {
+		t.Fatalf("expected empty sha256 in grant creation response, got %q", g.SHA256)
 	}
 
 	rec := env.getDownload(g, cookie, nil)
@@ -110,23 +114,40 @@ func TestSingleFileGrantDownloadContentDigest(t *testing.T) {
 	}
 	hdr := rec.Header().Get("Content-Digest")
 	if hdr == "" {
-		t.Fatal("missing Content-Digest header on grant file download")
+		t.Fatal("missing Content-Digest trailer on grant file download")
 	}
 	parsedHex, err := transfer.ParseContentDigest(hdr)
 	if err != nil {
 		t.Fatalf("ParseContentDigest: %v", err)
 	}
+	wantHex := hex.EncodeToString(func() []byte { s := sha256.Sum256(content); return s[:] }())
 	if parsedHex != wantHex {
-		t.Fatalf("parsed header hex = %q, want %q", parsedHex, wantHex)
+		t.Fatalf("parsed trailer hex = %q, want %q", parsedHex, wantHex)
 	}
 	if !bytes.Equal(rec.Body.Bytes(), content) {
 		t.Fatal("response body does not match source content")
 	}
+
+	// Verify progress endpoint reports completed and the final SHA-256 digest
+	progRec := env.do(http.MethodGet, "/api/download-progress/"+g.ProgressID, tok, nil)
+	if progRec.Code != http.StatusOK {
+		t.Fatalf("progress response = %d", progRec.Code)
+	}
+	var prog map[string]any
+	if err := json.Unmarshal(progRec.Body.Bytes(), &prog); err != nil {
+		t.Fatal(err)
+	}
+	if prog["state"] != "completed" {
+		t.Fatalf("progress state = %v, want completed", prog["state"])
+	}
+	if prog["sha256"] != wantHex {
+		t.Fatalf("progress sha256 = %v, want %q", prog["sha256"], wantHex)
+	}
 }
 
 // TestArchiveDownloadContentDigest tests that multi-file and folder ZIP downloads
-// calculate and transmit Content-Digest matching the exact archive bytes,
-// and that the ZIP archive is bit-for-bit identical across passes.
+// calculate and transmit Content-Digest matching the exact archive bytes in a single pass,
+// and that the final digest is published to download progress.
 func TestArchiveDownloadContentDigest(t *testing.T) {
 	env := newTestEnv(t)
 	tok := env.token()
@@ -147,8 +168,9 @@ func TestArchiveDownloadContentDigest(t *testing.T) {
 	if !g.Archive {
 		t.Fatal("expected archive=true for folder source")
 	}
-	if g.SHA256 == "" {
-		t.Fatal("expected non-empty sha256 in grant response for archive")
+	// In single-pass streaming, grant creation is immediate and g.SHA256 is empty
+	if g.SHA256 != "" {
+		t.Fatalf("expected empty sha256 in grant creation response, got %q", g.SHA256)
 	}
 
 	rec := env.getDownload(g, cookie, nil)
@@ -161,7 +183,7 @@ func TestArchiveDownloadContentDigest(t *testing.T) {
 
 	hdr := rec.Header().Get("Content-Digest")
 	if hdr == "" {
-		t.Fatal("missing Content-Digest header on archive download")
+		t.Fatal("missing Content-Digest trailer on archive download")
 	}
 	parsedHex, err := transfer.ParseContentDigest(hdr)
 	if err != nil {
@@ -170,8 +192,21 @@ func TestArchiveDownloadContentDigest(t *testing.T) {
 	if parsedHex != actualHex {
 		t.Fatalf("header digest hex = %s, actual body hex = %s", parsedHex, actualHex)
 	}
-	if g.SHA256 != actualHex {
-		t.Fatalf("grant metadata sha256 = %s, actual body hex = %s", g.SHA256, actualHex)
+
+	// Verify progress endpoint reports completed and the exact body digest
+	progRec := env.do(http.MethodGet, "/api/download-progress/"+g.ProgressID, tok, nil)
+	if progRec.Code != http.StatusOK {
+		t.Fatalf("progress response = %d", progRec.Code)
+	}
+	var prog map[string]any
+	if err := json.Unmarshal(progRec.Body.Bytes(), &prog); err != nil {
+		t.Fatal(err)
+	}
+	if prog["state"] != "completed" {
+		t.Fatalf("progress state = %v, want completed", prog["state"])
+	}
+	if prog["sha256"] != actualHex {
+		t.Fatalf("progress sha256 = %v, want %q", prog["sha256"], actualHex)
 	}
 
 	// Verify the archive content is intact and readable as a standard ZIP
@@ -184,10 +219,10 @@ func TestArchiveDownloadContentDigest(t *testing.T) {
 	}
 }
 
-// TestArchiveSourceMutationBetweenPasses verifies that modifying a file on disk
-// after grant creation causes Pass 2 to detect the checksum mismatch and abort
-// the connection rather than serving a false verified state.
-func TestArchiveSourceMutationBetweenPasses(t *testing.T) {
+// TestArchiveSourceMutationDuringStreaming verifies that modifying a file on disk
+// causes the stream to detect the change, abort, and mark progress as failed
+// without exposing an incomplete or erroneous digest.
+func TestArchiveSourceMutationDuringStreaming(t *testing.T) {
 	env := newTestEnv(t)
 	tok := env.token()
 	dir := t.TempDir()
@@ -202,10 +237,10 @@ func TestArchiveSourceMutationBetweenPasses(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create grant (Pass 1 computes digest over "initial unmodified content")
+	// Create grant (immediate: no Pass 1 hashing)
 	g, cookie := env.grantFor(tok, source.ID)
-	if g.SHA256 == "" {
-		t.Fatal("expected grant SHA256")
+	if g.SHA256 != "" {
+		t.Fatalf("expected empty grant SHA256 in single-pass, got %q", g.SHA256)
 	}
 
 	// Mutate the file on disk before redeeming grant!
@@ -214,7 +249,7 @@ func TestArchiveSourceMutationBetweenPasses(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Redeem grant: Pass 2 streams, detects checksum difference, and aborts
+	// Redeem grant: Single-pass streams, detects size mismatch in writeArchiveFile, and aborts
 	defer func() {
 		// Recovery from abortResponse panic(http.ErrAbortHandler)
 		if r := recover(); r != nil {
@@ -225,17 +260,22 @@ func TestArchiveSourceMutationBetweenPasses(t *testing.T) {
 	}()
 
 	rec := env.getDownload(g, cookie, nil)
-	// If the handler didn't panic, the body should not be a valid archive matching g.SHA256
-	bodyBytes := rec.Body.Bytes()
-	actualSum := sha256.Sum256(bodyBytes)
-	actualHex := hex.EncodeToString(actualSum[:])
-	if actualHex == g.SHA256 {
-		t.Fatal("corrupted source produced identical hash to initial pass! Should have been rejected.")
+	_ = rec
+
+	// Verify progress endpoint reports failed and does not expose a digest
+	progRec := env.do(http.MethodGet, "/api/download-progress/"+g.ProgressID, tok, nil)
+	var prog map[string]any
+	_ = json.Unmarshal(progRec.Body.Bytes(), &prog)
+	if prog["state"] != "failed" {
+		t.Fatalf("progress state = %v, want failed", prog["state"])
+	}
+	if prog["sha256"] != nil && prog["sha256"] != "" {
+		t.Fatalf("failed progress must not expose sha256, got %v", prog["sha256"])
 	}
 }
 
 // TestSingleFileSourceMutationDuringStreaming tests that modifying a single file
-// during streaming cuts the connection and reports failure.
+// during streaming cuts the connection and reports failure without exposing digest.
 func TestSingleFileSourceMutationDuringStreaming(t *testing.T) {
 	env := newTestEnv(t)
 	tok := env.token()
@@ -263,10 +303,90 @@ func TestSingleFileSourceMutationDuringStreaming(t *testing.T) {
 	}()
 
 	rec := env.getDownload(g, cookie, nil)
-	body := rec.Body.Bytes()
-	actualHex := hex.EncodeToString(func() []byte { s := sha256.Sum256(body); return s[:] }())
-	if actualHex == g.SHA256 {
-		t.Fatal("mutated single file should not match original digest")
+	_ = rec
+
+	// Verify progress endpoint reports failed and does not expose a digest
+	progRec := env.do(http.MethodGet, "/api/download-progress/"+g.ProgressID, tok, nil)
+	var prog map[string]any
+	_ = json.Unmarshal(progRec.Body.Bytes(), &prog)
+	if prog["state"] != "failed" {
+		t.Fatalf("progress state = %v, want failed", prog["state"])
+	}
+	if prog["sha256"] != nil && prog["sha256"] != "" {
+		t.Fatalf("failed progress must not expose sha256, got %v", prog["sha256"])
+	}
+}
+
+// TestImmediateGrantCreationLatency verifies that grant creation is instantaneous (< 50ms)
+// even for multi-megabyte files, proving no Pass 1 pre-reading occurs.
+func TestImmediateGrantCreationLatency(t *testing.T) {
+	env := newTestEnv(t)
+	tok := env.token()
+	dir := t.TempDir()
+
+	largePath := filepath.Join(dir, "fast_grant.dat")
+	data := make([]byte, 20*1024*1024) // 20 MB
+	if err := os.WriteFile(largePath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sf, err := env.reg.Add(largePath, "fast_grant.dat", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	g, _ := env.grantFor(tok, sf.ID)
+	elapsed := time.Since(start)
+
+	if g.DownloadURL == "" {
+		t.Fatal("missing downloadUrl in grant response")
+	}
+	if g.SHA256 != "" {
+		t.Fatalf("grant response should have empty sha256 in single-pass mode, got %q", g.SHA256)
+	}
+	if elapsed > 50*time.Millisecond {
+		t.Fatalf("grant creation took %v, want < 50ms", elapsed)
+	}
+}
+
+// TestFailedStreamDoesNotExposeDigest verifies that a canceled or interrupted stream
+// transitions to failed progress and never exposes any partial digest.
+func TestFailedStreamDoesNotExposeDigest(t *testing.T) {
+	env := newTestEnv(t)
+	tok := env.token()
+	dir := t.TempDir()
+
+	filePath := filepath.Join(dir, "interrupted.dat")
+	if err := os.WriteFile(filePath, bytes.Repeat([]byte("X"), 1024*1024), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sf, err := env.reg.Add(filePath, "interrupted.dat", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	g, cookie := env.grantFor(tok, sf.ID)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // canceled immediately before reading body
+
+	req := httptest.NewRequest(http.MethodGet, g.DownloadURL, nil).WithContext(ctx)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+
+	defer func() {
+		_ = recover()
+	}()
+	env.srv.Handler().ServeHTTP(rec, req)
+
+	progRec := env.do(http.MethodGet, "/api/download-progress/"+g.ProgressID, tok, nil)
+	var prog map[string]any
+	_ = json.Unmarshal(progRec.Body.Bytes(), &prog)
+	if prog["state"] == "completed" {
+		t.Fatalf("progress state should not be completed for canceled stream")
+	}
+	if prog["sha256"] != nil && prog["sha256"] != "" {
+		t.Fatalf("canceled stream must not expose sha256 digest, got %v", prog["sha256"])
 	}
 }
 

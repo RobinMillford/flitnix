@@ -456,35 +456,53 @@ func isReadTimeout(err error) bool {
 
 // ---- transfer-stall deadlines ----
 
-// stallBodyReader wraps an upload body with a rolling read deadline: every
-// Read first extends the deadline by the stall window. A sender that keeps
+// stallBodyReader wraps an upload body with a rolling read deadline: it
+// extends the read deadline by the stall window at throttled intervals
+// (on first read, after 256 KiB read, or at least every 250 ms). A sender that keeps
 // pushing bytes is never cut; one that stalls inside the request stream is.
 // Setting the deadline is best effort (see the package timeout policy).
 type stallBodyReader struct {
 	io.ReadCloser
-	rc    *http.ResponseController
-	stall time.Duration // <= 0 disables
+	rc         *http.ResponseController
+	stall      time.Duration // <= 0 disables
+	lastExtend time.Time
+	bytesSince int64
 }
 
 func (b *stallBodyReader) Read(p []byte) (int, error) {
 	if b.stall > 0 {
-		_ = b.rc.SetReadDeadline(time.Now().Add(b.stall))
+		now := time.Now()
+		b.bytesSince += int64(len(p))
+		if b.lastExtend.IsZero() || b.bytesSince >= 256*1024 || now.Sub(b.lastExtend) >= 250*time.Millisecond {
+			_ = b.rc.SetReadDeadline(now.Add(b.stall))
+			b.lastExtend = now
+			b.bytesSince = 0
+		}
 	}
 	return b.ReadCloser.Read(p)
 }
 
-// stallWriter wraps a download response with a rolling write deadline: every
-// Write first extends the deadline by the stall window. A receiver that
-// drains at any speed is never cut; one that stops reading is.
+// stallWriter wraps a download response with a rolling write deadline: it
+// extends the write deadline by the stall window at throttled intervals
+// (on first write, after 256 KiB written, or at least every 250 ms). A receiver
+// that drains at any speed is never cut; one that stops reading is cut after the stall window.
 type stallWriter struct {
-	w     http.ResponseWriter
-	rc    *http.ResponseController
-	stall time.Duration // <= 0 disables
+	w          http.ResponseWriter
+	rc         *http.ResponseController
+	stall      time.Duration // <= 0 disables
+	lastExtend time.Time
+	bytesSince int64
 }
 
 func (d *stallWriter) Write(p []byte) (int, error) {
 	if d.stall > 0 {
-		_ = d.rc.SetWriteDeadline(time.Now().Add(d.stall))
+		now := time.Now()
+		d.bytesSince += int64(len(p))
+		if d.lastExtend.IsZero() || d.bytesSince >= 256*1024 || now.Sub(d.lastExtend) >= 250*time.Millisecond {
+			_ = d.rc.SetWriteDeadline(now.Add(d.stall))
+			d.lastExtend = now
+			d.bytesSince = 0
+		}
 	}
 	return d.w.Write(p)
 }
@@ -1225,8 +1243,8 @@ func serveFilesList(svcs *Services) http.HandlerFunc {
 }
 
 // downloadCopySize bounds each chunk the download loop moves between disk
-// and network. Small and fixed: bounded memory, progress-friendly.
-const downloadCopySize = 64 * 1024
+// and network.
+const downloadCopySize = 256 * 1024
 
 // serveFileDownload serves GET /api/files/{id}/download: streams one file
 // with Content-Length and a Content-Disposition carrying the sanitized
@@ -1247,39 +1265,14 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 			return
 		}
 
-		f, err := openTrustedSource(sf.Path)
+		f, info, err := openTrustedSource(sf.Path)
 		if err != nil {
 			writeError(w, http.StatusNotFound, "shared file no longer available")
 			return
 		}
 		defer f.Close()
 
-		info, err := f.Stat()
-		if err != nil || !info.Mode().IsRegular() {
-			writeError(w, http.StatusNotFound, "shared file no longer available")
-			return
-		}
-
 		size := info.Size()
-
-		// Pass 1: Compute the SHA-256 digest of the actual source file using a bounded-memory streaming read
-		hasher := sha256.New()
-		buf := make([]byte, downloadCopySize)
-		nPass1, err := io.CopyBuffer(hasher, f, buf)
-		if err != nil || nPass1 != size {
-			writeError(w, http.StatusGone, "shared file changed or unreadable")
-			return
-		}
-		if _, err := f.Seek(0, io.SeekStart); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to rewind file stream")
-			return
-		}
-		reopenedInfo, err := f.Stat()
-		if err != nil || reopenedInfo.Size() != size || reopenedInfo.ModTime() != info.ModTime() {
-			writeError(w, http.StatusGone, "shared file changed during preparation")
-			return
-		}
-		expectedSHA256 := hex.EncodeToString(hasher.Sum(nil))
 
 		var downloadID string
 		if svcs.Downloads != nil {
@@ -1296,10 +1289,7 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 		w.Header().Set("Accept-Ranges", "none")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Content-Disposition", contentDisposition(sf.Name))
-		if digestHdr := transfer.FormatContentDigest(expectedSHA256); digestHdr != "" {
-			w.Header().Set("Content-Digest", digestHdr)
-		}
-		w.Header().Set("X-Content-SHA256", expectedSHA256)
+		w.Header().Set("Trailer", "Content-Digest, X-Content-SHA256")
 		w.WriteHeader(http.StatusOK)
 
 		// Pin for the streaming duration, then stream. Writes carry a
@@ -1314,8 +1304,13 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 			stall: stall,
 		}
 
+		bufPtr := transfer.GetCopyBuffer()
+		defer transfer.PutCopyBuffer(bufPtr)
+		buf := *bufPtr
 		streamHasher := sha256.New()
 		var written int64
+		var lastReported int64
+		var lastProgressTime time.Time
 		for written < size {
 			// A direct download is an authenticated transfer, so a session
 			// that was revoked while the body was streaming must stop here
@@ -1338,8 +1333,11 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 				streamHasher.Write(buf[:n])
 				wn, werr := out.Write(buf[:n])
 				written += int64(wn)
-				if svcs.Downloads != nil {
+				now := time.Now()
+				if svcs.Downloads != nil && (written-lastReported >= 256*1024 || now.Sub(lastProgressTime) >= 250*time.Millisecond || written == size) {
 					svcs.Downloads.Progress(downloadID, written)
+					lastReported = written
+					lastProgressTime = now
 				}
 				if werr != nil || wn != n {
 					// Body is committed; the client sees the cut stream.
@@ -1366,16 +1364,13 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 		}
 
 		actualSHA256 := hex.EncodeToString(streamHasher.Sum(nil))
-		if actualSHA256 != expectedSHA256 {
-			_ = forceClose(w, f)
-			if svcs.Downloads != nil {
-				svcs.Downloads.Fail(downloadID, "file checksum changed while it was being sent", written)
-			}
-			return
+		if digestHdr := transfer.FormatContentDigest(actualSHA256); digestHdr != "" {
+			w.Header().Set("Content-Digest", digestHdr)
 		}
+		w.Header().Set("X-Content-SHA256", actualSHA256)
 
 		if svcs.Downloads != nil {
-			svcs.Downloads.FinishWithDigest(downloadID, written, expectedSHA256)
+			svcs.Downloads.FinishWithDigest(downloadID, written, actualSHA256)
 		}
 	}
 }

@@ -93,7 +93,9 @@ func ParseContentDigest(header string) (string, error) {
 // the stream in memory.
 func ComputeReaderSHA256(r io.Reader) (string, int64, error) {
 	hasher := sha256.New()
-	buf := make([]byte, digestCopyBufferSize)
+	bufPtr := GetCopyBuffer()
+	defer PutCopyBuffer(bufPtr)
+	buf := *bufPtr
 	n, err := io.CopyBuffer(hasher, r, buf)
 	if err != nil {
 		return "", n, fmt.Errorf("transfer: error streaming for digest: %w", err)
