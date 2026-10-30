@@ -2,6 +2,7 @@ package devices
 
 import (
 	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -15,12 +16,23 @@ import (
 )
 
 var (
-	ErrDeviceNotFound   = errors.New("devices: device not found")
-	ErrInvalidKey       = errors.New("devices: invalid ed25519 public key")
-	ErrInvalidSignature = errors.New("devices: invalid signature")
-	ErrReplayDetected   = errors.New("devices: authentication challenge replay detected")
-	ErrChallengeExpired = errors.New("devices: authentication challenge timestamp expired or clock skew")
+	ErrDeviceNotFound    = errors.New("devices: device not found")
+	ErrInvalidKey        = errors.New("devices: invalid ed25519 public key")
+	ErrInvalidSignature  = errors.New("devices: invalid signature")
+	ErrReplayDetected    = errors.New("devices: authentication challenge replay detected")
+	ErrChallengeExpired  = errors.New("devices: authentication challenge timestamp expired or clock skew")
+	ErrChallengeNotFound = errors.New("devices: transfer challenge not found")
+	ErrChallengeConsumed = errors.New("devices: transfer challenge already consumed")
 )
+
+// TransferChallenge represents a server-issued challenge nonce for transfer authorization.
+type TransferChallenge struct {
+	HostID   string
+	DeviceID string
+	Nonce    string
+	IssuedAt time.Time
+	Consumed bool
+}
 
 // Device represents a cryptographically paired personal device.
 type Device struct {
@@ -34,11 +46,13 @@ type Device struct {
 
 // Store manages persistent trusted devices.
 type Store struct {
-	mu         sync.RWMutex
-	filePath   string
-	devices    map[string]Device
-	noncesMu   sync.Mutex
-	usedNonces map[string]time.Time
+	mu           sync.RWMutex
+	filePath     string
+	devices      map[string]Device
+	noncesMu     sync.Mutex
+	usedNonces   map[string]time.Time
+	challengesMu sync.Mutex
+	challenges   map[string]*TransferChallenge
 }
 
 // NewStore initializes a persistent Store from the specified JSON file path.
@@ -47,6 +61,7 @@ func NewStore(filePath string) (*Store, error) {
 		filePath:   filePath,
 		devices:    make(map[string]Device),
 		usedNonces: make(map[string]time.Time),
+		challenges: make(map[string]*TransferChallenge),
 	}
 
 	if filePath != "" {
@@ -276,4 +291,104 @@ func GenerateKeyPair() (ed25519.PublicKey, ed25519.PrivateKey, error) {
 func SignMessage(privKey ed25519.PrivateKey, message []byte) string {
 	sig := ed25519.Sign(privKey, message)
 	return hex.EncodeToString(sig)
+}
+
+// BuildSrvChalPayload builds the server challenge string to sign in POST /api/auth/challenge:
+// flitnix-srv-chal:<hostId>:<clientId>:<transferNonce>:<timestampUnix>
+func BuildSrvChalPayload(hostID, clientID, transferNonce string, timestampUnix int64) []byte {
+	return []byte(fmt.Sprintf("flitnix-srv-chal:%s:%s:%s:%d", hostID, clientID, transferNonce, timestampUnix))
+}
+
+// BuildAuthV2Payload builds the manifest authorization payload:
+// flitnix-auth-v2:<hostId>:<deviceId>:<timestampUnix>:<transferNonce>:<manifestSha256Hex>
+func BuildAuthV2Payload(hostID, deviceID string, timestampUnix int64, transferNonce, manifestSha256Hex string) []byte {
+	return []byte(fmt.Sprintf("flitnix-auth-v2:%s:%s:%d:%s:%s", hostID, deviceID, timestampUnix, transferNonce, manifestSha256Hex))
+}
+
+// CreateTransferChallenge generates a 32-byte secure random nonce, records it, and returns the nonce and timestamp.
+func (s *Store) CreateTransferChallenge(hostID, deviceID string) (string, int64, error) {
+	s.challengesMu.Lock()
+	defer s.challengesMu.Unlock()
+
+	now := time.Now().UTC()
+	cutoff := now.Add(-2 * time.Minute)
+	for n, c := range s.challenges {
+		if c.IssuedAt.Before(cutoff) {
+			delete(s.challenges, n)
+		}
+	}
+
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", 0, fmt.Errorf("devices: failed to generate challenge nonce: %w", err)
+	}
+	nonce := hex.EncodeToString(b)
+	ts := now.Unix()
+
+	s.challenges[nonce] = &TransferChallenge{
+		HostID:   hostID,
+		DeviceID: deviceID,
+		Nonce:    nonce,
+		IssuedAt: now,
+		Consumed: false,
+	}
+
+	return nonce, ts, nil
+}
+
+// ValidateAndConsumeTransferChallenge verifies that the challenge nonce was issued by this server instance,
+// matches hostID and deviceID, has not expired (<= maxDrift), and has not been consumed yet.
+// If valid, it atomically marks the challenge as consumed.
+func (s *Store) ValidateAndConsumeTransferChallenge(hostID, deviceID, nonce string, timestampUnix int64, maxDrift time.Duration) error {
+	if nonce == "" {
+		return errors.New("devices: empty challenge nonce")
+	}
+	if maxDrift <= 0 {
+		maxDrift = 60 * time.Second
+	}
+
+	now := time.Now().UTC()
+	claimedTime := time.Unix(timestampUnix, 0).UTC()
+	diff := now.Sub(claimedTime)
+	if diff < 0 {
+		diff = -diff
+	}
+	if diff > maxDrift {
+		return ErrChallengeExpired
+	}
+
+	s.challengesMu.Lock()
+	defer s.challengesMu.Unlock()
+
+	cutoff := now.Add(-2 * maxDrift)
+	for n, c := range s.challenges {
+		if c.IssuedAt.Before(cutoff) {
+			delete(s.challenges, n)
+		}
+	}
+
+	chal, exists := s.challenges[nonce]
+	if !exists {
+		return ErrChallengeNotFound
+	}
+
+	if chal.HostID != hostID || chal.DeviceID != deviceID {
+		return errors.New("devices: challenge binding mismatch")
+	}
+
+	if chal.Consumed {
+		return ErrChallengeConsumed
+	}
+
+	chal.Consumed = true
+	return nil
+}
+
+// DefaultDeviceName returns a readable default device name using the OS hostname.
+func DefaultDeviceName() (string, error) {
+	name, err := os.Hostname()
+	if err != nil || name == "" {
+		return "Flitnix Peer", nil
+	}
+	return name, nil
 }

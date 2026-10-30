@@ -254,6 +254,8 @@ type App struct {
 	auditStore    *audit.Store
 	templateStore *guest.TemplateStore
 	devicesStore  *devices.Store
+	hostIdentity  *devices.HostIdentity
+	pairing       *devices.PairingCoordinator
 	startupMu     sync.Mutex
 	startupDone   bool
 	initialShares []string
@@ -320,6 +322,11 @@ func NewApp() (*App, error) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "flitnix: devices store initialization warning: %v\n", err)
 	}
+	hostIdentity, err := devices.LoadOrCreateHostIdentity(filepath.Join(dataDir, "host_identity.json"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "flitnix: host identity initialization warning: %v\n", err)
+	}
+	pairingCoord := devices.NewPairingCoordinator(hostIdentity, devicesStore)
 
 	a := &App{
 		store:         store,
@@ -333,6 +340,8 @@ func NewApp() (*App, error) {
 		auditStore:    auditStore,
 		templateStore: templateStore,
 		devicesStore:  devicesStore,
+		hostIdentity:  hostIdentity,
+		pairing:       pairingCoord,
 		source:        netenv.DefaultSource(),
 	}
 	a.sessions = session.NewManager(session.Config{OnExpire: a.releaseSession, OnEnd: a.logSessionEnd})
@@ -581,6 +590,9 @@ func (a *App) startServerLocked(listen string) error {
 			GuestManager:   a.guestMgr,
 			TextMessages:   a.textStore,
 			Audit:          a.auditStore,
+			Devices:        a.devicesStore,
+			HostIdentity:   a.hostIdentity,
+			Pairing:        a.pairing,
 			OnPhoneContact: a.recordPhoneContact,
 			Diagnose:       a.logTransferDiagnostics,
 		},
@@ -2279,4 +2291,31 @@ func (a *App) SetDeviceAutoApprove(id string, autoApprove bool) error {
 		return nil
 	}
 	return a.devicesStore.SetAutoApprove(id, autoApprove)
+}
+
+func (a *App) ApprovePairing(requestID string) error {
+	if a.pairing == nil {
+		return errors.New("pairing coordinator unavailable")
+	}
+	return a.pairing.ApprovePairing(requestID)
+}
+
+func (a *App) DenyPairing(requestID string) error {
+	if a.pairing == nil {
+		return errors.New("pairing coordinator unavailable")
+	}
+	return a.pairing.DenyPairing(requestID)
+}
+
+func (a *App) ReArmPairing() {
+	if a.pairing != nil {
+		a.pairing.ReArmPairing()
+	}
+}
+
+func (a *App) GetPairingStatus() devices.PairingStatusView {
+	if a.pairing == nil {
+		return devices.PairingStatusView{}
+	}
+	return a.pairing.GetPairingStatus()
 }

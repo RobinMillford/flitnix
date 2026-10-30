@@ -279,7 +279,7 @@ func TestRunSendCLITokenFromStdin(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	args := []string{
 		"--to", srv.URL(), // Base URL only (no fragment token)
-		"--token", "-",    // Read token from stdin
+		"--token", "-", // Read token from stdin
 		"--yes",
 		tmpFile,
 	}

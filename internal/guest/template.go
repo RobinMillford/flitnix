@@ -14,7 +14,7 @@ import (
 
 var (
 	ErrTemplateNotFound = errors.New("guest: template not found")
-	ErrInvalidTemplate = errors.New("guest: invalid template")
+	ErrInvalidTemplate  = errors.New("guest: invalid template")
 )
 
 type Template struct {

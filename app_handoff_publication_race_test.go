@@ -14,11 +14,11 @@ import (
 
 // TestHandoffCancelBatchConcurrentWithPublishClaim verifies that when a whole-batch
 // cancellation races with publication reservation:
-// 1. If publication has been claimed, the item finishes with a successful commit.
-// 2. Unstarted siblings are canceled.
-// 3. The batch remains transferring until the reserved publication settles.
-// 4. Once settled, the item is completed, byte counts are accurate, the batch ends canceled,
-//    and the file is intact on disk.
+//  1. If publication has been claimed, the item finishes with a successful commit.
+//  2. Unstarted siblings are canceled.
+//  3. The batch remains transferring until the reserved publication settles.
+//  4. Once settled, the item is completed, byte counts are accurate, the batch ends canceled,
+//     and the file is intact on disk.
 func TestHandoffCancelBatchConcurrentWithPublishClaim(t *testing.T) {
 	h := newBatchHarness(t)
 	b := h.createBatch("pub-racing.txt", "unstarted.txt")

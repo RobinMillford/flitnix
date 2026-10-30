@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -108,8 +109,65 @@ func (c *Client) Ping(ctx context.Context) error {
 	return nil
 }
 
+// AuthHeaders holds the headers for authenticating a transfer manifest.
+type AuthHeaders struct {
+	DeviceID  string
+	Nonce     string
+	Timestamp int64
+	Signature string
+}
+
+// TransferChallengeResponse holds the response from POST /api/auth/challenge.
+type TransferChallengeResponse struct {
+	HostID        string `json:"hostId"`
+	DeviceID      string `json:"deviceId"`
+	TransferNonce string `json:"transferNonce"`
+	Timestamp     int64  `json:"timestamp"`
+	HostSignature string `json:"hostSignature"`
+}
+
+// RequestAuthChallenge requests a fresh transfer challenge from POST /api/auth/challenge.
+func (c *Client) RequestAuthChallenge(ctx context.Context, deviceID string) (*TransferChallengeResponse, error) {
+	reqBody, _ := json.Marshal(map[string]string{
+		"deviceId": deviceID,
+	})
+	reqURL := c.target.BaseURL + "/api/auth/challenge"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.target.Token())
+	req.Header.Set("Host", c.target.Host)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("client: auth challenge request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, errors.New("client: device not enrolled on host")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("client: auth challenge returned HTTP %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var res TransferChallengeResponse
+	if err := json.Unmarshal(bodyBytes, &res); err != nil {
+		return nil, fmt.Errorf("client: invalid challenge response JSON: %w", err)
+	}
+	return &res, nil
+}
+
 // DeclareBatch submits a transfer manifest to POST /api/batches.
 func (c *Client) DeclareBatch(ctx context.Context, manifest transfer.BatchManifest) (transfer.BatchView, error) {
+	return c.DeclareBatchWithAuth(ctx, manifest, nil)
+}
+
+// DeclareBatchWithAuth submits a transfer manifest to POST /api/batches with optional trusted-device auth headers.
+func (c *Client) DeclareBatchWithAuth(ctx context.Context, manifest transfer.BatchManifest, auth *AuthHeaders) (transfer.BatchView, error) {
 	bodyBytes, err := json.Marshal(manifest)
 	if err != nil {
 		return transfer.BatchView{}, fmt.Errorf("client: failed to marshal manifest: %w", err)
@@ -123,6 +181,13 @@ func (c *Client) DeclareBatch(ctx context.Context, manifest transfer.BatchManife
 	req.Header.Set("Authorization", "Bearer "+c.target.Token())
 	req.Header.Set("Host", c.target.Host)
 	req.Header.Set("Content-Type", "application/json")
+
+	if auth != nil {
+		req.Header.Set("X-Flitnix-Device-ID", auth.DeviceID)
+		req.Header.Set("X-Flitnix-Nonce", auth.Nonce)
+		req.Header.Set("X-Flitnix-Timestamp", strconv.FormatInt(auth.Timestamp, 10))
+		req.Header.Set("X-Flitnix-Signature", auth.Signature)
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -211,7 +276,7 @@ func (c *Client) WaitForApproval(ctx context.Context, batchID string, pollInterv
 			return transfer.BatchView{}, err
 		}
 
-		if view.ApprovalState == transfer.ApprovalApproved || view.State == transfer.BatchStateApproved {
+		if view.ApprovalState == transfer.ApprovalApproved || view.State == transfer.BatchStateApproved || view.State == transfer.BatchStateQueued {
 			return view, nil
 		}
 		if view.ApprovalState == transfer.ApprovalRejected || view.State == transfer.BatchStateRejected {

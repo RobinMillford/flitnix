@@ -6,6 +6,7 @@ import (
 	"io"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -59,6 +60,9 @@ var (
 	// stays completed instead of being relabeled canceled, because a
 	// canceled record next to a published file would be a lie about disk.
 	ErrTooLateToCancel = errors.New("transfer: publication already decided")
+
+	// ErrDigestMismatch means the received bytes did not match the expected SHA-256 digest.
+	ErrDigestMismatch = errors.New("transfer: content digest does not match expected sha256")
 )
 
 // CancelAuthority is the outcome of Service.ReserveCancel: it says whether a
@@ -172,6 +176,9 @@ type Upload struct {
 	// batch coordinator is its only approval authority: such a record is
 	// never offered as an independent approval request.
 	BatchLinked bool
+
+	ExpectedSHA256 string // Expected SHA-256 digest from signed manifest
+	DeviceID       string // Enrolled device ID if transfer was authenticated
 }
 
 // ContentResult describes a successfully received upload body.
@@ -209,6 +216,9 @@ type upload struct {
 	// tie (time.Now can repeat within a single nanosecond resolution), so
 	// list ordering and pruning are fully deterministic.
 	seq int64
+
+	expectedSHA256 string
+	deviceID       string
 
 	mu        sync.Mutex
 	state     State
@@ -259,7 +269,9 @@ func (u *upload) snapshotLocked() Upload {
 		SHA256:    u.sha256,
 		Published: u.published,
 
-		BatchLinked: u.managed,
+		BatchLinked:    u.managed,
+		ExpectedSHA256: u.expectedSHA256,
+		DeviceID:       u.deviceID,
 	}
 }
 
@@ -306,7 +318,12 @@ var newPartSink = func(store *Store, name string) (contentSink, error) {
 // is validated here, before anything is stored or trusted: the filename is
 // sanitized, the size must be non-negative, and the limits are enforced.
 func (s *Service) Declare(sessionKey, rawName string, size int64) (Upload, error) {
-	return s.declare(sessionKey, rawName, "", "", size, false)
+	return s.declare(sessionKey, rawName, "", "", size, false, "", "")
+}
+
+// DeclareWithDigest records a pending upload with an expected SHA-256 digest and device ID.
+func (s *Service) DeclareWithDigest(sessionKey, rawName string, size int64, expectedSHA256, deviceID string) (Upload, error) {
+	return s.declare(sessionKey, rawName, "", "", size, false, expectedSHA256, deviceID)
 }
 
 // DeclareBatchItem records a pending upload that belongs to a transfer batch.
@@ -318,7 +335,15 @@ func (s *Service) DeclareBatchItem(sessionKey, root, relativePath, rawName strin
 	if (root == "") != (relativePath == "") {
 		return Upload{}, ErrInvalidUpload
 	}
-	return s.declare(sessionKey, rawName, root, relativePath, size, true)
+	return s.declare(sessionKey, rawName, root, relativePath, size, true, "", "")
+}
+
+// DeclareBatchItemWithDigest records a batch item with an expected SHA-256 digest and device ID.
+func (s *Service) DeclareBatchItemWithDigest(sessionKey, root, relativePath, rawName string, size int64, expectedSHA256, deviceID string) (Upload, error) {
+	if (root == "") != (relativePath == "") {
+		return Upload{}, ErrInvalidUpload
+	}
+	return s.declare(sessionKey, rawName, root, relativePath, size, true, expectedSHA256, deviceID)
 }
 
 // DeclarePath records a folder item whose server-selected root and validated
@@ -327,10 +352,10 @@ func (s *Service) DeclarePath(sessionKey, root, relativePath, rawName string, si
 	if root == "" || relativePath == "" {
 		return Upload{}, ErrInvalidUpload
 	}
-	return s.declare(sessionKey, rawName, root, relativePath, size, false)
+	return s.declare(sessionKey, rawName, root, relativePath, size, false, "", "")
 }
 
-func (s *Service) declare(sessionKey, rawName, root, relativePath string, size int64, managed bool) (Upload, error) {
+func (s *Service) declare(sessionKey, rawName, root, relativePath string, size int64, managed bool, expectedSHA256, deviceID string) (Upload, error) {
 	if sessionKey == "" {
 		return Upload{}, ErrWrongSession
 	}
@@ -362,16 +387,18 @@ func (s *Service) declare(sessionKey, rawName, root, relativePath string, size i
 		return Upload{}, err
 	}
 	u := &upload{
-		id:           id,
-		name:         name,
-		root:         root,
-		relativePath: relativePath,
-		session:      sessionKey,
-		size:         size,
-		created:      time.Now(),
-		managed:      managed,
-		seq:          s.nextSeq,
-		state:        StatePending,
+		id:             id,
+		name:           name,
+		root:           root,
+		relativePath:   relativePath,
+		session:        sessionKey,
+		size:           size,
+		created:        time.Now(),
+		managed:        managed,
+		seq:            s.nextSeq,
+		state:          StatePending,
+		expectedSHA256: expectedSHA256,
+		deviceID:       deviceID,
 	}
 	s.nextSeq++
 	s.uploads[id] = u
@@ -614,6 +641,17 @@ func (s *Service) SubmitContentWithPublish(id, sessionKey string, body io.Reader
 		u.state = StateFailed
 		u.mu.Unlock()
 		return ContentResult{}, fmt.Errorf("%s: %w", u.name, serr)
+	}
+
+	// Pre-publication digest verification
+	if u.expectedSHA256 != "" && !strings.EqualFold(result.HexSHA256(), u.expectedSHA256) {
+		_ = sink.Abort()
+		u.mu.Lock()
+		u.sink = nil
+		u.reason = fmt.Sprintf("digest mismatch: expected %s, got %s", u.expectedSHA256, result.HexSHA256())
+		u.state = StateFailed
+		u.mu.Unlock()
+		return ContentResult{}, ErrDigestMismatch
 	}
 
 	// The bytes are in. Publication and cancellation contend for exactly one
