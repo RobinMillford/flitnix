@@ -9,17 +9,21 @@ type Manager struct {
 	mu         sync.RWMutex
 	activeRoom *Room
 	stopTicker chan struct{}
+	closeOnce  sync.Once
+	done       chan struct{}
 }
 
 func NewManager() *Manager {
 	m := &Manager{
 		stopTicker: make(chan struct{}),
+		done:       make(chan struct{}),
 	}
 	go m.expiryLoop()
 	return m
 }
 
 func (m *Manager) expiryLoop() {
+	defer close(m.done)
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
@@ -39,15 +43,13 @@ func (m *Manager) expiryLoop() {
 }
 
 func (m *Manager) Close() {
+	m.closeOnce.Do(func() {
+		close(m.stopTicker)
+	})
+	<-m.done
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	select {
-	case <-m.stopTicker:
-		// already closed
-	default:
-		close(m.stopTicker)
-	}
 
 	if m.activeRoom != nil {
 		m.activeRoom.End()

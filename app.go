@@ -276,6 +276,10 @@ type App struct {
 	srv         *server.Server
 	serveCancel context.CancelFunc
 	serveDone   chan error
+
+	bgCancel     context.CancelFunc
+	bgWg         sync.WaitGroup
+	shutdownOnce sync.Once
 }
 
 func resolveDataDir() string {
@@ -379,6 +383,8 @@ func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	initial := a.initialShares
 	a.startupDone = true
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	a.bgCancel = bgCancel
 	a.startupMu.Unlock()
 
 	ensureLinuxNautilusScript()
@@ -388,8 +394,14 @@ func (a *App) startup(ctx context.Context) {
 	}
 
 	if a.settingsStore != nil && a.settingsStore.Get().AutoStartSession {
+		a.bgWg.Add(1)
 		go func() {
-			time.Sleep(100 * time.Millisecond)
+			defer a.bgWg.Done()
+			select {
+			case <-bgCtx.Done():
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
 			if a.sessions.Len() == 0 {
 				_, _ = a.StartSession("")
 			}
@@ -533,20 +545,29 @@ func (a *App) logTransferDiagnostics(format string, args ...any) {
 // moment ends canceled (never half-published), matching the core's
 // shutdown contract.
 func (a *App) shutdown(ctx context.Context) {
-	fmt.Fprintf(os.Stderr, "flitnix: the desktop is shutting down; ending every session: shutdown\n")
-	for _, s := range a.sessions.ActiveSessions() {
-		a.transfers.CancelSession(s.Key())
-		_ = a.coordinator.CloseSession(s.Key())
-		a.discardEmptyRoots(s.Key())
-		a.downloads.CancelSession(s.Key())
-	}
-	a.sessions.Close()
-	a.registry.Clear()
-	a.guestMgr.Close()
-	if a.auditStore != nil {
-		a.auditStore.Close()
-	}
-	a.stopServer()
+	a.shutdownOnce.Do(func() {
+		fmt.Fprintf(os.Stderr, "flitnix: the desktop is shutting down; ending every session: shutdown\n")
+		a.startupMu.Lock()
+		if a.bgCancel != nil {
+			a.bgCancel()
+		}
+		a.startupMu.Unlock()
+		a.bgWg.Wait()
+
+		for _, s := range a.sessions.ActiveSessions() {
+			a.transfers.CancelSession(s.Key())
+			_ = a.coordinator.CloseSession(s.Key())
+			a.discardEmptyRoots(s.Key())
+			a.downloads.CancelSession(s.Key())
+		}
+		a.sessions.Close()
+		a.registry.Clear()
+		a.guestMgr.Close()
+		if a.auditStore != nil {
+			a.auditStore.Close()
+		}
+		a.stopServer()
+	})
 }
 
 // ---- HTTP server lifecycle (lazy start, address-aware reuse) ----

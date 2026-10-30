@@ -18,8 +18,8 @@ func TestAppSettings_Lifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewApp: %v", err)
 	}
+	t.Cleanup(func() { app.shutdown(context.Background()) })
 	app.startup(context.Background())
-	defer app.shutdown(context.Background())
 
 	// Initial settings should be default
 	initial := app.GetSettings()
@@ -92,8 +92,8 @@ func TestAppSettings_Validation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewApp: %v", err)
 	}
+	t.Cleanup(func() { app.shutdown(context.Background()) })
 	app.startup(context.Background())
-	defer app.shutdown(context.Background())
 
 	// Invalid theme
 	invalidTheme := app.GetSettings()
@@ -122,8 +122,8 @@ func TestAppSettings_PreferredInterface(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewApp: %v", err)
 	}
+	t.Cleanup(func() { app.shutdown(context.Background()) })
 	app.startup(context.Background())
-	defer app.shutdown(context.Background())
 
 	// Set up fake network source with two interfaces: eth0 and wlx01
 	app.source = fakeSource(
@@ -197,8 +197,8 @@ func TestAppSettings_ActiveTransferGuards(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewApp: %v", err)
 	}
+	t.Cleanup(func() { app.shutdown(context.Background()) })
 	app.startup(context.Background())
-	defer app.shutdown(context.Background())
 
 	// Create an active session and approved upload
 	sess, err := app.sessions.Create()
@@ -308,8 +308,8 @@ func TestAppSettings_LocalePersistenceAndRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewApp (instance 2 / restart): %v", err)
 	}
+	t.Cleanup(func() { app2.shutdown(context.Background()) })
 	app2.startup(context.Background())
-	defer app2.shutdown(context.Background())
 
 	restored := app2.GetSettings()
 	if restored.Locale != "en" {
