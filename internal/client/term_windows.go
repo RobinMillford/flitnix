@@ -15,7 +15,7 @@ import (
 // ReadHiddenInput prompts the user and reads a line from in without echoing to terminal.
 // If in is not a terminal, it reads a line normally from in without prompting or touching console mode.
 func ReadHiddenInput(prompt string, in *os.File, out *os.File) (string, error) {
-	fd := int(in.Fd())
+	fd := in.Fd()
 	if !isatty.IsTerminal(fd) && !isatty.IsCygwinTerminal(fd) {
 		scanner := bufio.NewScanner(in)
 		if scanner.Scan() {
@@ -31,7 +31,7 @@ func ReadHiddenInput(prompt string, in *os.File, out *os.File) (string, error) {
 		fmt.Fprint(out, prompt)
 	}
 
-	handle := windows.Handle(in.Fd())
+	handle := windows.Handle(fd)
 	var mode uint32
 	if err := windows.GetConsoleMode(handle, &mode); err != nil {
 		scanner := bufio.NewScanner(in)

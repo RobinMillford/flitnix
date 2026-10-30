@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build darwin
 
 package client
 
@@ -31,7 +31,7 @@ func ReadHiddenInput(prompt string, in *os.File, out *os.File) (string, error) {
 		fmt.Fprint(out, prompt)
 	}
 
-	termios, err := unix.IoctlGetTermios(int(fd), unix.TCGETS)
+	termios, err := unix.IoctlGetTermios(int(fd), unix.TIOCGETA)
 	if err != nil {
 		scanner := bufio.NewScanner(in)
 		if scanner.Scan() {
@@ -42,7 +42,7 @@ func ReadHiddenInput(prompt string, in *os.File, out *os.File) (string, error) {
 
 	newState := *termios
 	newState.Lflag &^= unix.ECHO
-	if err := unix.IoctlSetTermios(int(fd), unix.TCSETS, &newState); err != nil {
+	if err := unix.IoctlSetTermios(int(fd), unix.TIOCSETA, &newState); err != nil {
 		scanner := bufio.NewScanner(in)
 		if scanner.Scan() {
 			return strings.TrimSpace(scanner.Text()), nil
@@ -50,7 +50,7 @@ func ReadHiddenInput(prompt string, in *os.File, out *os.File) (string, error) {
 		return "", scanner.Err()
 	}
 	defer func() {
-		_ = unix.IoctlSetTermios(int(fd), unix.TCSETS, termios)
+		_ = unix.IoctlSetTermios(int(fd), unix.TIOCSETA, termios)
 		fmt.Fprintln(out)
 	}()
 
