@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -207,7 +208,7 @@ func TestTransferRegressionBenchmarks(t *testing.T) {
 	fmt.Println("========================================================================================================================")
 
 	outJSON, _ := json.MarshalIndent(results, "", "  ")
-	_ = os.WriteFile("benchmarks/regression_benchmark_results.json", outJSON, 0o644)
+	_ = os.WriteFile("regression_benchmark_results.json", outJSON, 0o644)
 }
 
 func executeScenario(client *http.Client, serverURL, token string, reg *transfer.Registry, name, desc string, paths []string, asArchive bool, runs int) BenchScenarioResult {
@@ -507,4 +508,143 @@ func executeDirectFileScenario(client *http.Client, serverURL, token string, reg
 		MedianRun:    median,
 		Pass1Percent: pass1Pct,
 	}
+}
+
+func TestBenchmarkBufferSizes(t *testing.T) {
+	tempDir := t.TempDir()
+	testPath := filepath.Join(tempDir, "bench_500mb.bin")
+	size := int64(500 * 1024 * 1024)
+	createBenchFile(testPath, size)
+
+	bufferSizes := []int{
+		64 * 1024,
+		128 * 1024,
+		256 * 1024,
+		512 * 1024,
+	}
+
+	fmt.Println("\n==================================================================")
+	fmt.Println(" Buffer Size & Streaming Microbenchmark (500 MB with SHA-256)")
+	fmt.Println("==================================================================")
+
+	for _, bufSize := range bufferSizes {
+		var durations []time.Duration
+		for run := 0; run < 3; run++ {
+			f, err := os.Open(testPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			hasher := sha256.New()
+			devNull := io.Discard
+			tee := io.MultiWriter(devNull, hasher)
+			buf := make([]byte, bufSize)
+
+			start := time.Now()
+			n, err := io.CopyBuffer(tee, f, buf)
+			dur := time.Since(start)
+			f.Close()
+			if err != nil || n != size {
+				t.Fatalf("copy failed: %v", err)
+			}
+			durations = append(durations, dur)
+		}
+		sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
+		median := durations[len(durations)/2]
+		mbs := float64(size) / median.Seconds() / 1000000.0
+		fmt.Printf("Buffer Size: %4d KiB | Duration: %6.1f ms | Throughput: %8.2f MB/s\n",
+			bufSize/1024, float64(median.Microseconds())/1000.0, mbs)
+	}
+	fmt.Println("==================================================================")
+}
+
+func TestBenchmarkDeadlineThrottling(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	totalBytes := int64(500 * 1024 * 1024)
+	data := make([]byte, 64*1024)
+	stall := 15 * time.Second
+
+	// 1. Unthrottled run
+	done1 := make(chan struct{})
+	go func() {
+		defer close(done1)
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 128*1024)
+		_, _ = io.CopyBuffer(io.Discard, conn, buf)
+	}()
+
+	conn1, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start1 := time.Now()
+	var written1 int64
+	for written1 < totalBytes {
+		_ = conn1.SetWriteDeadline(time.Now().Add(stall))
+		n, err := conn1.Write(data)
+		if err != nil {
+			break
+		}
+		written1 += int64(n)
+	}
+	conn1.Close()
+	dur1 := time.Since(start1)
+	<-done1
+
+	mbs1 := float64(written1) / dur1.Seconds() / 1000000.0
+	fmt.Printf("\nUnthrottled SetWriteDeadline (every 64KB write): %6.1f ms | %8.2f MB/s\n",
+		float64(dur1.Microseconds())/1000.0, mbs1)
+
+	// 2. Throttled run (extend deadline every 512KB or 250ms)
+	done2 := make(chan struct{})
+	go func() {
+		defer close(done2)
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 128*1024)
+		_, _ = io.CopyBuffer(io.Discard, conn, buf)
+	}()
+
+	conn2, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start2 := time.Now()
+	var written2 int64
+	var lastExtend time.Time
+	var bytesSince int64
+	for written2 < totalBytes {
+		now := time.Now()
+		bytesSince += int64(len(data))
+		if lastExtend.IsZero() || bytesSince >= 512*1024 || now.Sub(lastExtend) >= 250*time.Millisecond {
+			_ = conn2.SetWriteDeadline(now.Add(stall))
+			lastExtend = now
+			bytesSince = 0
+		}
+		n, err := conn2.Write(data)
+		if err != nil {
+			break
+		}
+		written2 += int64(n)
+	}
+	conn2.Close()
+	dur2 := time.Since(start2)
+	<-done2
+
+	mbs2 := float64(written2) / dur2.Seconds() / 1000000.0
+	fmt.Printf("Throttled SetWriteDeadline (every 512KB/250ms):  %6.1f ms | %8.2f MB/s\n\n",
+		float64(dur2.Microseconds())/1000.0, mbs2)
 }

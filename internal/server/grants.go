@@ -86,6 +86,7 @@ type archiveProgress struct {
 	ID, Session, State, Error string
 	Total, Processed          int64
 	Updated                   time.Time
+	SHA256                    string // Final completed hex SHA-256 digest
 
 	// clock stamps Updated; it is the owning store's clock so retention is
 	// judged against one time source.
@@ -302,6 +303,7 @@ func (s *DownloadGrantStore) getProgress(id, session string) (archiveProgress, b
 	return archiveProgress{
 		ID: p.ID, Session: p.Session, State: p.State, Error: p.Error,
 		Total: p.Total, Processed: p.Processed, Updated: p.Updated,
+		SHA256: p.SHA256,
 	}, true
 }
 

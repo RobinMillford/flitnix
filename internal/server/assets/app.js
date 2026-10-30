@@ -936,18 +936,23 @@
     var hashbox = el("div", "download-integrity__hashbox");
     var code = el("code", "", "Expected SHA-256: " + (grant.sha256 ? grant.sha256 : "Calculating…"));
     hashbox.appendChild(code);
-    if (grant.sha256) {
-      var copyBtn = el("button", "btn btn--small btn--ghost", "Copy");
+    var copyBtn = null;
+    function addCopyBtn(digest) {
+      if (copyBtn) return;
+      copyBtn = el("button", "btn btn--small btn--ghost", "Copy");
       copyBtn.type = "button";
       copyBtn.addEventListener("click", function () {
         if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(grant.sha256).then(function () {
+          navigator.clipboard.writeText(digest).then(function () {
             copyBtn.textContent = "Copied!";
             setTimeout(function () { copyBtn.textContent = "Copy"; }, 2000);
           });
         }
       });
       hashbox.appendChild(copyBtn);
+    }
+    if (grant.sha256) {
+      addCopyBtn(grant.sha256);
     }
     downloadIntegrityEl.appendChild(hashbox);
 
@@ -961,6 +966,10 @@
       },
       setMessage: function (text) {
         msg.textContent = text;
+      },
+      setDigest: function (digest) {
+        code.textContent = "Expected SHA-256: " + digest;
+        addCopyBtn(digest);
       },
       setActions: function (nodes) {
         actions.innerHTML = "";
@@ -1110,26 +1119,38 @@
                     if (result.done) {
                       return writable.close().then(function () {
                         if (card) card.setBadge("Verifying…", "badge--verifying");
-                        if (streamHasher && grant.sha256) {
-                          var actualHex = streamHasher.hex().toLowerCase();
-                          if (actualHex === grant.sha256.toLowerCase()) {
-                            if (card) {
-                              card.setBadge("Verified", "badge--verified");
-                              card.setMessage("Verified — Exact SHA-256 match! Saved directly to disk (" + actualHex.slice(0, 16) + "…).");
+                        var checkDigest = grant.sha256;
+                        function verifyStream() {
+                          if (streamHasher && checkDigest) {
+                            var actualHex = streamHasher.hex().toLowerCase();
+                            if (actualHex === checkDigest.toLowerCase()) {
+                              if (card) {
+                                card.setBadge("Verified", "badge--verified");
+                                card.setMessage("Verified — Exact SHA-256 match! Saved directly to disk (" + actualHex.slice(0, 16) + "…).");
+                              }
+                            } else {
+                              if (card) {
+                                card.setBadge("Verification failed", "badge--failed");
+                                card.setMessage("Verification failed — Streamed checksum mismatch!");
+                                var retry = el("button", "btn btn--small", "Retry Download");
+                                retry.type = "button";
+                                retry.addEventListener("click", function () { downloadSources(sources, btn); });
+                                card.setActions([retry]);
+                              }
                             }
-                          } else {
-                            if (card) {
-                              card.setBadge("Verification failed", "badge--failed");
-                              card.setMessage("Verification failed — Streamed checksum mismatch!");
-                              var retry = el("button", "btn btn--small", "Retry Download");
-                              retry.type = "button";
-                              retry.addEventListener("click", function () { downloadSources(sources, btn); });
-                              card.setActions([retry]);
-                            }
+                          } else if (card) {
+                            card.setBadge("Downloaded", "badge--waiting");
+                            card.setMessage("File saved directly to disk.");
                           }
-                        } else if (card) {
-                          card.setBadge("Downloaded", "badge--waiting");
-                          card.setMessage("File saved directly to disk.");
+                        }
+                        if (!checkDigest && grant.progressId) {
+                          api("/api/download-progress/" + encodeURIComponent(grant.progressId)).then(function (p) {
+                            if (p && p.sha256) checkDigest = p.sha256;
+                            if (card && card.setDigest && checkDigest) card.setDigest(checkDigest);
+                            verifyStream();
+                          }).catch(verifyStream);
+                        } else {
+                          verifyStream();
                         }
                       });
                     }
@@ -1239,6 +1260,10 @@
         if (p.state === "completed") {
           removeDownloadFrame(id);
           if (card && grant) {
+            var finalDigest = (p && p.sha256) || grant.sha256;
+            if (finalDigest && card.setDigest) {
+              card.setDigest(finalDigest);
+            }
             card.setBadge("Checksum available", "badge--waiting");
             card.setMessage("Checksum available; download not automatically verified by native browser. You can verify your saved file below:");
             var verifyLabel = el("label", "btn btn--small", "Verify Downloaded File");
@@ -1247,7 +1272,7 @@
             fileInput.hidden = true;
             fileInput.addEventListener("change", function () {
               if (fileInput.files && fileInput.files[0]) {
-                verifyPickedFile(fileInput.files[0], grant.sha256, card, sources, btn);
+                verifyPickedFile(fileInput.files[0], finalDigest, card, sources, btn);
               }
             });
             verifyLabel.appendChild(fileInput);
