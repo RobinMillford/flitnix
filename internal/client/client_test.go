@@ -217,3 +217,54 @@ func TestClientLifecycle(t *testing.T) {
 func stringsContains(s, substr string) bool {
 	return strings.Contains(s, substr)
 }
+
+func TestReadHiddenInput_NonTerminal(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("Pipe: %v", err)
+	}
+	defer r.Close()
+
+	testInput := "  https://192.168.1.5:43821/#secret-token  \n"
+	go func() {
+		_, _ = w.Write([]byte(testInput))
+		_ = w.Close()
+	}()
+
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("out Pipe: %v", err)
+	}
+	defer outR.Close()
+	defer outW.Close()
+
+	got, err := ReadHiddenInput("Enter URL: ", r, outW)
+	if err != nil {
+		t.Fatalf("ReadHiddenInput: %v", err)
+	}
+	want := "https://192.168.1.5:43821/#secret-token"
+	if got != want {
+		t.Errorf("ReadHiddenInput = %q, want %q", got, want)
+	}
+}
+
+func TestReadHiddenInput_EOF(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("Pipe: %v", err)
+	}
+	_ = w.Close()
+	defer r.Close()
+
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("out Pipe: %v", err)
+	}
+	defer outR.Close()
+	defer outW.Close()
+
+	_, err = ReadHiddenInput("", r, outW)
+	if err == nil {
+		t.Fatalf("expected error on empty EOF stdin, got nil")
+	}
+}
