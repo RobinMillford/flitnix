@@ -20,7 +20,7 @@ set -eu
 
 REPO="RobinMillford/flitnix"
 GITHUB_URL="${FLITNIX_BASE_URL:-https://github.com/${REPO}}"
-DEFAULT_VERSION="0.1.0"
+DEFAULT_VERSION="0.2.0"
 
 TARGET_VERSION=""
 DRY_RUN=0
