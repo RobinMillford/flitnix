@@ -130,3 +130,30 @@ func TestRegistryFolderSelectionsHaveIndependentIdentities(t *testing.T) {
 		t.Fatalf("removing one folder changed unrelated sources: %+v", sources)
 	}
 }
+
+func TestRegistryAddFolderDeduplicatesIdenticalPath(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "dedup_dir")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "file.txt"), []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	registry := NewRegistry()
+	first, err := registry.AddFolder(root, "session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := registry.AddFolder(root, "session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ID != second.ID {
+		t.Fatalf("expected identical folder path to deduplicate: first=%+v second=%+v", first, second)
+	}
+	sources := registry.ListSources()
+	if len(sources) != 1 {
+		t.Fatalf("expected exactly 1 source registered, got %d", len(sources))
+	}
+}

@@ -114,6 +114,7 @@ type ManifestItem struct {
 	RelativePath string `json:"relativePath,omitempty"`
 	DisplayName  string `json:"displayName,omitempty"`
 	Size         int64  `json:"size"`
+	SHA256       string `json:"sha256,omitempty"`
 }
 
 // ManifestLimits bounds metadata retained in memory. The defaults are

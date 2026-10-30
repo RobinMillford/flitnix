@@ -8,12 +8,12 @@
   "frontend:dev:serverUrl": "auto",
   "author": {
     "name": "RobinMillford",
-    "email": "issan.yamin@gmail.com"
+    "email": "RobinMillford@users.noreply.github.com"
   },
   "info": {
     "companyName": "Flitnix",
     "productName": "Flitnix",
-    "productVersion": "0.1.0",
+    "productVersion": "0.2.0",
     "copyright": "Copyright 2026 RobinMillford",
     "comments": "Fast, private local file transfer between desktop and phone"
   }

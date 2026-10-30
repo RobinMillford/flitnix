@@ -15,6 +15,14 @@ func TestPayload(t *testing.T) {
 	if want := "http://192.168.1.42:43821/#tok_v43"; got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
+
+	gotV6, err := Payload("http://[2001:db8::10]:43821", "tok_v43")
+	if err != nil {
+		t.Fatalf("Payload IPv6: %v", err)
+	}
+	if wantV6 := "http://[2001:db8::10]:43821/#tok_v43"; gotV6 != wantV6 {
+		t.Fatalf("got %q, want %q", gotV6, wantV6)
+	}
 }
 
 func TestPayloadRejectsInvalidInputs(t *testing.T) {
@@ -84,5 +92,15 @@ func TestPNGRejectsImpossiblePayload(t *testing.T) {
 	payload := strings.Repeat("a", 10_000)
 	if _, err := PNG(payload, DefaultSize); err == nil {
 		t.Fatal("oversized payload must fail to encode")
+	}
+}
+
+func TestTerminal(t *testing.T) {
+	out, err := Terminal("http://192.168.1.50:43821/#abc123token")
+	if err != nil {
+		t.Fatalf("Terminal failed: %v", err)
+	}
+	if len(out) == 0 {
+		t.Fatal("Terminal output is empty")
 	}
 }

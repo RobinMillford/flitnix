@@ -2,11 +2,13 @@ package main
 
 import (
 	"embed"
+	"os"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 	"github.com/wailsapp/wails/v2/pkg/options/linux"
+	"github.com/wailsapp/wails/v2/pkg/options/mac"
 )
 
 //go:embed all:frontend/dist
@@ -20,14 +22,21 @@ var assets embed.FS
 var appIcon []byte
 
 func main() {
+	// Process CLI flags and subcommands before GUI initialization.
+	handled, code, initialShares := handleCLI(os.Args, os.Stdout, os.Stderr)
+	if handled {
+		os.Exit(code)
+	}
+
 	// Create an instance of the app structure. Constructing the receive
 	// store can fail (e.g. an unresolvable home directory), so the error is
 	// reported and startup is abandoned before any GUI work happens.
 	app, err := NewApp()
 	if err != nil {
 		println("Error:", err.Error())
-		return
+		os.Exit(1)
 	}
+	app.initialShares = initialShares
 
 	// Create application with options
 	err = wails.Run(&options.App{
@@ -40,8 +49,15 @@ func main() {
 		BackgroundColour: &options.RGBA{R: 27, G: 38, B: 54, A: 1},
 		DragAndDrop:      &options.DragAndDrop{EnableFileDrop: true},
 		Linux:            &linux.Options{Icon: appIcon},
-		OnStartup:        app.startup,
-		OnShutdown:       app.shutdown,
+		Mac: &mac.Options{
+			OnFileOpen: app.onMacFileOpen,
+		},
+		SingleInstanceLock: &options.SingleInstanceLock{
+			UniqueId:               "io.github.robinmillford.flitnix",
+			OnSecondInstanceLaunch: app.onSecondInstanceLaunch,
+		},
+		OnStartup:  app.startup,
+		OnShutdown: app.shutdown,
 		Bind: []interface{}{
 			app,
 		},
@@ -49,5 +65,6 @@ func main() {
 
 	if err != nil {
 		println("Error:", err.Error())
+		os.Exit(1)
 	}
 }

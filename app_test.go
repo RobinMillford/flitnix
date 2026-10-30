@@ -136,6 +136,34 @@ func TestResolveInterfaceNamedIPGone(t *testing.T) {
 	}
 }
 
+func TestResolveInterfaceIPv6(t *testing.T) {
+	a := newTestApp(t)
+	v6 := &net.IPNet{
+		IP:   net.ParseIP("2001:db8::10"),
+		Mask: net.CIDRMask(64, 128),
+	}
+	a.source = fakeSource(
+		[]net.Interface{upIf("eth0")},
+		map[string][]net.Addr{"eth0": {v6}},
+	)
+	v, err := a.resolveInterface("2001:db8::10")
+	if err != nil {
+		t.Fatalf("resolveInterface IPv6: %v", err)
+	}
+	if v.IP != "2001:db8::10" || v.Family != "IPv6" || v.Name != "eth0" {
+		t.Fatalf("unexpected view: %+v", v)
+	}
+
+	// Bracketed input also resolves correctly
+	vBracketed, err := a.resolveInterface("[2001:db8::10]")
+	if err != nil {
+		t.Fatalf("resolveInterface bracketed IPv6: %v", err)
+	}
+	if vBracketed.IP != "2001:db8::10" || vBracketed.Family != "IPv6" {
+		t.Fatalf("unexpected view for bracketed input: %+v", vBracketed)
+	}
+}
+
 func TestResolveInterfaceSourceError(t *testing.T) {
 	a := newTestApp(t)
 	a.source = netenv.Source{Interfaces: func() ([]net.Interface, error) {

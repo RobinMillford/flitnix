@@ -6,8 +6,24 @@ export function AddDroppedSources(arg1) {
   return window['go']['main']['App']['AddDroppedSources'](arg1);
 }
 
+export function AddExpectedParticipant(arg1, arg2, arg3) {
+  return window['go']['main']['App']['AddExpectedParticipant'](arg1, arg2, arg3);
+}
+
 export function ApproveBatch(arg1) {
   return window['go']['main']['App']['ApproveBatch'](arg1);
+}
+
+export function ApproveGuest(arg1) {
+  return window['go']['main']['App']['ApproveGuest'](arg1);
+}
+
+export function ApproveGuestUpload(arg1) {
+  return window['go']['main']['App']['ApproveGuestUpload'](arg1);
+}
+
+export function ApprovePairing(arg1) {
+  return window['go']['main']['App']['ApprovePairing'](arg1);
 }
 
 export function ApproveUpload(arg1) {
@@ -22,16 +38,68 @@ export function CancelUpload(arg1) {
   return window['go']['main']['App']['CancelUpload'](arg1);
 }
 
+export function ClearAuditHistory() {
+  return window['go']['main']['App']['ClearAuditHistory']();
+}
+
+export function ClearTextMessages(arg1) {
+  return window['go']['main']['App']['ClearTextMessages'](arg1);
+}
+
+export function DeleteGuestTemplate(arg1) {
+  return window['go']['main']['App']['DeleteGuestTemplate'](arg1);
+}
+
+export function DenyPairing(arg1) {
+  return window['go']['main']['App']['DenyPairing'](arg1);
+}
+
+export function DuplicateGuestTemplate(arg1, arg2) {
+  return window['go']['main']['App']['DuplicateGuestTemplate'](arg1, arg2);
+}
+
+export function EndGuestRoom() {
+  return window['go']['main']['App']['EndGuestRoom']();
+}
+
 export function EndSession(arg1) {
   return window['go']['main']['App']['EndSession'](arg1);
+}
+
+export function ExportGuestCollection(arg1) {
+  return window['go']['main']['App']['ExportGuestCollection'](arg1);
 }
 
 export function GetBatch(arg1) {
   return window['go']['main']['App']['GetBatch'](arg1);
 }
 
+export function GetGuestRoomState() {
+  return window['go']['main']['App']['GetGuestRoomState']();
+}
+
+export function GetPairingStatus() {
+  return window['go']['main']['App']['GetPairingStatus']();
+}
+
+export function GetSettings() {
+  return window['go']['main']['App']['GetSettings']();
+}
+
+export function ListAuditEvents(arg1) {
+  return window['go']['main']['App']['ListAuditEvents'](arg1);
+}
+
 export function ListBatches() {
   return window['go']['main']['App']['ListBatches']();
+}
+
+export function ListGuestPresets() {
+  return window['go']['main']['App']['ListGuestPresets']();
+}
+
+export function ListGuestTemplates() {
+  return window['go']['main']['App']['ListGuestTemplates']();
 }
 
 export function ListNetworkInterfaces() {
@@ -58,12 +126,40 @@ export function ListSharedSources() {
   return window['go']['main']['App']['ListSharedSources']();
 }
 
+export function ListTextMessages(arg1) {
+  return window['go']['main']['App']['ListTextMessages'](arg1);
+}
+
+export function ListTrustedDevices() {
+  return window['go']['main']['App']['ListTrustedDevices']();
+}
+
+export function OpenDownloadFolder() {
+  return window['go']['main']['App']['OpenDownloadFolder']();
+}
+
+export function OpenGuestFolder() {
+  return window['go']['main']['App']['OpenGuestFolder']();
+}
+
+export function PickExportDestination() {
+  return window['go']['main']['App']['PickExportDestination']();
+}
+
 export function PickFilesForSharing() {
   return window['go']['main']['App']['PickFilesForSharing']();
 }
 
 export function PickFolderForSharing() {
   return window['go']['main']['App']['PickFolderForSharing']();
+}
+
+export function PickGuestDestination() {
+  return window['go']['main']['App']['PickGuestDestination']();
+}
+
+export function ReArmPairing() {
+  return window['go']['main']['App']['ReArmPairing']();
 }
 
 export function ReceiveDirectory() {
@@ -82,8 +178,32 @@ export function RejectBatch(arg1) {
   return window['go']['main']['App']['RejectBatch'](arg1);
 }
 
+export function RejectGuest(arg1) {
+  return window['go']['main']['App']['RejectGuest'](arg1);
+}
+
+export function RejectGuestUpload(arg1) {
+  return window['go']['main']['App']['RejectGuestUpload'](arg1);
+}
+
 export function RejectUpload(arg1) {
   return window['go']['main']['App']['RejectUpload'](arg1);
+}
+
+export function RemoveExpectedParticipant(arg1) {
+  return window['go']['main']['App']['RemoveExpectedParticipant'](arg1);
+}
+
+export function RemoveTrustedDevice(arg1) {
+  return window['go']['main']['App']['RemoveTrustedDevice'](arg1);
+}
+
+export function ResetSettings() {
+  return window['go']['main']['App']['ResetSettings']();
+}
+
+export function RevokeGuest(arg1) {
+  return window['go']['main']['App']['RevokeGuest'](arg1);
 }
 
 export function RevokeSharedFile(arg1) {
@@ -94,6 +214,26 @@ export function RevokeSharedSource(arg1) {
   return window['go']['main']['App']['RevokeSharedSource'](arg1);
 }
 
+export function RunConnectionDiagnostics() {
+  return window['go']['main']['App']['RunConnectionDiagnostics']();
+}
+
+export function SaveGuestTemplate(arg1) {
+  return window['go']['main']['App']['SaveGuestTemplate'](arg1);
+}
+
+export function SaveSettings(arg1) {
+  return window['go']['main']['App']['SaveSettings'](arg1);
+}
+
+export function SelectDownloadDirectory() {
+  return window['go']['main']['App']['SelectDownloadDirectory']();
+}
+
+export function SendTextMessage(arg1, arg2) {
+  return window['go']['main']['App']['SendTextMessage'](arg1, arg2);
+}
+
 export function ServerAddress() {
   return window['go']['main']['App']['ServerAddress']();
 }
@@ -102,6 +242,26 @@ export function SessionQR(arg1) {
   return window['go']['main']['App']['SessionQR'](arg1);
 }
 
+export function SetDeviceAutoApprove(arg1, arg2) {
+  return window['go']['main']['App']['SetDeviceAutoApprove'](arg1, arg2);
+}
+
+export function StartGuestRoom(arg1, arg2) {
+  return window['go']['main']['App']['StartGuestRoom'](arg1, arg2);
+}
+
+export function StartGuestRoomFromTemplate(arg1, arg2) {
+  return window['go']['main']['App']['StartGuestRoomFromTemplate'](arg1, arg2);
+}
+
+export function StartGuestRoomWithConfig(arg1) {
+  return window['go']['main']['App']['StartGuestRoomWithConfig'](arg1);
+}
+
 export function StartSession(arg1) {
   return window['go']['main']['App']['StartSession'](arg1);
+}
+
+export function UpdateExpectedParticipant(arg1) {
+  return window['go']['main']['App']['UpdateExpectedParticipant'](arg1);
 }

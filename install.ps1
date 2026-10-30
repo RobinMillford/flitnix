@@ -38,7 +38,7 @@ if ($Help) {
 
 $Repo = "RobinMillford/flitnix"
 $BaseUrl = if ($env:FLITNIX_BASE_URL) { $env:FLITNIX_BASE_URL } else { "https://github.com/$Repo" }
-$DefaultVersion = "0.1.0"
+$DefaultVersion = "0.2.0"
 
 # Check Architecture
 if (-not [Environment]::Is64BitOperatingSystem) {

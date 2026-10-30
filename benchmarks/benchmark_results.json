@@ -1,0 +1,67 @@
+{
+  "generated_at": "2026-10-29T07:10:16.951180311Z",
+  "platform": "linux/amd64 (16 CPUs)",
+  "go_version": "go1.27.3",
+  "results": [
+    {
+      "topology": "Topology 1: Large File",
+      "description": "Single 500 MB file streaming transfer",
+      "file_count": 1,
+      "total_bytes": 524288000,
+      "duration_ms": 440,
+      "throughput_mbs": 1136.3636363636363,
+      "peak_heap_alloc_mb": 0.7384567260742188,
+      "total_alloc_mb": 0.23923492431640625,
+      "integrity_checked": true,
+      "integrity_pass": true
+    },
+    {
+      "topology": "Topology 2: Many Small Files",
+      "description": "1,000 files x 20 KB each (metadata \u0026 connection turnaround)",
+      "file_count": 1000,
+      "total_bytes": 20480000,
+      "duration_ms": 435,
+      "throughput_mbs": 44.89942528735632,
+      "peak_heap_alloc_mb": 2.692474365234375,
+      "total_alloc_mb": 93.88692474365234,
+      "integrity_checked": true,
+      "integrity_pass": true
+    },
+    {
+      "topology": "Topology 3: Mixed Hierarchy",
+      "description": "111 mixed files (50 MB video, 10x5MB clips, 100x100KB documents)",
+      "file_count": 111,
+      "total_bytes": 115097600,
+      "duration_ms": 122,
+      "throughput_mbs": 899.718237704918,
+      "peak_heap_alloc_mb": 2.378753662109375,
+      "total_alloc_mb": 10.496307373046875,
+      "integrity_checked": true,
+      "integrity_pass": true
+    },
+    {
+      "topology": "Topology 4: Outbound Single File Download",
+      "description": "500 MB file download with streaming RFC 9530 Content-Digest",
+      "file_count": 1,
+      "total_bytes": 524288000,
+      "duration_ms": 666,
+      "throughput_mbs": 750.7507507507507,
+      "peak_heap_alloc_mb": 1.007720947265625,
+      "total_alloc_mb": 0.17716217041015625,
+      "integrity_checked": true,
+      "integrity_pass": true
+    },
+    {
+      "topology": "Topology 5: Outbound Folder Archive Download",
+      "description": "111 files (110 MB) uncompressed ZIP download with deterministic two-pass Content-Digest",
+      "file_count": 111,
+      "total_bytes": 115114734,
+      "duration_ms": 157,
+      "throughput_mbs": 699.2481863422759,
+      "peak_heap_alloc_mb": 1.3375320434570312,
+      "total_alloc_mb": 0.6346359252929688,
+      "integrity_checked": true,
+      "integrity_pass": true
+    }
+  ]
+}

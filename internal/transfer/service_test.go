@@ -1045,3 +1045,66 @@ func TestServiceTerminalHistoryPrunesOldest(t *testing.T) {
 		t.Errorf("the newest record was wrongly pruned: (%v, %v)", u, ok)
 	}
 }
+
+func TestServiceExpectedSHA256DigestVerification(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(StoreConfig{Dir: dir})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	svc := NewService(Config{Store: store})
+	const key = "sess-digest"
+
+	content := []byte("hello digest verification")
+	h := sha256.Sum256(content)
+	correctDigest := hex.EncodeToString(h[:])
+	wrongDigest := "0000000000000000000000000000000000000000000000000000000000000000"
+
+	// 1. Success with matching digest
+	up1, err := svc.DeclareWithDigest(key, "match.txt", int64(len(content)), correctDigest, "dev-1")
+	if err != nil {
+		t.Fatalf("DeclareWithDigest: %v", err)
+	}
+	if _, err := svc.Decide(up1.ID, true); err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	res1, err := svc.SubmitContent(up1.ID, key, bytes.NewReader(content), nil)
+	if err != nil {
+		t.Fatalf("SubmitContent matching: %v", err)
+	}
+	if res1.SHA256 != correctDigest {
+		t.Fatalf("res1 SHA256 %s != %s", res1.SHA256, correctDigest)
+	}
+
+	// Verify published file exists
+	if _, err := os.Stat(res1.Path); err != nil {
+		t.Fatalf("published file does not exist: %v", err)
+	}
+
+	// 2. Failure with mismatched digest
+	up2, err := svc.DeclareWithDigest(key, "mismatch.txt", int64(len(content)), wrongDigest, "dev-1")
+	if err != nil {
+		t.Fatalf("DeclareWithDigest: %v", err)
+	}
+	if _, err := svc.Decide(up2.ID, true); err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	_, err = svc.SubmitContent(up2.ID, key, bytes.NewReader(content), nil)
+	if !errors.Is(err, ErrDigestMismatch) {
+		t.Fatalf("expected ErrDigestMismatch, got: %v", err)
+	}
+
+	// Verify upload state is StateFailed
+	snap2, ok := svc.Get(up2.ID)
+	if !ok || snap2.State != StateFailed {
+		t.Fatalf("expected StateFailed, got state=%s", snap2.State)
+	}
+
+	// Verify no file was published in receive dir
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "mismatch") {
+			t.Fatalf("part file was not cleaned up / file was published: %s", e.Name())
+		}
+	}
+}

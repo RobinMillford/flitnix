@@ -58,10 +58,11 @@ type archiveSource struct {
 }
 
 type archiveEntry struct {
-	Name string
-	Path string
-	Size int64
-	Dir  bool
+	Name    string
+	Path    string
+	Size    int64
+	Dir     bool
+	ModTime time.Time
 }
 
 // downloadGrant is the immutable, server-built plan one browser navigation
@@ -75,6 +76,8 @@ type downloadGrant struct {
 	Entries                                 []archiveEntry
 	Total                                   int64
 	Archive                                 bool
+	ArchiveSize                             int64
+	SHA256                                  string
 	ExpiresAt                               time.Time
 }
 
@@ -83,6 +86,7 @@ type archiveProgress struct {
 	ID, Session, State, Error string
 	Total, Processed          int64
 	Updated                   time.Time
+	SHA256                    string // Final completed hex SHA-256 digest
 
 	// clock stamps Updated; it is the owning store's clock so retention is
 	// judged against one time source.
@@ -221,6 +225,16 @@ func (s *DownloadGrantStore) create(sess *session.Session, sources []archiveSour
 	return grant, progress, nil
 }
 
+func (s *DownloadGrantStore) updateDigest(id string, sha256Hex string, archiveSize int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if g, ok := s.grants[id]; ok {
+		g.SHA256 = sha256Hex
+		g.ArchiveSize = archiveSize
+		s.grants[id] = g
+	}
+}
+
 // redeem consumes a grant. Success is one-shot: the grant is deleted, so a
 // replay (a second navigation, a browser retry, a resumed download) finds
 // nothing. Failures that do not prove the caller holds the secret reveal
@@ -289,6 +303,7 @@ func (s *DownloadGrantStore) getProgress(id, session string) (archiveProgress, b
 	return archiveProgress{
 		ID: p.ID, Session: p.Session, State: p.State, Error: p.Error,
 		Total: p.Total, Processed: p.Processed, Updated: p.Updated,
+		SHA256: p.SHA256,
 	}, true
 }
 

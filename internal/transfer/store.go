@@ -39,6 +39,7 @@ const DefaultReceiveSubpath = "Downloads/Flitnix"
 // are safe for concurrent use; PartFile instances are used by exactly one
 // streaming goroutine.
 type Store struct {
+	mu  sync.RWMutex
 	dir string
 }
 
@@ -69,14 +70,38 @@ func NewStore(cfg StoreConfig) (*Store, error) {
 }
 
 // Dir returns the absolute receive directory.
-func (s *Store) Dir() string { return s.dir }
+func (s *Store) Dir() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.dir
+}
+
+// SetDir updates the receive directory. Empty resets to DefaultReceiveSubpath.
+func (s *Store) SetDir(dir string) error {
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			return fmt.Errorf("transfer: cannot derive the default receive directory: %w", err)
+		}
+		dir = filepath.Join(home, filepath.FromSlash(DefaultReceiveSubpath))
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("transfer: cannot resolve receive directory %q: %w", dir, err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dir = abs
+	return nil
+}
 
 // ensureDir creates the receive directory when first needed. os.MkdirAll
 // is idempotent and tolerant of concurrent creators, so no extra locking is
 // required.
 func (s *Store) ensureDir() error {
-	if err := os.MkdirAll(s.dir, dirPerm); err != nil {
-		return fmt.Errorf("transfer: cannot create receive directory %s: %w", s.dir, err)
+	dir := s.Dir()
+	if err := os.MkdirAll(dir, dirPerm); err != nil {
+		return fmt.Errorf("transfer: cannot create receive directory %s: %w", dir, err)
 	}
 	return nil
 }
@@ -102,7 +127,7 @@ func (s *Store) withinDir(path string) bool {
 	if err != nil {
 		return false
 	}
-	rel, err := filepath.Rel(s.dir, abs)
+	rel, err := filepath.Rel(s.Dir(), abs)
 	if err != nil {
 		return false
 	}
@@ -135,20 +160,21 @@ func (s *Store) OpenPart(name string) (*PartFile, error) {
 	if err := s.ensureDir(); err != nil {
 		return nil, err
 	}
+	dir := s.Dir()
 	for attempt := 0; attempt < 64; attempt++ {
 		suffix, err := randHex(4)
 		if err != nil {
 			return nil, err
 		}
-		path := filepath.Join(s.dir, name+partSuffixMarker+suffix)
+		path := filepath.Join(dir, name+partSuffixMarker+suffix)
 		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, filePerm)
 		if err != nil {
 			if os.IsExist(err) {
 				continue // virtually impossible; retry with a new suffix
 			}
-			return nil, fmt.Errorf("transfer: cannot create temporary file in %s: %w", s.dir, err)
+			return nil, fmt.Errorf("transfer: cannot create temporary file in %s: %w", dir, err)
 		}
-		return &PartFile{store: s, f: f, path: path, name: name, finalDir: s.dir}, nil
+		return &PartFile{store: s, f: f, path: path, name: name, finalDir: dir}, nil
 	}
 
 	return nil, errors.New("transfer: could not allocate a unique temporary file after 64 attempts")
@@ -165,9 +191,10 @@ func (s *Store) AllocateFolderRoot(raw string) (string, error) {
 	if err := s.ensureDir(); err != nil {
 		return "", err
 	}
+	dir := s.Dir()
 	for n := 0; n < commitVariants; n++ {
 		candidate := variantName(root, n)
-		path := filepath.Join(s.dir, candidate)
+		path := filepath.Join(dir, candidate)
 		if !s.withinDir(path) {
 			return "", fmt.Errorf("transfer: refusing folder root outside receive directory")
 		}
@@ -193,7 +220,7 @@ func (s *Store) DiscardFolderRoot(raw string) error {
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(s.dir, root)
+	path := filepath.Join(s.Dir(), root)
 	if !s.withinDir(path) {
 		return fmt.Errorf("transfer: refusing folder root outside receive directory")
 	}
@@ -220,7 +247,7 @@ func (s *Store) OpenPartPath(root, relativePath string) (*PartFile, error) {
 	}
 	name := filepath.Base(filepath.FromSlash(relativePath))
 	dirPart := filepath.Dir(filepath.FromSlash(relativePath))
-	base := filepath.Join(s.dir, root)
+	base := filepath.Join(s.Dir(), root)
 	if !s.withinDir(base) {
 		return nil, fmt.Errorf("transfer: refusing folder root outside receive directory")
 	}

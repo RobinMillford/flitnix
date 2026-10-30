@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Share with Flitnix - GNOME Files (Nautilus) script
+# Passes selected files and folders, or current folder if none selected.
+
+if [ "$#" -gt 0 ]; then
+    exec flitnix "$@"
+elif [ -n "${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-}" ]; then
+    mapfile -t paths <<< "${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS}"
+    exec flitnix "${paths[@]}"
+elif [ -n "${NAUTILUS_SCRIPT_CURRENT_URI:-}" ]; then
+    exec flitnix "${NAUTILUS_SCRIPT_CURRENT_URI}"
+else
+    exec flitnix
+fi
