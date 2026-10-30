@@ -6,7 +6,7 @@ on:
       - 'v*.*.*'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-linux:
@@ -36,8 +36,8 @@ jobs:
 
       - name: Install Wails CLI & nfpm
         run: |
-          go install github.com/wailsapp/wails/v2/cmd/wails@latest
-          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+          go install github.com/wailsapp/wails/v2/cmd/wails@v2.17.0
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.48.0
 
       - name: Build frontend
         run: |
@@ -60,9 +60,11 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           RPM="artifacts/flitnix_${VERSION}_linux_amd64.rpm"
           DEB="artifacts/flitnix_${VERSION}_linux_amd64.deb"
+          TAR="artifacts/flitnix_${VERSION}_linux_amd64.tar.gz"
 
           test -f "$RPM"
           test -f "$DEB"
+          test -f "$TAR"
 
           RPM_VERSION="$(rpm -qp --qf '%{VERSION}' "$RPM")"
           test "$RPM_VERSION" = "$VERSION" || {
@@ -79,7 +81,7 @@ jobs:
               ;;
           esac
 
-          echo "Package metadata verified: RPM=$RPM_VERSION DEB=$DEB_VERSION"
+          echo "Package metadata verified: RPM=$RPM_VERSION DEB=$DEB_VERSION TAR=$(basename "$TAR")"
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
@@ -110,7 +112,7 @@ jobs:
 
       - name: Install Wails CLI
         run: |
-          go install github.com/wailsapp/wails/v2/cmd/wails@latest
+          go install github.com/wailsapp/wails/v2/cmd/wails@v2.17.0
 
       - name: Install NSIS
         shell: powershell
@@ -227,7 +229,7 @@ jobs:
 
       - name: Install Wails CLI
         run: |
-          go install github.com/wailsapp/wails/v2/cmd/wails@latest
+          go install github.com/wailsapp/wails/v2/cmd/wails@v2.17.0
 
       - name: Build frontend
         run: |
@@ -235,27 +237,59 @@ jobs:
           npm ci
           npm run build
 
-      - name: Build macOS App
+      - name: Build macOS Universal App
         run: |
-          wails build
+          wails build -platform darwin/universal
 
-      - name: Package macOS artifacts
+      - name: Package and verify macOS universal artifacts
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           mkdir -p artifacts
 
           # Find app bundle (whether Flitnix.app or flitnix.app)
-          APP_DIR=$(ls -d build/bin/*.app | head -n 1)
-          if [ -z "${APP_DIR}" ]; then
+          APP_DIR=$(ls -d build/bin/*.app 2>/dev/null | head -n 1)
+          if [ -z "${APP_DIR}" ] || [ ! -d "${APP_DIR}" ]; then
             echo "Error: macOS .app bundle not found in build/bin!" >&2
             exit 1
           fi
+          echo "Found app bundle: ${APP_DIR}"
+
+          # Locate executable inside Contents/MacOS
+          APP_EXEC=$(find "${APP_DIR}/Contents/MacOS" -type f -perm +111 2>/dev/null | head -n 1)
+          if [ -z "${APP_EXEC}" ] || [ ! -f "${APP_EXEC}" ]; then
+            echo "Error: Executable not found in ${APP_DIR}/Contents/MacOS!" >&2
+            exit 1
+          fi
+
+          echo "Inspecting architecture with lipo:"
+          LIPO_OUTPUT="$(lipo -info "${APP_EXEC}")"
+          echo "${LIPO_OUTPUT}"
+
+          # Verify universal binary contains both x86_64 (amd64) and arm64
+          if ! echo "${LIPO_OUTPUT}" | grep -q "x86_64" || ! echo "${LIPO_OUTPUT}" | grep -q "arm64"; then
+            echo "Error: Executable ${APP_EXEC} is not universal! Both x86_64 and arm64 architectures are required." >&2
+            exit 1
+          fi
+          echo "Universal binary architecture verified: x86_64 and arm64 present."
 
           # Create DMG
-          hdiutil create -volname "Flitnix" -srcfolder "${APP_DIR}" -ov -format UDZO "artifacts/flitnix_${VERSION}_macOS_universal.dmg"
+          DMG_NAME="artifacts/flitnix_${VERSION}_macOS_universal.dmg"
+          hdiutil create -volname "Flitnix" -srcfolder "${APP_DIR}" -ov -format UDZO "${DMG_NAME}"
+          test -f "${DMG_NAME}" || {
+            echo "Error: DMG artifact ${DMG_NAME} was not created!" >&2
+            exit 1
+          }
 
           # Create ZIP
-          ditto -c -k --sequesterRsrc --keepParent "${APP_DIR}" "artifacts/flitnix_${VERSION}_macOS_universal.zip"
+          ZIP_NAME="artifacts/flitnix_${VERSION}_macOS_universal.zip"
+          ditto -c -k --sequesterRsrc --keepParent "${APP_DIR}" "${ZIP_NAME}"
+          test -f "${ZIP_NAME}" || {
+            echo "Error: ZIP artifact ${ZIP_NAME} was not created!" >&2
+            exit 1
+          }
+
+          echo "macOS artifacts created and verified:"
+          ls -lh "${DMG_NAME}" "${ZIP_NAME}"
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
@@ -306,6 +340,10 @@ jobs:
         run: |
           cd release-assets
           sha256sum flitnix_* > SHA256SUMS.txt
+          test -s SHA256SUMS.txt || {
+            echo "Error: SHA256SUMS.txt is missing or empty!" >&2
+            exit 1
+          }
           echo "Generated SHA256SUMS.txt:"
           cat SHA256SUMS.txt
 
