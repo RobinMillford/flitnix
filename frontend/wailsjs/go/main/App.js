@@ -246,6 +246,10 @@ export function SetDeviceAutoApprove(arg1, arg2) {
   return window['go']['main']['App']['SetDeviceAutoApprove'](arg1, arg2);
 }
 
+export function SleepInhibition() {
+  return window['go']['main']['App']['SleepInhibition']();
+}
+
 export function StartGuestRoom(arg1, arg2) {
   return window['go']['main']['App']['StartGuestRoom'](arg1, arg2);
 }

@@ -111,7 +111,11 @@ func createDownloadGrant(svcs *Services, grants *DownloadGrantStore) http.Handle
 			if source, ok := svcs.Registry.GetSource(id); ok {
 				planned := archiveSource{Kind: source.Kind, Name: source.Name, Items: source.Items, Empty: source.EmptyDirs}
 				if source.Kind == transfer.SourceKindFile && len(source.Items) == 1 {
-					planned.File = transfer.SharedFile{ID: source.ID, Name: source.Name, Path: source.Items[0].Path, Size: source.Items[0].Size}
+					if f, ok := svcs.Registry.Get(source.ID); ok {
+						planned.File = f
+					} else {
+						planned.File = transfer.SharedFile{ID: source.ID, Name: source.Name, Path: source.Items[0].Path, Size: source.Items[0].Size}
+					}
 				}
 				sources = append(sources, planned)
 			} else if file, ok := svcs.Registry.Get(id); ok {
@@ -655,37 +659,89 @@ func abortResponse() { panic(http.ErrAbortHandler) }
 
 func serveArchiveDownload(svcs *Services, grants *DownloadGrantStore, stall time.Duration) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Only GET redeems a grant. HEAD (or a probe) must not consume the
-		// one-use grant the real navigation needs.
-		if r.Method != http.MethodGet {
-			w.Header().Set("Allow", http.MethodGet)
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		cookie, err := r.Cookie(grantCookieName)
-		if err != nil {
-			http.Error(w, "download unavailable", http.StatusUnauthorized)
-			return
-		}
-		grant, progress, err := grants.redeem(r.PathValue("id"), cookie.Value)
-		if err != nil {
-			switch {
-			case errors.Is(err, errGrantExpired):
-				http.Error(w, "download expired", http.StatusGone)
-			case errors.Is(err, errGrantBusy):
-				http.Error(w, "another download is active", http.StatusConflict)
-			case errors.Is(err, errGrantSession):
-				http.Error(w, "session ended", http.StatusUnauthorized)
-			default:
-				http.Error(w, "download unavailable", http.StatusForbidden)
+		grantID := r.PathValue("id")
+		contCookieName := continuationCookiePrefix + grantID
+		var grant downloadGrant
+		var progress *archiveProgress
+		var err error
+		var isContinuation bool
+
+		// Check for resource-specific continuation authorization first
+		contCookie, cErr := r.Cookie(contCookieName)
+		if cErr == nil && contCookie.Value != "" {
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				w.Header().Set("Allow", "GET, HEAD")
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
 			}
-			return
+			grant, progress, err = grants.authorizeContinuation(grantID, contCookie.Value)
+			if err != nil {
+				switch {
+				case errors.Is(err, errGrantExpired):
+					http.Error(w, "download expired", http.StatusGone)
+				case errors.Is(err, errGrantSession):
+					http.Error(w, "session ended", http.StatusUnauthorized)
+				default:
+					http.Error(w, "download unavailable", http.StatusForbidden)
+				}
+				return
+			}
+			isContinuation = true
+			defer grants.finishStream(grantID)
+		} else {
+			// Initial grant redemption path: only GET can consume single-use initial grant
+			if r.Method != http.MethodGet {
+				w.Header().Set("Allow", http.MethodGet)
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			cookie, gErr := r.Cookie(grantCookieName)
+			if gErr != nil {
+				http.Error(w, "download unavailable", http.StatusUnauthorized)
+				return
+			}
+			grant, progress, err = grants.redeem(grantID, cookie.Value)
+			if err != nil {
+				switch {
+				case errors.Is(err, errGrantExpired):
+					http.Error(w, "download expired", http.StatusGone)
+				case errors.Is(err, errGrantBusy):
+					http.Error(w, "another download is active", http.StatusConflict)
+				case errors.Is(err, errGrantSession):
+					http.Error(w, "session ended", http.StatusUnauthorized)
+				default:
+					http.Error(w, "download unavailable", http.StatusForbidden)
+				}
+				return
+			}
+			defer grants.finish(grant)
+			defer grants.finishStream(grantID)
+
+			// Issue resource-specific continuation cookie on successful initial redemption
+			if grant.ContinuationTicket != "" {
+				http.SetCookie(w, &http.Cookie{
+					Name:     contCookieName,
+					Value:    grant.ContinuationTicket,
+					Path:     "/api/downloads/" + grantID,
+					MaxAge:   int(continuationMaxAge.Seconds()),
+					HttpOnly: true,
+					SameSite: http.SameSiteStrictMode,
+					Secure:   r.TLS != nil,
+				})
+			}
 		}
-		defer grants.finish(grant)
-		// The stream is an authenticated transfer: pin the session so idle
-		// expiry cannot cut it, and restart the idle window when it ends.
+
+		// Pin session during stream
 		grant.Sess.Begin()
 		defer grant.Sess.End()
+		if svcs.Inhibitor != nil {
+			pLease, pErr := svcs.Inhibitor.Acquire("Downloading " + grant.Filename)
+			if pErr != nil && svcs.Diagnose != nil {
+				svcs.Diagnose("power inhibitor acquire failed: %v", pErr)
+			} else if pLease != nil {
+				defer pLease.Release()
+			}
+		}
 
 		out := failWriter{&stallWriter{w: w, rc: http.NewResponseController(w), stall: stall}}
 		h := w.Header()
@@ -693,19 +749,15 @@ func serveArchiveDownload(svcs *Services, grants *DownloadGrantStore, stall time
 		h.Set("Cache-Control", "no-store")
 		h.Set("X-Type-Options", "nosniff")
 		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("Accept-Ranges", "none")
 
-		started := true
-		if !grant.Archive {
-			if svcs.Downloads != nil {
-				svcs.Downloads.Begin(grant.DownloadID)
-			}
-			started, err = streamSingleFile(r.Context(), w, out, grant, progress)
-			if err != nil && !started {
-				finishProgressWithDigest(progress, err, "")
-			}
-		} else {
+		if grant.Archive || len(grant.Entries) != 1 {
+			// Tier 3: Dynamic ZIP archive
+			h.Set("Accept-Ranges", "none")
 			h.Set("Content-Type", "application/zip")
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
 			h.Set("Trailer", "Content-Digest, X-Content-SHA256")
 			w.WriteHeader(http.StatusOK)
 
@@ -723,6 +775,75 @@ func serveArchiveDownload(svcs *Services, grants *DownloadGrantStore, stall time
 			} else {
 				finishProgressWithDigest(progress, err, "")
 			}
+			if err != nil {
+				abortResponse()
+			}
+			return
+		}
+
+		// Single-file download: open source
+		entry := grant.Entries[0]
+		f, info, err := openTrustedSource(entry.Path)
+		if err != nil {
+			http.Error(w, "source unavailable", http.StatusGone)
+			finishProgressWithDigest(progress, err, "")
+			return
+		}
+		defer f.Close()
+
+		if info.Size() != entry.Size {
+			http.Error(w, "source changed", http.StatusGone)
+			finishProgressWithDigest(progress, errSourceChanged, "")
+			return
+		}
+
+		if svcs.Downloads != nil && !isContinuation {
+			svcs.Downloads.Begin(grant.DownloadID)
+		}
+
+		// Tier 1: Verified content SHA-256 AND genuine OS-enforced immutability
+		isImmutable := false
+		if grant.SHA256 != "" {
+			if grants != nil && grants.hasContinuationLock(grantID) {
+				isImmutable = true
+			} else {
+				var lock io.Closer
+				isImmutable, lock = isOSImmutable(f, entry.Path)
+				if isImmutable && lock != nil && grants != nil {
+					grants.attachContinuationLock(grantID, lock)
+				}
+			}
+		}
+
+		if isImmutable {
+			h.Set("ETag", fmt.Sprintf("\"sha256-%s\"", grant.SHA256))
+			h.Set("Accept-Ranges", "bytes")
+			contentType := mime.TypeByExtension(filepath.Ext(grant.Filename))
+			if contentType == "" {
+				contentType = "application/octet-stream"
+			}
+			h.Set("Content-Type", contentType)
+
+			seeker := &progressSeeker{
+				r:     f,
+				ctx:   r.Context(),
+				sess:  grant.Sess,
+				p:     progress,
+				total: info.Size(),
+			}
+			http.ServeContent(w, r, grant.Filename, info.ModTime(), seeker)
+			seeker.flush()
+			if seeker.read == info.Size() {
+				finishProgressWithDigest(progress, nil, grant.SHA256)
+			}
+			return
+		}
+
+		// Tier 2: Ordinary mutable file - bypass http.ServeContent, explicitly ignore Range/If-Range
+		h.Set("Accept-Ranges", "none")
+		started, err := streamSingleFileWithHandle(r.Context(), r.Method, w, out, grant, progress, f, info.Size())
+		if err != nil && !started {
+			finishProgressWithDigest(progress, err, "")
 		}
 		if err != nil && started {
 			abortResponse()
@@ -730,10 +851,57 @@ func serveArchiveDownload(svcs *Services, grants *DownloadGrantStore, stall time
 	}
 }
 
-// streamSingleFile serves one regular file with a Content-Length so a short
-// body is detectable by the browser. started reports whether the status line
-// was committed; when false an error response was already sent and the
-// connection can end normally.
+type progressSeeker struct {
+	r     *os.File
+	ctx   context.Context
+	sess  *session.Session
+	p     *archiveProgress
+	total int64
+	read  int64
+	last  time.Time
+}
+
+func (s *progressSeeker) Read(p []byte) (n int, err error) {
+	if s.ctx != nil && s.ctx.Err() != nil {
+		return 0, s.ctx.Err()
+	}
+	if s.sess != nil && s.sess.Status() != session.StatusActive {
+		return 0, errDownloadSession
+	}
+	n, err = s.r.Read(p)
+	if n > 0 {
+		s.read += int64(n)
+		now := time.Now()
+		if s.p != nil && (s.read%progressFlushBytes < int64(n) || now.Sub(s.last) >= progressFlushEvery) {
+			s.last = now
+			s.p.mu.Lock()
+			s.p.Processed = s.read
+			s.p.Updated = now
+			if s.p.downloads != nil {
+				s.p.downloads.Progress(s.p.downloadID, s.read)
+			}
+			s.p.mu.Unlock()
+		}
+	}
+	return n, err
+}
+
+func (s *progressSeeker) Seek(offset int64, whence int) (int64, error) {
+	return s.r.Seek(offset, whence)
+}
+
+func (s *progressSeeker) flush() {
+	if s.p != nil {
+		s.p.mu.Lock()
+		s.p.Processed = s.read
+		s.p.Updated = time.Now()
+		if s.p.downloads != nil {
+			s.p.downloads.Progress(s.p.downloadID, s.read)
+		}
+		s.p.mu.Unlock()
+	}
+}
+
 func streamSingleFile(ctx context.Context, w http.ResponseWriter, out io.Writer, grant downloadGrant, progress *archiveProgress) (started bool, err error) {
 	entry := grant.Entries[0]
 	f, info, err := openTrustedSource(entry.Path)
@@ -746,11 +914,19 @@ func streamSingleFile(ctx context.Context, w http.ResponseWriter, out io.Writer,
 		http.Error(w, "source changed", http.StatusGone)
 		return false, errSourceChanged
 	}
-	size := info.Size()
+	return streamSingleFileWithHandle(ctx, http.MethodGet, w, out, grant, progress, f, info.Size())
+}
 
+// streamSingleFileWithHandle serves one regular file with a Content-Length so a short
+// body is detectable by the browser. It bypasses http.ServeContent and ignores Range headers.
+func streamSingleFileWithHandle(ctx context.Context, method string, w http.ResponseWriter, out io.Writer, grant downloadGrant, progress *archiveProgress, f *os.File, size int64) (started bool, err error) {
 	h := w.Header()
 	h.Set("Content-Type", "application/octet-stream")
 	h.Set("Content-Length", strconv.FormatInt(size, 10))
+	if method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return true, nil
+	}
 	h.Set("Trailer", "Content-Digest, X-Content-SHA256")
 	w.WriteHeader(http.StatusOK)
 

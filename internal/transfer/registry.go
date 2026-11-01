@@ -33,12 +33,14 @@ var (
 // Content-Disposition's sanitized filename) and the name never doubles as a
 // filesystem lookup key.
 type SharedFile struct {
-	ID      string    // opaque ID for /api/files/{id}/download
-	Name    string    // sanitized display name
-	Size    int64     // regular-file size in bytes
-	Path    string    // absolute local path; never sent to the phone
-	Session string    // owning session's non-secret key ("" while desktop-owned)
-	Created time.Time // when the file was registered
+	ID        string    // opaque ID for /api/files/{id}/download
+	Name      string    // sanitized display name
+	Size      int64     // regular-file size in bytes
+	Path      string    // absolute local path; never sent to the phone
+	Session   string    // owning session's non-secret key ("" while desktop-owned)
+	Created   time.Time // when the file was registered
+	SHA256    string    // verified content SHA-256 hex if immutable
+	Immutable bool      // true if file is known to be immutable
 }
 
 // Registry keeps the files currently shared with phones. All methods are
@@ -97,6 +99,21 @@ func (r *Registry) Add(path, rawName, sessionKey string) (SharedFile, error) {
 	}
 	r.files[id] = sf
 	r.order = append(r.order, id)
+	return sf, nil
+}
+
+// AddImmutable registers a file whose content is verified and guaranteed
+// immutable by OS enforcement (e.g. chattr +i, read-only mount, or CAS repo).
+func (r *Registry) AddImmutable(path, rawName, sessionKey, sha256Hex string) (SharedFile, error) {
+	sf, err := r.Add(path, rawName, sessionKey)
+	if err != nil {
+		return SharedFile{}, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	sf.SHA256 = sha256Hex
+	sf.Immutable = true
+	r.files[sf.ID] = sf
 	return sf, nil
 }
 

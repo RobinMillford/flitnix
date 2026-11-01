@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/itsyamin/flitnix/internal/client"
+	"github.com/itsyamin/flitnix/internal/power"
 	"github.com/itsyamin/flitnix/internal/transfer"
 	"github.com/mattn/go-isatty"
 )
@@ -282,6 +283,8 @@ func runSendCLIWithStdin(args []string, stdin *os.File, stdout, stderr io.Writer
 	tracker := client.NewSpeedTracker()
 	results := make([]client.ItemResult, 0, len(approvedView.Items))
 	var totalTransferred int64
+	inhibitor := power.New()
+	defer inhibitor.Close()
 
 	for i, item := range approvedView.Items {
 		select {
@@ -304,9 +307,13 @@ func runSendCLIWithStdin(args []string, stdin *os.File, stdout, stderr io.Writer
 			fmt.Fprintf(stdout, "[%d/%d] %s (%s)... ", i+1, len(approvedView.Items), fileName, client.FormatBytes(item.DeclaredSize))
 		}
 
+		pLease, _ := inhibitor.Acquire("Sending " + fileName)
 		res, streamErr := cli.StreamItem(ctx, approvedView.ID, item.ID, localItem.Path, func(written, total int64) {
 			tracker.Update(totalTransferred + written)
 		})
+		if pLease != nil {
+			pLease.Release()
+		}
 
 		if streamErr != nil {
 			if !*quiet && !*jsonOutput {

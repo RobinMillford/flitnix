@@ -611,3 +611,17 @@ func TestSessionViewJSONShape(t *testing.T) {
 		}
 	}
 }
+
+func TestApp_SleepInhibition(t *testing.T) {
+	a := newTestApp(t)
+	defer a.shutdown(context.Background())
+
+	st := a.SleepInhibition()
+	// On Linux host, D-Bus system bus is supported or reports clean status
+	if st.Active {
+		t.Errorf("sleep inhibition unexpectedly active without transfers: %+v", st)
+	}
+	if st.Holders != 0 {
+		t.Errorf("expected 0 holders, got %d", st.Holders)
+	}
+}

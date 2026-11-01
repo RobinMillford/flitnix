@@ -84,6 +84,206 @@
   var activeBatch = null;
 
   // ------------------------------------------------------------------
+  // Screen Wake Lock & Background Awareness
+  // ------------------------------------------------------------------
+  var awarenessBanner = document.getElementById("awareness-banner");
+  var awarenessBannerText = document.getElementById("awareness-banner-text");
+  var awarenessBannerClose = document.getElementById("awareness-banner-close");
+  var wakeLockBadge = document.getElementById("wake-lock-badge");
+  var wakeLockContainer = document.getElementById("wake-lock-container");
+  var bannerTimer = null;
+
+  var isWakeLockSupported = !!(window.isSecureContext && navigator.wakeLock && typeof navigator.wakeLock.request === "function");
+  var userWakeLockRequested = false;
+  var wakeLockSentinel = null;
+  var wakeLockAcquiring = false;
+  var wasBackgroundedDuringTransfer = false;
+  var activeDownloads = {};
+  var activeDownloadPolls = {};
+
+  function showAwarenessBanner(msg) {
+    if (!awarenessBanner || !awarenessBannerText) return;
+    if (bannerTimer) { clearTimeout(bannerTimer); bannerTimer = null; }
+    awarenessBannerText.textContent = msg;
+    awarenessBanner.hidden = false;
+    bannerTimer = setTimeout(function () {
+      if (awarenessBanner) awarenessBanner.hidden = true;
+      bannerTimer = null;
+    }, 7000);
+  }
+
+  function hideAwarenessBanner() {
+    if (bannerTimer) { clearTimeout(bannerTimer); bannerTimer = null; }
+    if (awarenessBanner) awarenessBanner.hidden = true;
+  }
+
+  if (awarenessBannerClose) {
+    awarenessBannerClose.addEventListener("click", hideAwarenessBanner);
+  }
+
+  function hasActiveTransfers() {
+    if (appState.ended) return false;
+    if (pumpBusy) return true;
+    if (activeBatch && activeBatch.jobs && activeBatch.jobs.some(function (j) {
+      return !j.removed && (j.phase === "declaring" || j.phase === "waiting" || j.phase === "sending" || j.phase === "canceling");
+    })) return true;
+    if (queue && queue.some(function (j) {
+      return !j.removed && (j.phase === "queued" || j.phase === "declaring" || j.phase === "waiting" || j.phase === "sending" || j.phase === "canceling");
+    })) return true;
+    for (var k in activeDownloads) {
+      if (activeDownloads.hasOwnProperty(k) && activeDownloads[k]) return true;
+    }
+    return false;
+  }
+
+  function updateAwarenessUI() {
+    if (!wakeLockBadge || !wakeLockContainer) return;
+
+    if (!isWakeLockSupported) {
+      wakeLockBadge.textContent = "Best-effort";
+      wakeLockBadge.className = "badge badge--waiting";
+      wakeLockContainer.innerHTML = '<p class="wake-lock-unsupported"><span aria-hidden="true">🔒</span> Screen wake lock requires HTTPS or localhost and is unavailable on this local HTTP connection. Keep this tab open and visible during transfers.</p>';
+      return;
+    }
+
+    var cb = document.getElementById("wake-lock-cb");
+    if (!cb) {
+      wakeLockContainer.innerHTML = [
+        '<label class="wake-lock-label" for="wake-lock-cb">',
+        '  <input type="checkbox" id="wake-lock-cb">',
+        '  <span>Keep screen awake during transfer</span>',
+        '</label>',
+        '<p class="wake-lock-note">Prevents display timeout while transfers are active. Uses more battery. Transfers may still pause if the browser is backgrounded.</p>'
+      ].join("");
+      cb = document.getElementById("wake-lock-cb");
+      if (cb) {
+        cb.checked = userWakeLockRequested;
+        cb.addEventListener("change", function () {
+          userWakeLockRequested = !!cb.checked;
+          syncWakeLock();
+        });
+      }
+    } else {
+      cb.checked = userWakeLockRequested;
+    }
+
+    var active = wakeLockSentinel !== null && !wakeLockSentinel.released;
+    var transfersActive = hasActiveTransfers();
+
+    if (active) {
+      wakeLockBadge.textContent = "Screen wake active";
+      wakeLockBadge.className = "badge badge--approved";
+    } else if (userWakeLockRequested) {
+      if (wakeLockAcquiring) {
+        wakeLockBadge.textContent = "Acquiring wake lock…";
+        wakeLockBadge.className = "badge badge--uploading";
+      } else {
+        wakeLockBadge.textContent = "Screen wake standby";
+        wakeLockBadge.className = "badge badge--waiting";
+      }
+    } else {
+      if (transfersActive) {
+        wakeLockBadge.textContent = "Active transfer";
+        wakeLockBadge.className = "badge badge--uploading";
+      } else {
+        wakeLockBadge.textContent = "Idle";
+        wakeLockBadge.className = "badge badge--waiting";
+      }
+    }
+  }
+
+  function acquireWakeLock() {
+    if (!isWakeLockSupported || !userWakeLockRequested) return;
+    if (wakeLockSentinel !== null || wakeLockAcquiring) return;
+    if (document.visibilityState !== "visible") return;
+    if (!hasActiveTransfers()) return;
+
+    wakeLockAcquiring = true;
+    updateAwarenessUI();
+
+    navigator.wakeLock.request("screen").then(function (sentinel) {
+      wakeLockAcquiring = false;
+      wakeLockSentinel = sentinel;
+      sentinel.addEventListener("release", function () {
+        wakeLockSentinel = null;
+        updateAwarenessUI();
+      });
+      updateAwarenessUI();
+    }).catch(function (err) {
+      wakeLockAcquiring = false;
+      wakeLockSentinel = null;
+      if (window.console && typeof window.console.warn === "function") {
+        window.console.warn("Screen wake lock request failed:", err);
+      }
+      updateAwarenessUI();
+    });
+  }
+
+  function releaseWakeLock() {
+    if (wakeLockSentinel !== null) {
+      var s = wakeLockSentinel;
+      wakeLockSentinel = null;
+      try { s.release(); } catch (err) {}
+    }
+    updateAwarenessUI();
+  }
+
+  function syncWakeLock() {
+    if (!isWakeLockSupported) {
+      updateAwarenessUI();
+      return;
+    }
+    if (userWakeLockRequested && hasActiveTransfers() && document.visibilityState === "visible") {
+      acquireWakeLock();
+    } else {
+      if (wakeLockSentinel !== null) {
+        releaseWakeLock();
+      } else {
+        updateAwarenessUI();
+      }
+    }
+  }
+
+  function reconcileActiveTransfers() {
+    if (activeBatch && !appState.ended) {
+      if (activeBatch.timer) {
+        clearTimeout(activeBatch.timer);
+        activeBatch.timer = null;
+      }
+      pollBatch();
+    }
+    for (var pid in activeDownloadPolls) {
+      if (activeDownloadPolls.hasOwnProperty(pid) && typeof activeDownloadPolls[pid] === "function") {
+        try { activeDownloadPolls[pid](); } catch (e) {}
+      }
+    }
+    if (!appState.ended) {
+      refreshFiles();
+    }
+  }
+
+  function onVisibilityChange() {
+    if (document.visibilityState === "hidden") {
+      if (hasActiveTransfers()) {
+        wasBackgroundedDuringTransfer = true;
+        if (window.console && typeof window.console.info === "function") {
+          window.console.info("Flitnix: browser page moved to background during transfer");
+        }
+      }
+    } else if (document.visibilityState === "visible") {
+      if (wasBackgroundedDuringTransfer) {
+        wasBackgroundedDuringTransfer = false;
+        showAwarenessBanner("Flitnix was moved to the background. Transfer status has been refreshed.");
+        reconcileActiveTransfers();
+      }
+      syncWakeLock();
+    }
+    updateAwarenessUI();
+  }
+
+  document.addEventListener("visibilitychange", onVisibilityChange);
+
+  // ------------------------------------------------------------------
   // Small helpers
   // ------------------------------------------------------------------
   function el(tag, className, text) {
@@ -380,11 +580,13 @@
         setStatus("warning", "Firefox may pause during very large uploads. Keep this page visible; Chrome or Chromium is a temporary alternative if it stalls.");
       }
     });
+    syncWakeLock();
     pump();
   }
 
   function teardownJobs() {
     if (textPollTimer) { clearInterval(textPollTimer); textPollTimer = null; }
+    releaseWakeLock();
     queue.forEach(function (job) {
       job.removed = true;
       if (job.timer) { clearTimeout(job.timer); job.timer = null; }
@@ -399,6 +601,7 @@
     var i = queue.indexOf(job);
     if (i >= 0) queue.splice(i, 1);
     if (job.el && job.el.parentNode) job.el.parentNode.removeChild(job.el);
+    syncWakeLock();
     // If the removed job was the blocker, let the queue advance.
     if (!pumpBusy && !appState.ended) pump();
   }
@@ -424,11 +627,16 @@
       job.cancelRequested = true;
       job.phase = "canceling";
       paint(job);
-      // An active PUT is deliberately not aborted here: the server orders the
-      // cancel against publication itself, so it either releases the lease and
-      // aborts the sink, or answers 409 because the bytes were already
-      // published. Aborting first could surface as a stream failure and end
-      // the whole batch; the DELETE's answer is the only authority.
+      if (job.resumableSession && typeof job.resumableSession.cancel === "function") {
+        job.resumableSession.cancel(function (res) {
+          if (res && res.cancelled) {
+            cancelJob(job);
+          } else {
+            refreshBatchAfterCancel();
+          }
+        });
+        return;
+      }
       cancelDeclaredItem(job, 1);
       return;
     }
@@ -583,6 +791,7 @@
         throw new Error("The desktop gave an unexpected batch reply");
       }
       activeBatch = { id: batch.id, jobs: jobs, failures: 0, timer: null };
+      syncWakeLock();
       var cancels = [];
       batch.items.forEach(function (item, index) {
         var job = jobs[index];
@@ -623,6 +832,7 @@
         paint(job);
       });
       pumpBusy = false;
+      syncWakeLock();
     });
   }
 
@@ -714,10 +924,10 @@
           if (job.phase === "waiting") job.phase = "queued";
           paint(job);
         });
-        activeBatch = null; pumpBusy = false; pump(); return;
+        activeBatch = null; pumpBusy = false; syncWakeLock(); pump(); return;
       }
       if (batch.approvalState === "rejected" || batch.state === "rejected") {
-        activeBatch = null; pumpBusy = false; pump(); return;
+        activeBatch = null; pumpBusy = false; syncWakeLock(); pump(); return;
       }
       // Uploads are strictly FIFO across the batch. The head job — the first
       // row that is not terminal — decides what happens next: a canceling
@@ -733,7 +943,7 @@
         break;
       }
       if (!head) {
-        activeBatch = null; pumpBusy = false; pump(); return;
+        activeBatch = null; pumpBusy = false; syncWakeLock(); pump(); return;
       }
       if (head.phase === "canceling") { watchBatch(); return; }
       if (head.phase === "waiting" &&
@@ -754,6 +964,7 @@
           paint(job);
         });
         activeBatch = null; pumpBusy = false;
+        syncWakeLock();
         return;
       }
       // Anything else (network drop, timeout, 5xx) is transient. Keep the
@@ -766,8 +977,76 @@
     });
   }
 
+  function streamBatchItemResumable(job) {
+    if (typeof FlitnixResumable === "undefined") {
+      return putBatchContent(job);
+    }
+    return new Promise(function (resolve, reject) {
+      var tusURL = "/api/batches/" + encodeURIComponent(job.batchID) +
+                   "/items/" + encodeURIComponent(job.itemID) + "/tus";
+      var completeURL = "/api/batches/" + encodeURIComponent(job.batchID) +
+                        "/items/" + encodeURIComponent(job.itemID) + "/complete";
+      var statusURL = "/api/batches/" + encodeURIComponent(job.batchID) +
+                      "/items/" + encodeURIComponent(job.itemID) + "/status";
+      var transferID = "batch-" + job.batchID + "-" + job.itemID;
+
+      // Ensure tus upload is created on server
+      api(tusURL, {
+        method: "POST",
+        headers: {
+          "Tus-Resumable": "1.0.0",
+          "Upload-Length": String(job.size)
+        }
+      }).then(function () {
+        var engine = new FlitnixResumable.ResumableUploadEngine();
+        job.resumableSession = engine.startUpload({
+          transferId: transferID,
+          file: job.file,
+          uploadUrl: tusURL,
+          completeUrl: completeURL,
+          statusUrl: statusURL,
+          authHeader: "Bearer " + token,
+          type: "personal"
+        }, {
+          onProgress: function (p) {
+            job.uploaded = p.uploaded;
+            job.speed = p.speed || 0;
+            job.eta = p.eta || 0;
+            paint(job);
+          },
+          onRebuildProgress: function (p) {
+            job.err = "Rebuilding prefix (" + fmtBytes(p.hashed) + " / " + fmtBytes(p.total) + ")…";
+            paint(job);
+          },
+          onReconnecting: function (r) {
+            job.err = "Reconnecting (attempt " + r.attempt + "/" + r.maxRetries + ")…";
+            paint(job);
+          },
+          onComplete: function () {
+            job.resumableSession = null;
+            resolve();
+          },
+          onAborted: function () {
+            job.resumableSession = null;
+            reject({ aborted: true });
+          },
+          onError: function (err) {
+            job.resumableSession = null;
+            reject(err);
+          }
+        });
+      }).catch(function (err) {
+        reject(err);
+      });
+    });
+  }
+
   function sendBatchItem(job) {
-    putBatchContent(job).then(function () {
+    var transferPromise = (typeof FlitnixResumable !== "undefined")
+      ? streamBatchItemResumable(job)
+      : putBatchContent(job);
+
+    transferPromise.then(function () {
       if (job.phase === "done" || job.phase === "canceled") return;
       job.phase = "done"; job.err = null; paint(job);
       watchBatch();
@@ -793,6 +1072,7 @@
       });
       paint(job);
       activeBatch = null; pumpBusy = false;
+      syncWakeLock();
     });
   }
 
@@ -1098,6 +1378,9 @@
       }
       return res.json().then(function (grant) {
         if (!grant || !grant.downloadUrl) throw new Error("The desktop returned an invalid download grant.");
+        var dlKey = grant.progressId || grant.downloadUrl;
+        activeDownloads[dlKey] = true;
+        syncWakeLock();
         var card = renderDownloadIntegrityCard(grant, sources, btn);
 
         // Check if browser supports showSaveFilePicker in secure context
@@ -1118,6 +1401,8 @@
                   return reader.read().then(function (result) {
                     if (result.done) {
                       return writable.close().then(function () {
+                        delete activeDownloads[dlKey];
+                        syncWakeLock();
                         if (card) card.setBadge("Verifying…", "badge--verifying");
                         var checkDigest = grant.sha256;
                         function verifyStream() {
@@ -1170,6 +1455,8 @@
           }).catch(function (e) {
             // User cancelled picker or browser refused stream -> fall back to native download
             if (e && e.name === "AbortError") {
+              delete activeDownloads[dlKey];
+              syncWakeLock();
               if (card) {
                 card.setBadge("Canceled", "badge--canceled");
                 card.setMessage("Download save prompt was canceled.");
@@ -1235,12 +1522,18 @@
   // with a bounded backoff instead of abandoning the watch.
   function watchDownloadProgress(id, grant, card, sources, btn) {
     var failures = 0;
+    activeDownloads[id] = true;
+    activeDownloadPolls[id] = tick;
+    syncWakeLock();
     function tick() {
       if (appState.ended) return;
       api("/api/download-progress/" + encodeURIComponent(id)).then(function (p) {
         failures = 0;
         setReconnecting(false, "download");
         if (p.state === "failed" || p.state === "expired") {
+          delete activeDownloads[id];
+          delete activeDownloadPolls[id];
+          syncWakeLock();
           removeDownloadFrame(id);
           if (card) {
             card.setBadge("Canceled or interrupted", "badge--canceled");
@@ -1258,6 +1551,9 @@
           return;
         }
         if (p.state === "completed") {
+          delete activeDownloads[id];
+          delete activeDownloadPolls[id];
+          syncWakeLock();
           removeDownloadFrame(id);
           if (card && grant) {
             var finalDigest = (p && p.sha256) || grant.sha256;
@@ -1286,9 +1582,17 @@
         setTimeout(tick, PROGRESS_POLL_MS);
       }).catch(function (err) {
         if (appState.ended || (err && err.silent)) return;
-        if (err && err.status === 404) return; // record already cleaned up
+        if (err && err.status === 404) {
+          delete activeDownloads[id];
+          delete activeDownloadPolls[id];
+          syncWakeLock();
+          return; // record already cleaned up
+        }
         failures += 1;
         if (failures >= MAX_PROGRESS_FAILURES) {
+          delete activeDownloads[id];
+          delete activeDownloadPolls[id];
+          syncWakeLock();
           setReconnecting(false, "download");
           return;
         }
@@ -1504,6 +1808,7 @@
     // the first API call (fresh sessions die if they were revoked already).
     setStatus("ready", "Connected — pick files to send or download the shared ones");
     flowEl.hidden = false;
+    updateAwarenessUI();
     refreshFiles();
     initQuickText();
     scheduleTextPoll();

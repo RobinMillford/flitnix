@@ -91,7 +91,13 @@ func newRouter(services *Services, stall, downloadStall time.Duration, grants *D
 		// endpoint set without a live session either way.
 		api := newAPIMux(services, stall, grants)
 		mux.Handle("/api/", requireSession(services, api.ServeHTTP))
-		mux.HandleFunc("GET /api/downloads/{id}/content", serveArchiveDownload(services, grants, downloadStall))
+		downloadHandler := serveArchiveDownload(services, grants, downloadStall)
+		mux.HandleFunc("GET /api/downloads/{id}", downloadHandler)
+		mux.HandleFunc("HEAD /api/downloads/{id}", downloadHandler)
+		mux.HandleFunc("GET /api/downloads/{id}/content", downloadHandler)
+		mux.HandleFunc("HEAD /api/downloads/{id}/content", downloadHandler)
+		mux.HandleFunc("GET /api/archive-downloads/{id}", downloadHandler)
+		mux.HandleFunc("HEAD /api/archive-downloads/{id}", downloadHandler)
 
 		if services.GuestManager != nil {
 			guestAPI := newGuestAPIMux(services, stall)
@@ -299,6 +305,15 @@ func newAPIMux(services *Services, stall time.Duration, grants *DownloadGrantSto
 	mux.HandleFunc("GET /api/batches/{id}", handleBatchStatus(services))
 	mux.HandleFunc("DELETE /api/batches/{id}/items/{itemID}", handleBatchItemCancel(services))
 	mux.HandleFunc("PUT /api/batches/{batchID}/items/{itemID}/content", handleBatchContent(services, stall))
+
+	// Resumable upload endpoints (tus 1.0.0 & application lifecycle)
+	mux.HandleFunc("OPTIONS /api/batches/{batchID}/items/{itemID}/tus", handleBatchTusOptions())
+	mux.HandleFunc("POST /api/batches/{batchID}/items/{itemID}/tus", handleBatchTusCreate(services))
+	mux.HandleFunc("HEAD /api/batches/{batchID}/items/{itemID}/tus", handleBatchTusHead(services))
+	mux.HandleFunc("PATCH /api/batches/{batchID}/items/{itemID}/tus", handleBatchTusPatch(services, stall))
+	mux.HandleFunc("DELETE /api/batches/{batchID}/items/{itemID}/tus", handleBatchTusDelete(services))
+	mux.HandleFunc("POST /api/batches/{batchID}/items/{itemID}/complete", handleBatchComplete(services))
+	mux.HandleFunc("GET /api/batches/{batchID}/items/{itemID}/status", handleBatchItemStatus(services))
 	mux.HandleFunc("GET /api/files", serveFilesList(services))
 	mux.HandleFunc("GET /api/files/{id}/download", serveFileDownload(services, stall))
 	mux.HandleFunc("GET /api/sources", serveSourcesList(services))
@@ -747,6 +762,14 @@ func handleUploadContent(svcs *Services, stall time.Duration) http.HandlerFunc {
 		}
 		sess.Begin()
 		defer sess.End()
+		if svcs.Inhibitor != nil {
+			pLease, pErr := svcs.Inhibitor.Acquire("Receiving upload " + id)
+			if pErr != nil {
+				diagnose(svcs, "power inhibitor acquire failed: %v", pErr)
+			} else if pLease != nil {
+				defer pLease.Release()
+			}
+		}
 		body := &stallBodyReader{
 			ReadCloser: r.Body,
 			rc:         http.NewResponseController(w),
@@ -1084,6 +1107,14 @@ func handleBatchContent(svcs *Services, stall time.Duration) http.HandlerFunc {
 			writeBatchError(w, err)
 			return
 		}
+		if svcs.Inhibitor != nil {
+			pLease, pErr := svcs.Inhibitor.Acquire(fmt.Sprintf("Receiving item %s in batch %s", itemID, batchID))
+			if pErr != nil {
+				diagnose(svcs, "power inhibitor acquire failed: %v", pErr)
+			} else if pLease != nil {
+				defer pLease.Release()
+			}
+		}
 		body := &stallBodyReader{ReadCloser: r.Body, rc: http.NewResponseController(w), stall: stall}
 		start := time.Now()
 		// Quarter marks of large streams are the only mid-stream
@@ -1283,6 +1314,14 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 			}
 			downloadID = dl.ID
 			svcs.Downloads.Begin(downloadID)
+		}
+		if svcs.Inhibitor != nil {
+			pLease, pErr := svcs.Inhibitor.Acquire("Downloading " + sf.Name)
+			if pErr != nil {
+				diagnose(svcs, "power inhibitor acquire failed: %v", pErr)
+			} else if pLease != nil {
+				defer pLease.Release()
+			}
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
