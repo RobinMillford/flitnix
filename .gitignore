@@ -5,7 +5,6 @@
 /release-assets/
 cmd/flitnix-serve/flitnix-serve
 flitnix
-
 # Frontend dependencies and output
 node_modules/
 */node_modules/
@@ -50,3 +49,7 @@ benchmarks/phase2_baseline_results.json
 benchmarks/regression_benchmark_results.json
 benchmarks/*_results.json
 !benchmarks/benchmark_results.json
+
+# Local transfer staging directories.
+/.flitnix-tmp/
+**/.flitnix-tmp/
