@@ -6,6 +6,7 @@ import {devices} from '../models';
 import {audit} from '../models';
 import {netenv} from '../models';
 import {doctor} from '../models';
+import {power} from '../models';
 
 export function AddDroppedSources(arg1:Array<string>):Promise<Array<main.SharedSourceView>>;
 
@@ -128,6 +129,8 @@ export function ServerAddress():Promise<string>;
 export function SessionQR(arg1:string):Promise<string>;
 
 export function SetDeviceAutoApprove(arg1:string,arg2:boolean):Promise<void>;
+
+export function SleepInhibition():Promise<power.Status>;
 
 export function StartGuestRoom(arg1:string,arg2:number):Promise<main.GuestRoomView>;
 

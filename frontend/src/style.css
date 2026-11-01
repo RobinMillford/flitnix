@@ -1357,6 +1357,63 @@ select option {
   color: var(--text-tertiary);
 }
 
+/* Desktop Sleep Inhibition Notice in Telemetry */
+.sleep-inhibition-notice {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  border-radius: 10px;
+  background: var(--surface-secondary);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--primary);
+}
+
+.sleep-inhibition-notice.warning {
+  border-color: rgba(245, 158, 11, 0.4);
+  border-left-color: var(--warning-border);
+  background: rgba(245, 158, 11, 0.05);
+}
+
+.sleep-inhibition-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sleep-inhibition-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.sleep-inhibition-badge.active {
+  color: var(--primary);
+}
+
+.sleep-inhibition-badge.warning {
+  color: var(--warning-text);
+}
+
+.sleep-inhibition-holders {
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+  font-weight: 500;
+}
+
+.sleep-inhibition-desc {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
 /* History Rows */
 .history-row {
   display: flex;

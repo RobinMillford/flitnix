@@ -66,6 +66,7 @@ import (
 	"github.com/itsyamin/flitnix/internal/audit"
 	"github.com/itsyamin/flitnix/internal/devices"
 	"github.com/itsyamin/flitnix/internal/guest"
+	"github.com/itsyamin/flitnix/internal/power"
 	"github.com/itsyamin/flitnix/internal/session"
 	"github.com/itsyamin/flitnix/internal/textmsg"
 	"github.com/itsyamin/flitnix/internal/transfer"
@@ -147,6 +148,8 @@ type Services struct {
 	Devices        *devices.Store
 	HostIdentity   *devices.HostIdentity
 	Pairing        *devices.PairingCoordinator
+	Inhibitor      power.Inhibitor
+	Resumable      *transfer.ResumableManager
 	OnPhoneContact func(source string)
 
 	// OnBatchPending, when non-nil, receives notice of a newly declared batch
@@ -167,6 +170,23 @@ func (s *Services) RecordContact(source string) {
 	if s != nil && s.OnPhoneContact != nil {
 		s.OnPhoneContact(source)
 	}
+}
+
+// EnsureResumable ensures that ResumableManager is initialized if Transfers is configured.
+func (s *Services) EnsureResumable() *transfer.ResumableManager {
+	if s == nil {
+		return nil
+	}
+	if s.Resumable != nil {
+		return s.Resumable
+	}
+	if s.Transfers != nil && s.Transfers.Store() != nil {
+		store := s.Transfers.Store()
+		quota := transfer.NewQuotaManager(store.Dir(), transfer.DefaultSafetyMargin, transfer.DefaultMaxConcurrentPerSession)
+		s.Resumable = transfer.NewResumableManager(store, quota)
+		return s.Resumable
+	}
+	return nil
 }
 
 // normalize fills in zero-value defaults.
@@ -239,6 +259,9 @@ func New(cfg Config) *Server {
 // Handler returns the router the server runs. Exposed for tests and for
 // later integration into other infrastructure.
 func (s *Server) Handler() http.Handler { return s.handler }
+
+// Services exposes the configured Services bundle.
+func (s *Server) Services() *Services { return s.cfg.Services }
 
 // Serve binds the configured address, then serves HTTP until ctx is
 // cancelled (graceful drain) or the accept loop fails. It must be called at

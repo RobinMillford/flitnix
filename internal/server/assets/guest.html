@@ -148,6 +148,12 @@
     <span class="status__text" id="status-text">Connecting to Guest Drop Box…</span>
   </section>
 
+  <aside class="awareness-banner" id="awareness-banner" hidden role="status" aria-live="polite">
+    <span class="awareness-banner__icon" aria-hidden="true">ℹ</span>
+    <span class="awareness-banner__text" id="awareness-banner-text"></span>
+    <button type="button" class="awareness-banner__close" id="awareness-banner-close" aria-label="Dismiss">&times;</button>
+  </aside>
+
   <!-- Step 0: Missing QR Secret -->
   <section class="card card--warn" id="rescan-view" hidden>
     <h2>Scan the Guest QR code</h2>
@@ -187,6 +193,17 @@
 
   <!-- Step 4: Approved & Upload Area -->
   <section class="flow" id="upload-view" hidden>
+    <section class="card awareness-card" id="awareness-card">
+      <div class="awareness-card__header">
+        <h2 class="awareness-card__title">Background & Screen</h2>
+        <span class="badge badge--waiting" id="wake-lock-badge">Best-effort</span>
+      </div>
+      <p class="awareness-card__desc">
+        Mobile browsers throttle or pause transfers when the screen turns off or another app is opened. Keep this tab open for best reliability.
+      </p>
+      <div class="awareness-card__control" id="wake-lock-container"></div>
+    </section>
+
     <section class="panel">
       <div class="panel__head">
         <h2>Drop Files Here</h2>
@@ -219,6 +236,8 @@
   </footer>
 
 </main>
+<script src="/static/sha256.min.js"></script>
+<script src="/static/resumable-client.js"></script>
 <script src="/static/guest.js"></script>
 </body>
 </html>
