@@ -124,7 +124,7 @@ func collectEnvironment(artifactsDir string) (EnvironmentManifest, error) {
 		NodeVersion:    strings.TrimSpace(string(nodeBytes)),
 		// `wails version` appends sponsor/ANSI output after the version line;
 		// keep only the first line so generated reports stay clean markdown.
-		WailsVersion: strings.TrimSpace(strings.SplitN(string(wailsBytes), "\n", 2)[0]),
+		WailsVersion:   strings.TrimSpace(strings.SplitN(string(wailsBytes), "\n", 2)[0]),
 		BrowserVersion: strings.TrimSpace(string(firefoxBytes)),
 		WiFiInterface:  wifiIface,
 		WiFiSSID:       wifiSSID,

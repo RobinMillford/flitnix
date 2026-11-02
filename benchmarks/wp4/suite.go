@@ -45,46 +45,46 @@ type BenchmarkRunResult struct {
 }
 
 type RecoveryRunResult struct {
-	RunID               string  `json:"run_id"`
-	PayloadSize         int64   `json:"payload_size"`
-	PayloadName         string  `json:"payload_name"`
-	InterruptPercent    int     `json:"interrupt_percent"`
-	InterruptOffset     int64   `json:"interrupt_offset"`
-	InterruptClientErr  string  `json:"interrupt_client_error"`
+	RunID              string `json:"run_id"`
+	PayloadSize        int64  `json:"payload_size"`
+	PayloadName        string `json:"payload_name"`
+	InterruptPercent   int    `json:"interrupt_percent"`
+	InterruptOffset    int64  `json:"interrupt_offset"`
+	InterruptClientErr string `json:"interrupt_client_error"`
 	// Genuine-interruption evidence. The interrupted request declares the FULL
 	// upload length while its body supplies only InterruptOffset bytes, so the
 	// server must observe a truncated HTTP request, not a complete partial tus
 	// PATCH. These fields record what the server actually saw afterwards.
-	InterruptDeclaredLength int64  `json:"interrupt_declared_length"`
-	InterruptBytesSent      int64  `json:"interrupt_bytes_sent"`
-	InterruptServerStatus   int    `json:"interrupt_server_status"`
-	InterruptServerOffset   int64  `json:"interrupt_server_offset_header"`
-	InterruptedState        string `json:"interrupted_state"`
-	ServerSawTruncation     bool   `json:"server_saw_truncation"`
-	SettleObservations      int    `json:"settle_observations"`
-	PrefixDigestServer      string `json:"prefix_digest_server"`
-	PrefixDigestLocal       string `json:"prefix_digest_local"`
-	SettleWaitMs        float64 `json:"settle_wait_ms"`
-	ServerCommitted     int64   `json:"server_committed"`
-	DetectTimeMs        float64 `json:"detect_time_ms"`
-	ReconnectTimeMs     float64 `json:"reconnect_time_ms"`
-	HeadTimeMs          float64 `json:"head_time_ms"`
-	PrefixRebuildMs     float64 `json:"prefix_rebuild_ms"`
-	PrefixVerifyMs      float64 `json:"prefix_verify_ms"`
-	PrefixVerified      bool    `json:"prefix_verified"`
-	ResumeStartOffset   int64   `json:"resume_start_offset"`
-	ResumeAttempts      int     `json:"resume_attempts"`
-	FirstResumedByteMs  float64 `json:"first_resumed_byte_ms"`
-	ResumeStreamTimeMs  float64 `json:"resume_stream_time_ms"`
-	FinalOffset         int64   `json:"final_offset"`
-	UploadState         string  `json:"upload_state"`
-	TotalCompletionMs   float64 `json:"total_completion_ms"`
-	RetransmittedBytes  int64   `json:"retransmitted_bytes"`
-	AuthoritativeStatus string  `json:"authoritative_status"`
-	IsolatedSession     bool    `json:"isolated_session"`
-	IntegrityPass       bool    `json:"integrity_pass"`
-	Valid               bool    `json:"valid"`
-	Notes               string  `json:"notes"`
+	InterruptDeclaredLength int64   `json:"interrupt_declared_length"`
+	InterruptBytesSent      int64   `json:"interrupt_bytes_sent"`
+	InterruptServerStatus   int     `json:"interrupt_server_status"`
+	InterruptServerOffset   int64   `json:"interrupt_server_offset_header"`
+	InterruptedState        string  `json:"interrupted_state"`
+	ServerSawTruncation     bool    `json:"server_saw_truncation"`
+	SettleObservations      int     `json:"settle_observations"`
+	PrefixDigestServer      string  `json:"prefix_digest_server"`
+	PrefixDigestLocal       string  `json:"prefix_digest_local"`
+	SettleWaitMs            float64 `json:"settle_wait_ms"`
+	ServerCommitted         int64   `json:"server_committed"`
+	DetectTimeMs            float64 `json:"detect_time_ms"`
+	ReconnectTimeMs         float64 `json:"reconnect_time_ms"`
+	HeadTimeMs              float64 `json:"head_time_ms"`
+	PrefixRebuildMs         float64 `json:"prefix_rebuild_ms"`
+	PrefixVerifyMs          float64 `json:"prefix_verify_ms"`
+	PrefixVerified          bool    `json:"prefix_verified"`
+	ResumeStartOffset       int64   `json:"resume_start_offset"`
+	ResumeAttempts          int     `json:"resume_attempts"`
+	FirstResumedByteMs      float64 `json:"first_resumed_byte_ms"`
+	ResumeStreamTimeMs      float64 `json:"resume_stream_time_ms"`
+	FinalOffset             int64   `json:"final_offset"`
+	UploadState             string  `json:"upload_state"`
+	TotalCompletionMs       float64 `json:"total_completion_ms"`
+	RetransmittedBytes      int64   `json:"retransmitted_bytes"`
+	AuthoritativeStatus     string  `json:"authoritative_status"`
+	IsolatedSession         bool    `json:"isolated_session"`
+	IntegrityPass           bool    `json:"integrity_pass"`
+	Valid                   bool    `json:"valid"`
+	Notes                   string  `json:"notes"`
 }
 
 type BenchHarness struct {

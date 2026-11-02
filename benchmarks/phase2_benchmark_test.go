@@ -149,6 +149,13 @@ func getPhase2Median(runs []Phase2Metrics) Phase2Metrics {
 	return sorted[len(sorted)/2]
 }
 
+// createTestPayload materialises a payload of exactly the requested size.
+//
+// The benchmarks measure byte counts, streaming and hashing, none of which
+// depend on the *content* of the payload, so the file is created sparse. This
+// preserves the large-file coverage (including the 2 GiB case) without
+// consuming gigabytes of the test machine's disk quota, which previously
+// caused unrelated tests to fail with "disk quota exceeded".
 func createTestPayload(path string, size int64) {
 	if fi, err := os.Stat(path); err == nil && fi.Size() == size {
 		return
@@ -159,22 +166,8 @@ func createTestPayload(path string, size int64) {
 		panic(err)
 	}
 	defer f.Close()
-
-	chunk := make([]byte, 256*1024)
-	for i := range chunk {
-		chunk[i] = byte((i * 41) & 0xff)
-	}
-
-	var written int64
-	for written < size {
-		toWrite := int64(len(chunk))
-		if size-written < toWrite {
-			toWrite = size - written
-		}
-		if _, err := f.Write(chunk[:toWrite]); err != nil {
-			panic(err)
-		}
-		written += toWrite
+	if err := f.Truncate(size); err != nil {
+		panic(err)
 	}
 }
 
