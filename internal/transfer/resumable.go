@@ -43,6 +43,11 @@ var (
 	// ErrUploadExpired indicates the upload has exceeded its expiration window.
 	ErrUploadExpired = errors.New("transfer: upload expired")
 
+	// ErrPartialMissing indicates the staged .part file went missing while committed
+	// metadata still records bytes. The committed prefix is unrecoverable and the
+	// upload must restart from zero (HTTP 410 Gone).
+	ErrPartialMissing = errors.New("transfer: staged part file missing for committed offset")
+
 	// ErrInvalidState indicates the upload is not in a valid state for the requested operation.
 	ErrInvalidState = errors.New("transfer: invalid upload state")
 
@@ -110,6 +115,11 @@ type ResumableMeta struct {
 	UpdatedAt       time.Time        `json:"updatedAt"`
 	ExpiresAt       time.Time        `json:"expiresAt"`
 	FinalPath       string           `json:"finalPath,omitempty"`
+
+	// QuarantineReason records why startup reconciliation refused to expose
+	// this upload. A quarantined upload is never publishable and never
+	// reports successful recovery; its bytes are preserved, not adopted.
+	QuarantineReason string `json:"quarantineReason,omitempty"`
 }
 
 // PublicationRecord is recorded in .flitnix-tmp/.published-<transferId>.json before atomic rename.
@@ -179,6 +189,15 @@ type ResumableManager struct {
 	stopCleaner        chan struct{}
 	checkSameFs        func(path1, path2 string) (bool, error)
 	fsHooks            resumableFsHooks
+
+	// recoveryMu guards the one-shot staging recovery so the constructor's
+	// pass and the explicit startup-recovery pass cannot interleave.
+	recoveryMu sync.Mutex
+	recovered  bool
+
+	// startupErr latches a failed staging recovery. It is never discarded: the
+	// explicit startup recovery returns it and refuses readiness.
+	startupErr error
 }
 
 // NewResumableManager initializes the resumable upload manager.
@@ -197,8 +216,12 @@ func NewResumableManager(store *Store, quota *QuotaManager) *ResumableManager {
 		checkSameFs:        sameFilesystem,
 	}
 
-	// Recover existing staging uploads
-	_ = rm.RecoverOnStartup()
+	// Recover existing staging uploads. A failure is retained, not discarded:
+	// the explicit startup recovery calls RecoverOnStartup and refuses
+	// readiness when it returns a non-nil error.
+	if err := rm.RecoverOnStartup(); err != nil {
+		rm.startupErr = err
+	}
 
 	// Start background cleanup worker for expired uploads
 	go rm.cleanupLoop()
@@ -612,7 +635,27 @@ func (rm *ResumableManager) IngestStream(transferID string, clientOffset int64, 
 		return meta.CommittedOffset, meta.State, ErrOffsetMismatch
 	}
 
+	// Expiration enforcement: once the TTL window has passed the upload is no longer
+	// resumable. A zero ExpiresAt disables enforcement (uploads created outside
+	// CreateUpload are never expired).
+	if !meta.ExpiresAt.IsZero() && time.Now().After(meta.ExpiresAt) {
+		return meta.CommittedOffset, meta.State, ErrUploadExpired
+	}
+
 	partPath := rm.partPath(transferID)
+
+	// Missing staged part: with committed bytes on record, OpenFile below would
+	// silently fabricate a sparse hole via O_CREATE. That would corrupt the upload,
+	// so refuse with ErrPartialMissing when a committed prefix exists. A missing
+	// part with zero committed bytes is a legitimate fresh create.
+	if meta.CommittedOffset > 0 {
+		if _, err := os.Stat(partPath); err != nil {
+			if os.IsNotExist(err) {
+				return meta.CommittedOffset, meta.State, ErrPartialMissing
+			}
+			return meta.CommittedOffset, meta.State, fmt.Errorf("transfer: stat part file: %w", err)
+		}
+	}
 
 	// Ensure .part file is open
 	partFile, err := os.OpenFile(partPath, os.O_RDWR|os.O_CREATE, 0o600)
@@ -971,6 +1014,25 @@ func (rm *ResumableManager) CancelUpload(transferID string) error {
 
 // RecoverOnStartup scans the staging directory, restores records, and reconciles state.
 func (rm *ResumableManager) RecoverOnStartup() error {
+	rm.recoveryMu.Lock()
+	defer rm.recoveryMu.Unlock()
+	if rm.startupErr != nil {
+		return rm.startupErr
+	}
+	if rm.recovered {
+		return nil
+	}
+	if err := rm.recoverStaging(); err != nil {
+		rm.startupErr = fmt.Errorf("transfer: staging recovery: %w", err)
+		return rm.startupErr
+	}
+	rm.recovered = true
+	return nil
+}
+
+// recoverStaging is the one-shot scan. Its error is fatal to startup: an
+// unknown staging state must not be served.
+func (rm *ResumableManager) recoverStaging() error {
 	entries, err := os.ReadDir(rm.stagingDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1059,7 +1121,20 @@ func (rm *ResumableManager) RecoverOnStartup() error {
 		// Check if partial file exists
 		pfi, err := os.Stat(partPath)
 		if err != nil {
-			// Part file missing
+			// Part file missing: register the upload anyway so HEAD exposes the
+			// recorded metadata and PATCH fails with ErrPartialMissing (410 Gone)
+			// instead of 404 Not Found. Fresh creates (CommittedOffset == 0) can
+			// still recreate the part file on the next PATCH via O_CREATE.
+			if meta.State == ResumableActive {
+				meta.State = ResumableInterrupted
+				_ = rm.writeDurableMeta(&meta)
+			}
+			upload := &ResumableUpload{
+				meta: meta,
+			}
+			rm.mu.Lock()
+			rm.uploads[meta.TransferID] = upload
+			rm.mu.Unlock()
 			continue
 		}
 
@@ -1095,6 +1170,86 @@ func (rm *ResumableManager) RecoverOnStartup() error {
 	return nil
 }
 
+// Reconcile authorises every restored upload against the trusted durable
+// ledger. authorize must return an error for any upload whose owner, batch,
+// item, approval or destination binding cannot be proven.
+//
+// An upload that fails authorization is quarantined: its metadata is marked
+// failed with the reason, its .part and .meta are renamed aside (preserved,
+// never deleted), it is removed from the live index, and its quota
+// reservation is released. It can never be published and never reports a
+// successful recovery. The function returns how many uploads were
+// quarantined.
+//
+// An upload that cannot be locked is reported as an error: silently skipping
+// it would leave unverified state addressable by a client.
+func (rm *ResumableManager) Reconcile(authorize func(ResumableMeta) error) (int, error) {
+	if authorize == nil {
+		return 0, errors.New("transfer: reconcile requires an authorization function")
+	}
+
+	rm.mu.RLock()
+	ids := make([]string, 0, len(rm.uploads))
+	for id := range rm.uploads {
+		ids = append(ids, id)
+	}
+	rm.mu.RUnlock()
+
+	quarantined := 0
+	for _, id := range ids {
+		upload, ok := rm.GetUpload(id)
+		if !ok {
+			continue
+		}
+		meta := upload.Meta()
+		if err := authorize(meta); err != nil {
+			if qerr := rm.quarantine(id, err); qerr != nil {
+				return quarantined, qerr
+			}
+			quarantined++
+		}
+	}
+	return quarantined, nil
+}
+
+// quarantine isolates one upload whose durable identity cannot be trusted.
+func (rm *ResumableManager) quarantine(transferID string, reason error) error {
+	upload, ok := rm.GetUpload(transferID)
+	if !ok {
+		return nil
+	}
+	if !upload.TryLock() {
+		return fmt.Errorf("transfer: upload %s is busy and cannot be quarantined", transferID)
+	}
+	defer upload.Unlock()
+
+	upload.UpdateMeta(func(m *ResumableMeta) {
+		m.State = ResumableFailed
+		m.QuarantineReason = reason.Error()
+		m.UpdatedAt = time.Now()
+	})
+	meta := upload.Meta()
+
+	// Preserve the record of why even if the live file cannot be rewritten.
+	_ = rm.writeDurableMeta(&meta)
+
+	stamp := fmt.Sprintf(".quarantine-%d", time.Now().UTC().UnixNano())
+	if err := os.Rename(rm.metaPath(transferID), rm.metaPath(transferID)+stamp); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("transfer: quarantine metadata for %s: %w", transferID, err)
+	}
+	if err := os.Rename(rm.partPath(transferID), rm.partPath(transferID)+stamp); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("transfer: quarantine payload for %s: %w", transferID, err)
+	}
+
+	rm.mu.Lock()
+	delete(rm.uploads, transferID)
+	rm.mu.Unlock()
+	if rm.quota != nil {
+		rm.quota.Release(transferID)
+	}
+	return nil
+}
+
 // CleanupExpired cleans up uploads that have exceeded the 24-hour TTL.
 func (rm *ResumableManager) CleanupExpired() {
 	rm.mu.RLock()
@@ -1110,7 +1265,8 @@ func (rm *ResumableManager) CleanupExpired() {
 		if !ok {
 			continue
 		}
-		if now.After(upload.Meta().ExpiresAt) {
+		meta := upload.Meta()
+		if !meta.ExpiresAt.IsZero() && now.After(meta.ExpiresAt) {
 			if upload.lifecycleMu.TryLock() {
 				_ = os.Remove(rm.partPath(id))
 				_ = os.Remove(rm.metaPath(id))

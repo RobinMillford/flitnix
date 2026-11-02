@@ -116,6 +116,49 @@ type Config struct {
 	// only a non-secret key and a reason category. It must not block for
 	// long, and it may call back into the Manager.
 	OnEnd func(EndEvent)
+
+	// OnCreate is called before a newly created session becomes active. It
+	// must durably record the session or return an error.
+	OnCreate func(SessionRecord) error
+
+	// OnRevoke, when set, durably records an explicit revocation or an idle
+	// expiry before the session leaves the active set. An error aborts an
+	// explicit revocation (the caller must not observe a success that is not
+	// durable); an error during lazy expiry is retried on the next pass, and
+	// the absolute ExpiresAt already on record still stops a restart from
+	// resurrecting the session.
+	OnRevoke func(SessionRecord) error
+
+	// Verifier derives the durable token verifier. The composition root wires
+	// it to the installation-keyed HMAC-SHA256 from the recovery store, so a
+	// persisted record never contains the raw token and cannot be verified
+	// without the installation key. nil keeps the legacy unkeyed SHA-256
+	// digest, which is correct for an in-memory-only manager but must never
+	// be persisted.
+	Verifier func(token string) [sha256.Size]byte
+}
+
+// SessionRecord is the non-secret state required to restore a session.
+type SessionRecord struct {
+	// SessionID is a stable identity reference. It is not a credential.
+	SessionID string
+
+	// SessionKey is the legacy stable owner key (hex SHA-256 of the token)
+	// that resumable metadata already binds to.
+	SessionKey string
+
+	// Verifier is the installation-keyed HMAC-SHA256 of the token. The raw
+	// token is never part of a record.
+	Verifier [sha256.Size]byte
+
+	// Generation increments on credential rotation or revocation so an old
+	// verifier can be invalidated deliberately.
+	Generation uint64
+
+	Status    Status
+	CreatedAt time.Time
+	ExpiresAt time.Time
+	RevokedAt time.Time
 }
 
 // EndReason categorizes why a session ended. Values are stable identifiers
@@ -162,6 +205,13 @@ type Session struct {
 	token  string // raw token: never log, never persist outside process memory
 	digest [sha256.Size]byte
 
+	// verifier is what durable records hold and what Validate compares. It is
+	// HMAC-SHA256 under the installation key when one is configured.
+	verifier [sha256.Size]byte
+
+	id         string
+	generation uint64
+
 	created    time.Time
 	idle       time.Duration
 	expiresN   atomic.Int64 // unix nanos of the idle deadline
@@ -184,13 +234,49 @@ type Manager struct {
 	onExpire func(key string)
 	expired  []string // keys of freshly expired sessions awaiting OnExpire
 
-	onEnd func(EndEvent)
-	ended []EndEvent // end events awaiting OnEnd, in end order
+	onEnd    func(EndEvent)
+	onCreate func(SessionRecord) error
+	onRevoke func(SessionRecord) error
+	ended    []EndEvent // end events awaiting OnEnd, in end order
+
+	// verifier is immutable after construction, so readers need no lock.
+	verifier func(string) [sha256.Size]byte
+}
+
+// SetCreateHook installs the durable creation hook used by a composition
+// root after restoring an existing manager.
+func (m *Manager) SetCreateHook(hook func(SessionRecord) error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onCreate = hook
+}
+
+// SetRevokeHook installs the durable revocation/expiry sink. A revocation is
+// committed before it is applied; an expiry is committed best effort because
+// the absolute ExpiresAt on record is the authoritative guard.
+func (m *Manager) SetRevokeHook(hook func(SessionRecord) error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onRevoke = hook
+}
+
+// SetVerifier installs the installation-keyed token verifier. It is only
+// legal before any session exists (normally during startup recovery), so a
+// live session can never be interpreted with a different derivation than the
+// record it was restored from.
+func (m *Manager) SetVerifier(fn func(token string) [sha256.Size]byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.active) > 0 {
+		return errors.New("session: cannot change the token verifier while sessions are active")
+	}
+	m.verifier = fn
+	return nil
 }
 
 type histItem struct {
-	digest [sha256.Size]byte
-	status Status
+	verifier [sha256.Size]byte
+	status   Status
 }
 
 // NewManager prepares a session manager. Construction cannot fail.
@@ -208,7 +294,46 @@ func NewManager(cfg Config) *Manager {
 	if now == nil {
 		now = time.Now
 	}
-	return &Manager{idle: cfg.IdleTimeout, max: cfg.MaxSessions, now: now, onExpire: cfg.OnExpire, onEnd: cfg.OnEnd}
+	return &Manager{
+		idle: cfg.IdleTimeout, max: cfg.MaxSessions, now: now,
+		onExpire: cfg.OnExpire, onEnd: cfg.OnEnd, onCreate: cfg.OnCreate,
+		onRevoke: cfg.OnRevoke, verifier: cfg.Verifier,
+	}
+}
+
+// verify derives the lookup value for a presented token: the
+// installation-keyed HMAC when configured, otherwise the legacy digest.
+func (m *Manager) verify(token string) [sha256.Size]byte {
+	if m.verifier != nil {
+		return m.verifier(token)
+	}
+	return digestToken(token)
+}
+
+// newSessionID mints a stable, non-secret session identity.
+func newSessionID() (string, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", fmt.Errorf("session: generating session id: %w", err)
+	}
+	return "sess_" + base64.RawURLEncoding.EncodeToString(raw[:]), nil
+}
+
+// recordFor projects a live session into its durable record.
+func (m *Manager) recordFor(s *Session, status Status) SessionRecord {
+	rec := SessionRecord{
+		SessionID:  s.id,
+		SessionKey: s.Key(),
+		Verifier:   s.verifier,
+		Generation: s.generation,
+		Status:     status,
+		CreatedAt:  s.created,
+		ExpiresAt:  s.ExpiresAt(),
+	}
+	if status == StatusRevoked {
+		rec.RevokedAt = m.now()
+	}
+	return rec
 }
 
 // generateToken returns a fresh URL-safe 256-bit token.
@@ -239,17 +364,90 @@ func (m *Manager) Create() (*Session, error) {
 	if len(m.active) >= m.max {
 		return nil, fmt.Errorf("%w (limit %d)", ErrTooManySessions, m.max)
 	}
+	id, err := newSessionID()
+	if err != nil {
+		return nil, err
+	}
 	now := m.now()
 	s := &Session{
 		token:      tok,
 		digest:     digestToken(tok),
+		verifier:   m.verify(tok),
+		id:         id,
+		generation: 1,
 		created:    now,
 		idle:       m.idle,
 		nowFactory: m.now,
 	}
 	s.expiresN.Store(now.Add(m.idle).UnixNano())
+	if m.onCreate != nil {
+		record := m.recordFor(s, StatusActive)
+		if err := m.onCreate(record); err != nil {
+			return nil, fmt.Errorf("session: persist creation: %w", err)
+		}
+	}
 	m.active = append(m.active, s)
 	return s, nil
+}
+
+// Restore inserts an authenticated session from durable state. The raw token
+// is intentionally not required or stored: Validate derives the
+// installation-keyed verifier and compares it in constant time.
+//
+// Expiry is durable. A record whose ExpiresAt has already passed is not
+// resurrected with a fresh idle window; it is remembered as expired so a
+// presented token still gets ErrExpired rather than ErrInvalid. The same
+// applies to revoked records, which never become active again.
+func (m *Manager) Restore(record SessionRecord) error {
+	if record.SessionID == "" || record.SessionKey == "" || record.Verifier == ([sha256.Size]byte{}) {
+		return errors.New("session: invalid restore record")
+	}
+	keyBytes, err := hex.DecodeString(record.SessionKey)
+	if err != nil || len(keyBytes) != sha256.Size {
+		return errors.New("session: invalid restore session key")
+	}
+	var digest [sha256.Size]byte
+	copy(digest[:], keyBytes)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return ErrClosed
+	}
+
+	switch record.Status {
+	case StatusActive:
+		// fall through to the expiry check below
+	case StatusRevoked:
+		m.hist = append(m.hist, histItem{verifier: record.Verifier, status: StatusRevoked})
+		return nil
+	case StatusExpired:
+		m.hist = append(m.hist, histItem{verifier: record.Verifier, status: StatusExpired})
+		return nil
+	default:
+		return errors.New("session: invalid restore status")
+	}
+
+	if !record.ExpiresAt.IsZero() && !record.ExpiresAt.After(m.now()) {
+		m.hist = append(m.hist, histItem{verifier: record.Verifier, status: StatusExpired})
+		return nil
+	}
+	if len(m.active) >= m.max {
+		return fmt.Errorf("%w (limit %d)", ErrTooManySessions, m.max)
+	}
+
+	s := &Session{
+		digest:     digest,
+		verifier:   record.Verifier,
+		id:         record.SessionID,
+		generation: record.Generation,
+		created:    record.CreatedAt,
+		idle:       m.idle,
+		nowFactory: m.now,
+	}
+	s.expiresN.Store(record.ExpiresAt.UnixNano())
+	m.active = append(m.active, s)
+	return nil
 }
 
 // Validate authenticates a presented token. On success it returns the
@@ -265,7 +463,7 @@ func (m *Manager) Validate(token string) (*Session, error) {
 	if _, err := base64.RawURLEncoding.Strict().DecodeString(token); err != nil {
 		return nil, ErrInvalid
 	}
-	d := digestToken(token)
+	d := m.verify(token)
 
 	defer m.notifyExpired()
 	m.mu.Lock()
@@ -274,7 +472,7 @@ func (m *Manager) Validate(token string) (*Session, error) {
 
 	var found *Session
 	for _, s := range m.active {
-		if subtle.ConstantTimeCompare(d[:], s.digest[:]) == 1 {
+		if subtle.ConstantTimeCompare(d[:], s.verifier[:]) == 1 {
 			found = s
 		}
 	}
@@ -289,7 +487,7 @@ func (m *Manager) Validate(token string) (*Session, error) {
 // the most accurate error for the caller.
 func (m *Manager) histStatus(d [sha256.Size]byte) error {
 	for _, h := range m.hist {
-		if subtle.ConstantTimeCompare(d[:], h.digest[:]) == 1 {
+		if subtle.ConstantTimeCompare(d[:], h.verifier[:]) == 1 {
 			if h.status == StatusExpired {
 				return ErrExpired
 			}
@@ -312,6 +510,13 @@ func (m *Manager) pruneLocked(now time.Time) {
 		}
 	}
 	for _, s := range stale {
+		// Durable expiry is best effort. The absolute ExpiresAt already on
+		// record is what stops a restart from resurrecting the session, so a
+		// failed expiry append must never keep a stale session authorized:
+		// the in-memory session still ends here.
+		if m.onRevoke != nil {
+			_ = m.onRevoke(m.recordFor(s, StatusExpired))
+		}
 		m.endSessionLocked(s, StatusExpired)
 		if m.onExpire != nil {
 			m.expired = append(m.expired, s.Key())
@@ -335,7 +540,7 @@ func (m *Manager) endSessionLocked(s *Session, status Status) {
 			break
 		}
 	}
-	m.hist = append(m.hist, histItem{digest: s.digest, status: status})
+	m.hist = append(m.hist, histItem{verifier: s.verifier, status: status})
 	if len(m.hist) > maxHistory {
 		m.hist = m.hist[len(m.hist)-maxHistory:]
 	}
@@ -343,22 +548,22 @@ func (m *Manager) endSessionLocked(s *Session, status Status) {
 
 // Revoke ends the session identified by the given token. After it returns,
 // the token no longer validates.
+//
+// Revocation is durable: the revocation record (with its bumped generation)
+// is committed before the session leaves the active set, so a success can
+// never be undone by a restart. If the durable write fails the session stays
+// active and the error is returned.
 func (m *Manager) Revoke(token string) error {
 	if len(token) != tokenEncodedLen {
 		return ErrInvalid
 	}
-	d := digestToken(token)
+	d := m.verify(token)
 	defer m.notifyExpired()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, s := range m.active {
-		if subtle.ConstantTimeCompare(d[:], s.digest[:]) == 1 {
-			s.revokedN.Store(time.Now().UnixNano())
-			m.endSessionLocked(s, StatusRevoked)
-			if m.onEnd != nil {
-				m.ended = append(m.ended, EndEvent{Key: s.Key(), Reason: EndRevoked})
-			}
-			return nil
+		if subtle.ConstantTimeCompare(d[:], s.verifier[:]) == 1 {
+			return m.revokeLocked(s)
 		}
 	}
 	return ErrInvalid
@@ -366,23 +571,65 @@ func (m *Manager) Revoke(token string) error {
 
 // RevokeSession ends the given session. After it returns, Validate of the
 // session's token fails.
-func (m *Manager) RevokeSession(s *Session) {
+//
+// The revocation is committed durably first; a durable-write failure is
+// returned and the session stays active, because reporting success for a
+// revocation that a restart would undo is a security boundary violation.
+func (m *Manager) RevokeSession(s *Session) error {
 	if s == nil {
-		return
+		return ErrInvalid
 	}
 	defer m.notifyExpired()
 	m.mu.Lock()
-	s.revokedN.Store(time.Now().UnixNano())
+	defer m.mu.Unlock()
+	return m.revokeLocked(s)
+}
+
+// revokeLocked persists then applies one revocation. Callers hold m.mu.
+func (m *Manager) revokeLocked(s *Session) error {
+	s.generation++
+	if m.onRevoke != nil {
+		if err := m.onRevoke(m.recordFor(s, StatusRevoked)); err != nil {
+			// Roll the generation back so a later retry is not a generation
+			// bump that never reached durable state.
+			s.generation--
+			return fmt.Errorf("session: persist revocation: %w", err)
+		}
+	}
+	s.revokedN.Store(m.now().UnixNano())
 	m.endSessionLocked(s, StatusRevoked)
 	if m.onEnd != nil {
 		m.ended = append(m.ended, EndEvent{Key: s.Key(), Reason: EndRevoked})
 	}
-	m.mu.Unlock()
+	return nil
+}
+
+// Shutdown stops the manager without revoking its sessions.
+//
+// A graceful desktop shutdown must not destroy sessions that are meant to
+// survive a restart: the durable records stay active and the next process
+// restores them. Use Close for an explicit teardown that must end every
+// session.
+func (m *Manager) Shutdown() {
+	defer m.notifyExpired()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return
+	}
+	m.closed = true
+	m.active = nil
 }
 
 // Close revokes every active session and stops the manager. Validate
 // afterwards fails for every previously active token, and Create fails with
 // ErrClosed.
+//
+// Close is an explicit teardown. Graceful application shutdown must call
+// Shutdown instead so that sessions meant to survive a restart are not
+// durably revoked. Any durable revocation error is deliberately swallowed
+// here: Close reports nothing and the in-memory session still ends, which is
+// the failing side of the security boundary.
 func (m *Manager) Close() {
 	defer m.notifyExpired()
 	m.mu.Lock()
@@ -393,7 +640,11 @@ func (m *Manager) Close() {
 	m.closed = true
 	for len(m.active) > 0 {
 		s := m.active[0]
-		s.revokedN.Store(time.Now().UnixNano())
+		s.generation++
+		if m.onRevoke != nil {
+			_ = m.onRevoke(m.recordFor(s, StatusRevoked))
+		}
+		s.revokedN.Store(m.now().UnixNano())
 		m.endSessionLocked(s, StatusRevoked)
 		if m.onEnd != nil {
 			m.ended = append(m.ended, EndEvent{Key: s.Key(), Reason: EndShutdown})
@@ -500,6 +751,12 @@ func (s *Session) Token() string { return s.token }
 // SHA-256 of the token). Transfer records bind to this key instead of
 // propagating the raw token around the system.
 func (s *Session) Key() string { return hex.EncodeToString(s.digest[:]) }
+
+// ID returns the stable session identity reference. It is not a credential.
+func (s *Session) ID() string { return s.id }
+
+// Generation reports the current credential generation.
+func (s *Session) Generation() uint64 { return s.generation }
 
 // Digest returns the raw 32-byte SHA-256 digest of the session token.
 func (s *Session) Digest() [32]byte { return s.digest }

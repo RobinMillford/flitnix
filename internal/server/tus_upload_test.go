@@ -12,12 +12,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/itsyamin/flitnix/internal/guest"
+	"github.com/itsyamin/flitnix/internal/session"
 	"github.com/itsyamin/flitnix/internal/transfer"
 )
 
@@ -2004,5 +2008,1319 @@ func TestTusComplete_RejectsUnapprovedBatch(t *testing.T) {
 			continue // staging infrastructure, not published content
 		}
 		t.Fatalf("rejected batch published files: %v", name)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// WP4 dedicated scenario tests: 5, 7, 9, 16, 17, 18, 20
+//
+// Every test in this block is a SOFTWARE-LEVEL simulation over loopback HTTP.
+// None of them validate physical Wi-Fi interruption, physical Android Chrome,
+// or physical iOS Safari behaviour; those acceptance dimensions remain NOT
+// TESTED pending hardware validation.
+// ---------------------------------------------------------------------------
+
+// patternedPayload generates deterministic pseudo-random-looking test bytes.
+func patternedPayload(size int) []byte {
+	data := make([]byte, size)
+	for i := range data {
+		data[i] = byte((i * 17) % 251)
+	}
+	return data
+}
+
+func sha256Hex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// tusPartPath returns the on-disk staging part file path for a transfer ID.
+func tusPartPath(storeDir, transferID string) string {
+	return filepath.Join(storeDir, transfer.StagingDirName, fmt.Sprintf(".flitnix-part-%s.part", transferID))
+}
+
+// setupGuestServerWithServices mirrors setupTestGuestServer but also returns
+// the *Services so tests can reach the guest chain's ResumableManager (the
+// guest handlers create it lazily via EnsureResumable, so a handle on Services
+// must be primed before any handler runs to share the same instance).
+func setupGuestServerWithServices(t *testing.T) (*httptest.Server, *guest.Manager, *guest.Room, *Services) {
+	t.Helper()
+	tmpDir := t.TempDir()
+
+	guestMgr := guest.NewManager()
+	t.Cleanup(guestMgr.Close)
+
+	room, err := guestMgr.CreateRoom(tmpDir, 1*time.Hour)
+	if err != nil {
+		t.Fatalf("CreateRoom: %v", err)
+	}
+
+	store, err := transfer.NewStore(transfer.StoreConfig{Dir: tmpDir})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	sessMgr := session.NewManager(session.Config{})
+	transfers := transfer.NewService(transfer.Config{Store: store})
+	coord := transfer.NewCoordinator(transfer.CoordinatorConfig{})
+	reg := transfer.NewRegistry()
+	downloads := transfer.NewDownloadRegistry()
+
+	services := &Services{
+		Sessions:     sessMgr,
+		Transfers:    transfers,
+		Coordinator:  coord,
+		Registry:     reg,
+		Downloads:    downloads,
+		GuestManager: guestMgr,
+	}
+
+	grants := newGrantStore(downloads)
+	handler := newRouter(services, 5*time.Second, 5*time.Second, grants)
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+
+	return ts, guestMgr, room, services
+}
+
+// lostPatchResponseTransport implements Scenario 5 at the software level: it
+// lets the inner round trip complete (the server has fully processed the PATCH
+// and synced the final chunk), then records the successful response, discards
+// it, and returns a synthetic transport error to the client — as if the TCP
+// connection dropped right after the server sync. Only PATCH requests with the
+// gate armed are dropped; HEAD and complete pass through untouched.
+type lostPatchResponseTransport struct {
+	base http.RoundTripper
+
+	mu          sync.Mutex
+	dropPatches bool
+	patchCount  int
+	dropped     int
+	lastStatus  int
+	lastOffset  string
+	lastState   string
+}
+
+func (lt *lostPatchResponseTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	lt.mu.Lock()
+	drop := lt.dropPatches && req.Method == http.MethodPatch
+	if req.Method == http.MethodPatch {
+		lt.patchCount++
+	}
+	lt.mu.Unlock()
+
+	resp, err := lt.base.RoundTrip(req)
+	if err != nil {
+		return resp, err
+	}
+	if !drop {
+		return resp, nil
+	}
+
+	lt.mu.Lock()
+	lt.dropped++
+	lt.lastStatus = resp.StatusCode
+	lt.lastOffset = resp.Header.Get("Upload-Offset")
+	lt.lastState = resp.Header.Get("Upload-State")
+	lt.mu.Unlock()
+
+	resp.Body.Close()
+	return nil, errors.New("simulated Scenario 5: connection lost after server synced final chunk")
+}
+
+func (lt *lostPatchResponseTransport) snapshot() (patchCount, dropped, lastStatus int, lastOffset, lastState string) {
+	lt.mu.Lock()
+	defer lt.mu.Unlock()
+	return lt.patchCount, lt.dropped, lt.lastStatus, lt.lastOffset, lt.lastState
+}
+
+func (lt *lostPatchResponseTransport) setDrop(v bool) {
+	lt.mu.Lock()
+	lt.dropPatches = v
+	lt.mu.Unlock()
+}
+
+// TestTusScenario_5_LostPatchResponseAfterServerSync: the server processed the
+// PATCH to 100% (awaiting_digest) but the client lost the response. The client
+// recovers with HEAD, discovers offset == size, and submits the digest — with
+// zero PATCH retransmission.
+func TestTusScenario_5_LostPatchResponseAfterServerSync(t *testing.T) {
+	env := newTestEnv(t)
+	token := env.token()
+	ts := httptest.NewServer(env.srv.Handler())
+	defer ts.Close()
+
+	payload := patternedPayload(16 * 1024)
+	expectedHex := sha256Hex(payload)
+
+	lt := &lostPatchResponseTransport{base: http.DefaultTransport}
+	client := &http.Client{Transport: lt}
+
+	bID, itID := createTestBatch(t, env, ts, token, "scenario5.bin", int64(len(payload)))
+	tusURL := fmt.Sprintf("%s/api/batches/%s/items/%s/tus", ts.URL, bID, itID)
+	completeURL := fmt.Sprintf("%s/api/batches/%s/items/%s/complete", ts.URL, bID, itID)
+
+	// POST -> 201
+	postReq, _ := http.NewRequest(http.MethodPost, tusURL, nil)
+	postReq.Header.Set("Authorization", "Bearer "+token)
+	postReq.Header.Set("Tus-Resumable", "1.0.0")
+	postReq.Header.Set("Upload-Length", strconv.Itoa(len(payload)))
+	postRes, err := client.Do(postReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	postRes.Body.Close()
+	if postRes.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 Created, got %d", postRes.StatusCode)
+	}
+
+	// PATCH with the drop gate armed: the server fully processes the request
+	// (the inner round trip succeeds), but the client observes a transport error.
+	lt.setDrop(true)
+
+	patchReq, _ := http.NewRequest(http.MethodPatch, tusURL, bytes.NewReader(payload))
+	patchReq.Header.Set("Authorization", "Bearer "+token)
+	patchReq.Header.Set("Tus-Resumable", "1.0.0")
+	patchReq.Header.Set("Upload-Offset", "0")
+	patchReq.Header.Set("Content-Type", "application/offset+octet-stream")
+	patchRes, err := client.Do(patchReq)
+	if err == nil {
+		patchRes.Body.Close()
+		t.Fatalf("expected synthetic transport error on gated PATCH, got response %d", patchRes.StatusCode)
+	}
+
+	patchCount, dropped, dropStatus, dropOffset, dropState := lt.snapshot()
+	if dropped != 1 {
+		t.Fatalf("expected exactly 1 discarded response, got %d", dropped)
+	}
+	if patchCount != 1 {
+		t.Fatalf("server processed %d PATCH round trips; want exactly 1 (zero retransmission)", patchCount)
+	}
+	if dropStatus != http.StatusNoContent {
+		t.Fatalf("discarded response status = %d, want 204 (server processed the PATCH fully)", dropStatus)
+	}
+	if dropOffset != strconv.Itoa(len(payload)) {
+		t.Fatalf("discarded Upload-Offset = %q, want full size %d", dropOffset, len(payload))
+	}
+	if dropState != string(transfer.ResumableAwaitingDigest) {
+		t.Fatalf("discarded Upload-State = %q, want %q", dropState, transfer.ResumableAwaitingDigest)
+	}
+
+	// Disarm the gate; HEAD must pass through and reveal full server progress.
+	lt.setDrop(false)
+
+	headReq, _ := http.NewRequest(http.MethodHead, tusURL, nil)
+	headReq.Header.Set("Authorization", "Bearer "+token)
+	headReq.Header.Set("Tus-Resumable", "1.0.0")
+	headRes, err := client.Do(headReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headRes.Body.Close()
+	if headRes.StatusCode != http.StatusOK {
+		t.Fatalf("HEAD recovery: expected 200, got %d", headRes.StatusCode)
+	}
+	if got := headRes.Header.Get("Upload-Offset"); got != strconv.Itoa(len(payload)) {
+		t.Fatalf("HEAD Upload-Offset = %q, want %d", got, len(payload))
+	}
+	if got := headRes.Header.Get("Upload-State"); got != string(transfer.ResumableAwaitingDigest) {
+		t.Fatalf("HEAD Upload-State = %q, want %q", got, transfer.ResumableAwaitingDigest)
+	}
+	// After the full-body commit the EOF checkpoint sets meta.PrefixDigest, so
+	// the exposed prefix digest equals sha256 of the FULL payload.
+	if got := headRes.Header.Get("Upload-Prefix-Digest"); got != expectedHex {
+		t.Fatalf("HEAD Upload-Prefix-Digest = %q, want digest of full payload %q", got, expectedHex)
+	}
+
+	// The client submits the digest directly; no bytes are retransmitted.
+	cBody, _ := json.Marshal(map[string]string{"expectedSHA256": expectedHex})
+	compReq, _ := http.NewRequest(http.MethodPost, completeURL, bytes.NewReader(cBody))
+	compReq.Header.Set("Authorization", "Bearer "+token)
+	compReq.Header.Set("Content-Type", "application/json")
+	compRes, err := client.Do(compReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compRes.Body.Close()
+	if compRes.StatusCode != http.StatusOK {
+		t.Fatalf("complete after HEAD recovery: expected 200, got %d", compRes.StatusCode)
+	}
+
+	if finalPatches, _, _, _, _ := lt.snapshot(); finalPatches != 1 {
+		t.Fatalf("PATCH count after full recovery = %d, want 1 (zero retransmission)", finalPatches)
+	}
+}
+
+// TestTusScenario_7_OffendingOffsetAfterTruncation: a 20 MiB upload dies at
+// 10 MiB (truncated body under a 20 MiB Content-Length); the offending client
+// then PATCHes claiming offset 20 MiB. The server must reject with 409 Conflict
+// and echo its own committed offset 10485760 — no offset advance, no corruption
+// (the resumed upload completes with the digest of the full payload).
+func TestTusScenario_7_OffendingOffsetAfterTruncation(t *testing.T) {
+	env := newTestEnv(t)
+	token := env.token()
+	ts := httptest.NewServer(env.srv.Handler())
+	defer ts.Close()
+
+	const half = int64(10 * 1024 * 1024) // 10 MiB committed before the drop
+	totalSize := 2 * half
+	fullData := patternedPayload(int(totalSize))
+	expectedHex := sha256Hex(fullData)
+
+	bID, itID := createTestBatch(t, env, ts, token, "scenario7.bin", totalSize)
+	tusURL := fmt.Sprintf("%s/api/batches/%s/items/%s/tus", ts.URL, bID, itID)
+	completeURL := fmt.Sprintf("%s/api/batches/%s/items/%s/complete", ts.URL, bID, itID)
+
+	// POST -> 201
+	postReq, _ := http.NewRequest(http.MethodPost, tusURL, nil)
+	postReq.Header.Set("Authorization", "Bearer "+token)
+	postReq.Header.Set("Tus-Resumable", "1.0.0")
+	postReq.Header.Set("Upload-Length", strconv.FormatInt(totalSize, 10))
+	postRes, err := http.DefaultClient.Do(postReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	postRes.Body.Close()
+	if postRes.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 Created, got %d", postRes.StatusCode)
+	}
+
+	// Commit a valid prefix, then deliberately send a wrong offset.
+	truncReq, _ := http.NewRequest(http.MethodPatch, tusURL, bytes.NewReader(fullData[:half]))
+	truncReq.Header.Set("Authorization", "Bearer "+token)
+	truncReq.Header.Set("Tus-Resumable", "1.0.0")
+	truncReq.Header.Set("Upload-Offset", "0")
+	truncReq.Header.Set("Content-Type", "application/offset+octet-stream")
+	truncReq.ContentLength = int64(half)
+	truncRes, err := http.DefaultClient.Do(truncReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	truncRes.Body.Close()
+	if truncRes.StatusCode != http.StatusNoContent {
+		t.Fatalf("prefix PATCH: expected 204, got %d", truncRes.StatusCode)
+	}
+
+	// HEAD confirms the interruption: exactly 10 MiB, state interrupted.
+	headReq, _ := http.NewRequest(http.MethodHead, tusURL, nil)
+	headReq.Header.Set("Authorization", "Bearer "+token)
+	headReq.Header.Set("Tus-Resumable", "1.0.0")
+	headRes, err := http.DefaultClient.Do(headReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headRes.Body.Close()
+	if headRes.StatusCode != http.StatusOK {
+		t.Fatalf("HEAD after truncation: expected 200, got %d", headRes.StatusCode)
+	}
+	if got := headRes.Header.Get("Upload-Offset"); got != strconv.FormatInt(half, 10) {
+		t.Fatalf("HEAD Upload-Offset = %q, want %d", got, half)
+	}
+	if got := headRes.Header.Get("Upload-State"); got != string(transfer.ResumableActive) {
+		t.Fatalf("HEAD Upload-State = %q, want %q", got, transfer.ResumableActive)
+	}
+
+	// Offending PATCH: claims offset 20 MiB with an EMPTY body. Offset
+	// verification happens before any body read, so the server rejects with
+	// 409 Conflict and echoes its own committed offset (no broken pipe risk).
+	badReq, _ := http.NewRequest(http.MethodPatch, tusURL, nil)
+	badReq.Header.Set("Authorization", "Bearer "+token)
+	badReq.Header.Set("Tus-Resumable", "1.0.0")
+	badReq.Header.Set("Upload-Offset", strconv.FormatInt(totalSize, 10))
+	badReq.Header.Set("Content-Type", "application/offset+octet-stream")
+	badRes, err := http.DefaultClient.Do(badReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	badRes.Body.Close()
+	if badRes.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict for offending offset, got %d", badRes.StatusCode)
+	}
+	if got := badRes.Header.Get("Upload-Offset"); got != strconv.FormatInt(half, 10) {
+		t.Fatalf("409 Upload-Offset = %q, want server's committed %d (no advance)", got, half)
+	}
+
+	// HEAD confirms no offset advance.
+	headReq2, _ := http.NewRequest(http.MethodHead, tusURL, nil)
+	headReq2.Header.Set("Authorization", "Bearer "+token)
+	headReq2.Header.Set("Tus-Resumable", "1.0.0")
+	headRes2, err := http.DefaultClient.Do(headReq2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headRes2.Body.Close()
+	if got := headRes2.Header.Get("Upload-Offset"); got != strconv.FormatInt(half, 10) {
+		t.Fatalf("HEAD after offending PATCH = %q, want unchanged %d", got, half)
+	}
+
+	// Correct resume from 10 MiB completes the transfer.
+	resumeReq, _ := http.NewRequest(http.MethodPatch, tusURL, bytes.NewReader(fullData[half:]))
+	resumeReq.Header.Set("Authorization", "Bearer "+token)
+	resumeReq.Header.Set("Tus-Resumable", "1.0.0")
+	resumeReq.Header.Set("Upload-Offset", strconv.FormatInt(half, 10))
+	resumeReq.Header.Set("Content-Type", "application/offset+octet-stream")
+	resumeRes, err := http.DefaultClient.Do(resumeReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumeRes.Body.Close()
+	if resumeRes.StatusCode != http.StatusNoContent {
+		t.Fatalf("resume PATCH: expected 204, got %d", resumeRes.StatusCode)
+	}
+	if got := resumeRes.Header.Get("Upload-Offset"); got != strconv.FormatInt(totalSize, 10) {
+		t.Fatalf("resume Upload-Offset = %q, want %d", got, totalSize)
+	}
+	if got := resumeRes.Header.Get("Upload-State"); got != string(transfer.ResumableAwaitingDigest) {
+		t.Fatalf("resume Upload-State = %q, want %q", got, transfer.ResumableAwaitingDigest)
+	}
+
+	// Complete with the digest of the FULL payload: proves no corruption.
+	cBody, _ := json.Marshal(map[string]string{"expectedSHA256": expectedHex})
+	compReq, _ := http.NewRequest(http.MethodPost, completeURL, bytes.NewReader(cBody))
+	compReq.Header.Set("Authorization", "Bearer "+token)
+	compReq.Header.Set("Content-Type", "application/json")
+	compRes, err := http.DefaultClient.Do(compReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compRes.Body.Close()
+	if compRes.StatusCode != http.StatusOK {
+		t.Fatalf("complete after resume: expected 200 with full-payload digest, got %d", compRes.StatusCode)
+	}
+}
+
+// TestTusScenario_9_PartFileLossRestart: the staged .part file is lost while
+// .meta survives (software-level loss, e.g. rogue cleanup). PATCH must fail
+// with 410 Gone, HEAD must still expose the recorded metadata, and the upload
+// must restart fresh from zero (DELETE -> POST -> PATCH 0) on both the Personal
+// and Guest Drop Box chains.
+func TestTusScenario_9_PartFileLossRestart(t *testing.T) {
+	env := newTestEnv(t)
+	token := env.token()
+	ts := httptest.NewServer(env.srv.Handler())
+	defer ts.Close()
+
+	// ---- Personal chain ----
+	payload := patternedPayload(20 * 1024)
+	expectedHex := sha256Hex(payload)
+	const prefix = 5 * 1024
+
+	bID, itID := createTestBatch(t, env, ts, token, "scenario9.bin", int64(len(payload)))
+	tusURL := fmt.Sprintf("%s/api/batches/%s/items/%s/tus", ts.URL, bID, itID)
+	completeURL := fmt.Sprintf("%s/api/batches/%s/items/%s/complete", ts.URL, bID, itID)
+
+	// POST -> 201
+	postReq, _ := http.NewRequest(http.MethodPost, tusURL, nil)
+	postReq.Header.Set("Authorization", "Bearer "+token)
+	postReq.Header.Set("Tus-Resumable", "1.0.0")
+	postReq.Header.Set("Upload-Length", strconv.Itoa(len(payload)))
+	postRes, err := http.DefaultClient.Do(postReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	postRes.Body.Close()
+	if postRes.StatusCode != http.StatusCreated {
+		t.Fatalf("personal POST: expected 201, got %d", postRes.StatusCode)
+	}
+
+	// PATCH first 5 KB -> 204 (clean EOF partial commit, state active)
+	patchReq, _ := http.NewRequest(http.MethodPatch, tusURL, bytes.NewReader(payload[:prefix]))
+	patchReq.Header.Set("Authorization", "Bearer "+token)
+	patchReq.Header.Set("Tus-Resumable", "1.0.0")
+	patchReq.Header.Set("Upload-Offset", "0")
+	patchReq.Header.Set("Content-Type", "application/offset+octet-stream")
+	patchRes, err := http.DefaultClient.Do(patchReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	patchRes.Body.Close()
+	if patchRes.StatusCode != http.StatusNoContent {
+		t.Fatalf("personal prefix PATCH: expected 204, got %d", patchRes.StatusCode)
+	}
+
+	// Remove the .part file, keep .meta.
+	transferID := personalTransferID(bID, itID)
+	part := tusPartPath(env.store.Dir(), transferID)
+	if _, err := os.Stat(part); err != nil {
+		t.Fatalf("part file must exist before removal: %v", err)
+	}
+	if err := os.Remove(part); err != nil {
+		t.Fatal(err)
+	}
+
+	// PATCH after part loss -> 410 Gone: upload must restart from zero.
+	brokenReq, _ := http.NewRequest(http.MethodPatch, tusURL, bytes.NewReader(payload[prefix:]))
+	brokenReq.Header.Set("Authorization", "Bearer "+token)
+	brokenReq.Header.Set("Tus-Resumable", "1.0.0")
+	brokenReq.Header.Set("Upload-Offset", strconv.FormatInt(prefix, 10))
+	brokenReq.Header.Set("Content-Type", "application/offset+octet-stream")
+	brokenRes, err := http.DefaultClient.Do(brokenReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	brokenRes.Body.Close()
+	if brokenRes.StatusCode != http.StatusGone {
+		t.Fatalf("PATCH after part loss: expected 410 Gone, got %d", brokenRes.StatusCode)
+	}
+
+	// HEAD still exposes the recorded metadata (upload is registered, not 404).
+	headReq, _ := http.NewRequest(http.MethodHead, tusURL, nil)
+	headReq.Header.Set("Authorization", "Bearer "+token)
+	headReq.Header.Set("Tus-Resumable", "1.0.0")
+	headRes, err := http.DefaultClient.Do(headReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headRes.Body.Close()
+	if headRes.StatusCode != http.StatusOK {
+		t.Fatalf("HEAD after part loss: expected 200 (metadata retained), got %d", headRes.StatusCode)
+	}
+
+	// Startup recovery registers missing-part uploads so a restarted server
+	// exposes the same behaviour instead of a bare 404.
+	rm2 := transfer.NewResumableManager(env.store, transfer.NewQuotaManager(env.store.Dir(), transfer.DefaultSafetyMargin, transfer.DefaultMaxConcurrentPerSession))
+	if err := rm2.RecoverOnStartup(); err != nil {
+		t.Fatal(err)
+	}
+	recovered, ok := rm2.GetUpload(transferID)
+	if !ok {
+		t.Fatal("RecoverOnStartup did not register the missing-part upload")
+	}
+	if got := recovered.Meta().CommittedOffset; got != prefix {
+		t.Fatalf("recovered CommittedOffset = %d, want %d", got, prefix)
+	}
+	if got := recovered.Meta().State; got != transfer.ResumableInterrupted {
+		t.Fatalf("recovered state = %q, want %q", got, transfer.ResumableInterrupted)
+	}
+
+	// DELETE the broken transfer -> 204.
+	delReq, _ := http.NewRequest(http.MethodDelete, tusURL, nil)
+	delReq.Header.Set("Authorization", "Bearer "+token)
+	delReq.Header.Set("Tus-Resumable", "1.0.0")
+	delRes, err := http.DefaultClient.Do(delReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delRes.Body.Close()
+	if delRes.StatusCode != http.StatusNoContent {
+		t.Fatalf("DELETE: expected 204, got %d", delRes.StatusCode)
+	}
+
+	// Fresh from zero requires a new approved coordinator item because DELETE
+	// intentionally terminally cancels the original item.
+	bID, itID = createTestBatch(t, env, ts, token, "scenario9-fresh.bin", int64(len(payload)))
+	tusURL = fmt.Sprintf("%s/api/batches/%s/items/%s/tus", ts.URL, bID, itID)
+	completeURL = fmt.Sprintf("%s/api/batches/%s/items/%s/complete", ts.URL, bID, itID)
+	postReq2, _ := http.NewRequest(http.MethodPost, tusURL, nil)
+	postReq2.Header.Set("Authorization", "Bearer "+token)
+	postReq2.Header.Set("Tus-Resumable", "1.0.0")
+	postReq2.Header.Set("Upload-Length", strconv.Itoa(len(payload)))
+	postRes2, err := http.DefaultClient.Do(postReq2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	postRes2.Body.Close()
+	if postRes2.StatusCode != http.StatusCreated {
+		t.Fatalf("fresh POST after DELETE: expected 201, got %d", postRes2.StatusCode)
+	}
+
+	patchReq2, _ := http.NewRequest(http.MethodPatch, tusURL, bytes.NewReader(payload))
+	patchReq2.Header.Set("Authorization", "Bearer "+token)
+	patchReq2.Header.Set("Tus-Resumable", "1.0.0")
+	patchReq2.Header.Set("Upload-Offset", "0")
+	patchReq2.Header.Set("Content-Type", "application/offset+octet-stream")
+	patchRes2, err := http.DefaultClient.Do(patchReq2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	patchRes2.Body.Close()
+	if patchRes2.StatusCode != http.StatusNoContent {
+		t.Fatalf("fresh PATCH 0: expected 204, got %d", patchRes2.StatusCode)
+	}
+
+	cBody, _ := json.Marshal(map[string]string{"expectedSHA256": expectedHex})
+	compReq, _ := http.NewRequest(http.MethodPost, completeURL, bytes.NewReader(cBody))
+	compReq.Header.Set("Authorization", "Bearer "+token)
+	compReq.Header.Set("Content-Type", "application/json")
+	compRes, err := http.DefaultClient.Do(compReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compRes.Body.Close()
+	if compRes.StatusCode != http.StatusOK {
+		t.Fatalf("fresh complete: expected 200, got %d", compRes.StatusCode)
+	}
+
+	// ---- Guest Drop Box chain ----
+	gts, _, groom, gtmp := setupTestGuestServer(t)
+
+	g, err := groom.Join("Cara")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := groom.ApproveGuest(g.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	gup, err := groom.DeclareUpload(g.ID, "scenario9-guest.bin", int64(len(payload)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := groom.ApproveUpload(gup.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	gTusURL := fmt.Sprintf("%s/guest-api/uploads/%s/tus", gts.URL, gup.ID)
+
+	gPostReq, _ := http.NewRequest(http.MethodPost, gTusURL, nil)
+	gPostReq.Header.Set("Authorization", "Bearer "+g.Token)
+	gPostReq.Header.Set("Tus-Resumable", "1.0.0")
+	gPostReq.Header.Set("Upload-Length", strconv.Itoa(len(payload)))
+	gPostRes, err := http.DefaultClient.Do(gPostReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gPostRes.Body.Close()
+	if gPostRes.StatusCode != http.StatusCreated {
+		t.Fatalf("guest POST: expected 201, got %d", gPostRes.StatusCode)
+	}
+
+	gPatchReq, _ := http.NewRequest(http.MethodPatch, gTusURL, bytes.NewReader(payload[:prefix]))
+	gPatchReq.Header.Set("Authorization", "Bearer "+g.Token)
+	gPatchReq.Header.Set("Tus-Resumable", "1.0.0")
+	gPatchReq.Header.Set("Upload-Offset", "0")
+	gPatchReq.Header.Set("Content-Type", "application/offset+octet-stream")
+	gPatchRes, err := http.DefaultClient.Do(gPatchReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gPatchRes.Body.Close()
+	if gPatchRes.StatusCode != http.StatusNoContent {
+		t.Fatalf("guest prefix PATCH: expected 204, got %d", gPatchRes.StatusCode)
+	}
+
+	gPart := tusPartPath(gtmp, "guest-"+gup.ID)
+	if err := os.Remove(gPart); err != nil {
+		t.Fatal(err)
+	}
+
+	gBrokenReq, _ := http.NewRequest(http.MethodPatch, gTusURL, bytes.NewReader(payload[prefix:]))
+	gBrokenReq.Header.Set("Authorization", "Bearer "+g.Token)
+	gBrokenReq.Header.Set("Tus-Resumable", "1.0.0")
+	gBrokenReq.Header.Set("Upload-Offset", strconv.FormatInt(prefix, 10))
+	gBrokenReq.Header.Set("Content-Type", "application/offset+octet-stream")
+	gBrokenRes, err := http.DefaultClient.Do(gBrokenReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gBrokenRes.Body.Close()
+	if gBrokenRes.StatusCode != http.StatusGone {
+		t.Fatalf("guest PATCH after part loss: expected 410 Gone, got %d", gBrokenRes.StatusCode)
+	}
+
+	gDelReq, _ := http.NewRequest(http.MethodDelete, gTusURL, nil)
+	gDelReq.Header.Set("Authorization", "Bearer "+g.Token)
+	gDelReq.Header.Set("Tus-Resumable", "1.0.0")
+	gDelRes, err := http.DefaultClient.Do(gDelReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gDelRes.Body.Close()
+	if gDelRes.StatusCode != http.StatusNoContent {
+		t.Fatalf("guest DELETE: expected 204, got %d", gDelRes.StatusCode)
+	}
+
+	// Fresh guest restart requires a NEW upload declaration: guest DELETE marks
+	// the room upload canceled, so the same upload ID cannot be reused.
+	gup2, err := groom.DeclareUpload(g.ID, "scenario9-guest.bin", int64(len(payload)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := groom.ApproveUpload(gup2.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	gTusURL2 := fmt.Sprintf("%s/guest-api/uploads/%s/tus", gts.URL, gup2.ID)
+	gPostReq2, _ := http.NewRequest(http.MethodPost, gTusURL2, nil)
+	gPostReq2.Header.Set("Authorization", "Bearer "+g.Token)
+	gPostReq2.Header.Set("Tus-Resumable", "1.0.0")
+	gPostReq2.Header.Set("Upload-Length", strconv.Itoa(len(payload)))
+	gPostRes2, err := http.DefaultClient.Do(gPostReq2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gPostRes2.Body.Close()
+	if gPostRes2.StatusCode != http.StatusCreated {
+		t.Fatalf("guest fresh POST: expected 201, got %d", gPostRes2.StatusCode)
+	}
+
+	gPatchReq2, _ := http.NewRequest(http.MethodPatch, gTusURL2, bytes.NewReader(payload))
+	gPatchReq2.Header.Set("Authorization", "Bearer "+g.Token)
+	gPatchReq2.Header.Set("Tus-Resumable", "1.0.0")
+	gPatchReq2.Header.Set("Upload-Offset", "0")
+	gPatchReq2.Header.Set("Content-Type", "application/offset+octet-stream")
+	gPatchRes2, err := http.DefaultClient.Do(gPatchReq2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gPatchRes2.Body.Close()
+	if gPatchRes2.StatusCode != http.StatusNoContent {
+		t.Fatalf("guest fresh PATCH 0: expected 204, got %d", gPatchRes2.StatusCode)
+	}
+
+	gCompleteURL := fmt.Sprintf("%s/guest-api/uploads/%s/complete", gts.URL, gup2.ID)
+	gCBody, _ := json.Marshal(map[string]string{"expectedSHA256": expectedHex})
+	gCompReq, _ := http.NewRequest(http.MethodPost, gCompleteURL, bytes.NewReader(gCBody))
+	gCompReq.Header.Set("Authorization", "Bearer "+g.Token)
+	gCompReq.Header.Set("Content-Type", "application/json")
+	gCompRes, err := http.DefaultClient.Do(gCompReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gCompRes.Body.Close()
+	if gCompRes.StatusCode != http.StatusOK {
+		t.Fatalf("guest fresh complete: expected 200, got %d", gCompRes.StatusCode)
+	}
+}
+
+// TestTusScenario_16_MidUploadENOSPC simulates the storage filling up DURING
+// an ACTIVE upload (not at declare time): after the first half is committed,
+// the staged part file is swapped for a symlink to /dev/full (writes return
+// ENOSPC; stat/seek succeed). The server must return 507 with state
+// paused_storage_full while preserving the committed offset, and the upload
+// must recover safely once space is available again. Linux-only simulation.
+func TestTusScenario_16_MidUploadENOSPC(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Scenario 16 /dev/full simulation is Linux-only")
+	}
+	if _, err := os.Stat("/dev/full"); err != nil {
+		t.Skip("/dev/full not available on this host")
+	}
+
+	env := newTestEnv(t)
+	token := env.token()
+	ts := httptest.NewServer(env.srv.Handler())
+	defer ts.Close()
+
+	payload := patternedPayload(16 * 1024)
+	expectedHex := sha256Hex(payload)
+	const half = 8 * 1024
+
+	bID, itID := createTestBatch(t, env, ts, token, "scenario16.bin", int64(len(payload)))
+	tusURL := fmt.Sprintf("%s/api/batches/%s/items/%s/tus", ts.URL, bID, itID)
+	completeURL := fmt.Sprintf("%s/api/batches/%s/items/%s/complete", ts.URL, bID, itID)
+
+	// POST -> 201
+	postReq, _ := http.NewRequest(http.MethodPost, tusURL, nil)
+	postReq.Header.Set("Authorization", "Bearer "+token)
+	postReq.Header.Set("Tus-Resumable", "1.0.0")
+	postReq.Header.Set("Upload-Length", strconv.Itoa(len(payload)))
+	postRes, err := http.DefaultClient.Do(postReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	postRes.Body.Close()
+	if postRes.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 Created, got %d", postRes.StatusCode)
+	}
+
+	// PATCH first half -> 204.
+	patchReq, _ := http.NewRequest(http.MethodPatch, tusURL, bytes.NewReader(payload[:half]))
+	patchReq.Header.Set("Authorization", "Bearer "+token)
+	patchReq.Header.Set("Tus-Resumable", "1.0.0")
+	patchReq.Header.Set("Upload-Offset", "0")
+	patchReq.Header.Set("Content-Type", "application/offset+octet-stream")
+	patchRes, err := http.DefaultClient.Do(patchReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	patchRes.Body.Close()
+	if patchRes.StatusCode != http.StatusNoContent {
+		t.Fatalf("first half PATCH: expected 204, got %d", patchRes.StatusCode)
+	}
+
+	// Swap the staged part file for a symlink to /dev/full between PATCHes.
+	transferID := personalTransferID(bID, itID)
+	part := tusPartPath(env.store.Dir(), transferID)
+	orig, err := os.ReadFile(part)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(part); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/dev/full", part); err != nil {
+		t.Fatal(err)
+	}
+
+	// PATCH second half -> 507 with preserved offset and paused_storage_full.
+	enospcReq, _ := http.NewRequest(http.MethodPatch, tusURL, bytes.NewReader(payload[half:]))
+	enospcReq.Header.Set("Authorization", "Bearer "+token)
+	enospcReq.Header.Set("Tus-Resumable", "1.0.0")
+	enospcReq.Header.Set("Upload-Offset", strconv.FormatInt(half, 10))
+	enospcReq.Header.Set("Content-Type", "application/offset+octet-stream")
+	enospcRes, err := http.DefaultClient.Do(enospcReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enospcRes.Body.Close()
+	if enospcRes.StatusCode != http.StatusInsufficientStorage {
+		t.Fatalf("mid-upload ENOSPC: expected 507, got %d", enospcRes.StatusCode)
+	}
+	if got := enospcRes.Header.Get("Upload-Offset"); got != strconv.FormatInt(half, 10) {
+		t.Fatalf("507 Upload-Offset = %q, want preserved %d", got, half)
+	}
+	if got := enospcRes.Header.Get("Upload-State"); got != string(transfer.ResumablePausedStorageFull) {
+		t.Fatalf("507 Upload-State = %q, want %q", got, transfer.ResumablePausedStorageFull)
+	}
+
+	// Restore the original part bytes (remove the symlink first).
+	if err := os.Remove(part); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(part, orig, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Recovery arc: HEAD shows the preserved offset, the resume PATCH succeeds,
+	// and the upload completes with the full-payload digest.
+	headReq, _ := http.NewRequest(http.MethodHead, tusURL, nil)
+	headReq.Header.Set("Authorization", "Bearer "+token)
+	headReq.Header.Set("Tus-Resumable", "1.0.0")
+	headRes, err := http.DefaultClient.Do(headReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headRes.Body.Close()
+	if headRes.StatusCode != http.StatusOK {
+		t.Fatalf("HEAD after recovery: expected 200, got %d", headRes.StatusCode)
+	}
+	if got := headRes.Header.Get("Upload-Offset"); got != strconv.FormatInt(half, 10) {
+		t.Fatalf("HEAD Upload-Offset after ENOSPC = %q, want preserved %d", got, half)
+	}
+
+	resumeReq, _ := http.NewRequest(http.MethodPatch, tusURL, bytes.NewReader(payload[half:]))
+	resumeReq.Header.Set("Authorization", "Bearer "+token)
+	resumeReq.Header.Set("Tus-Resumable", "1.0.0")
+	resumeReq.Header.Set("Upload-Offset", strconv.FormatInt(half, 10))
+	resumeReq.Header.Set("Content-Type", "application/offset+octet-stream")
+	resumeRes, err := http.DefaultClient.Do(resumeReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumeRes.Body.Close()
+	if resumeRes.StatusCode != http.StatusNoContent {
+		t.Fatalf("resume PATCH after storage restored: expected 204, got %d", resumeRes.StatusCode)
+	}
+	if got := resumeRes.Header.Get("Upload-State"); got != string(transfer.ResumableAwaitingDigest) {
+		t.Fatalf("resume Upload-State = %q, want %q", got, transfer.ResumableAwaitingDigest)
+	}
+
+	cBody, _ := json.Marshal(map[string]string{"expectedSHA256": expectedHex})
+	compReq, _ := http.NewRequest(http.MethodPost, completeURL, bytes.NewReader(cBody))
+	compReq.Header.Set("Authorization", "Bearer "+token)
+	compReq.Header.Set("Content-Type", "application/json")
+	compRes, err := http.DefaultClient.Do(compReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compRes.Body.Close()
+	if compRes.StatusCode != http.StatusOK {
+		t.Fatalf("complete after ENOSPC recovery: expected 200, got %d", compRes.StatusCode)
+	}
+}
+
+// TestTusScenario_17_ConcurrencyCapDefaultQuota exercises the concurrent
+// upload quota independently of storage-full rejection: with the DEFAULT cap
+// of 10 active resumables per session, the 10th POST succeeds, the 11th is
+// rejected with 429, and cancelling one upload releases its reservation so the
+// next POST succeeds. (The conflated 507-vs-429 test is
+// TestTusScenario_16_17_StorageQuotaRejection; this test isolates the cap.)
+func TestTusScenario_17_ConcurrencyCapDefaultQuota(t *testing.T) {
+	env := newTestEnv(t)
+	token := env.token()
+	ts := httptest.NewServer(env.srv.Handler())
+	defer ts.Close()
+
+	maxConcurrent := transfer.DefaultMaxConcurrentPerSession
+	if maxConcurrent != 10 {
+		t.Fatalf("unexpected DefaultMaxConcurrentPerSession: %d", maxConcurrent)
+	}
+
+	// Declare maxConcurrent+1 uploads up front.
+	urls := make([]string, maxConcurrent+1)
+	for i := range urls {
+		bID, itID := createTestBatch(t, env, ts, token, fmt.Sprintf("scenario17-%d.bin", i), 1024)
+		urls[i] = fmt.Sprintf("%s/api/batches/%s/items/%s/tus", ts.URL, bID, itID)
+	}
+
+	doPost := func(tusURL string) int {
+		req, _ := http.NewRequest(http.MethodPost, tusURL, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Tus-Resumable", "1.0.0")
+		req.Header.Set("Upload-Length", "1024")
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		return res.StatusCode
+	}
+
+	// The first maxConcurrent POSTs succeed with 201.
+	for i := 0; i < maxConcurrent; i++ {
+		if code := doPost(urls[i]); code != http.StatusCreated {
+			t.Fatalf("POST %d/%d: expected 201, got %d", i+1, maxConcurrent, code)
+		}
+	}
+
+	// The (maxConcurrent+1)-th POST exceeds the per-session cap -> 429.
+	if code := doPost(urls[maxConcurrent]); code != http.StatusTooManyRequests {
+		t.Fatalf("POST beyond cap: expected 429 Too Many Requests, got %d", code)
+	}
+
+	// Cancel one active upload: CancelUpload releases the quota reservation.
+	delReq, _ := http.NewRequest(http.MethodDelete, urls[0], nil)
+	delReq.Header.Set("Authorization", "Bearer "+token)
+	delReq.Header.Set("Tus-Resumable", "1.0.0")
+	delRes, err := http.DefaultClient.Do(delReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delRes.Body.Close()
+	if delRes.StatusCode != http.StatusNoContent {
+		t.Fatalf("DELETE: expected 204, got %d", delRes.StatusCode)
+	}
+
+	// The next POST now fits under the cap again.
+	if code := doPost(urls[maxConcurrent]); code != http.StatusCreated {
+		t.Fatalf("POST after cancel: expected 201 (quota released), got %d", code)
+	}
+}
+
+// TestTusScenario_18_ExpiryDeterministic exercises resumable-upload expiry
+// without waiting the real 24h TTL: ExpiresAt is forced into the past
+// deterministically. Expired uploads must fail PATCH with 410 Gone (or an
+// explicitly supported equivalent), CleanupExpired must purge them safely,
+// unexpired uploads must be untouched, zero ExpiresAt must disable PATCH-time
+// enforcement, and the guest leg must not inherit any Personal session state.
+func TestTusScenario_18_ExpiryDeterministic(t *testing.T) {
+	env := newTestEnv(t)
+	token := env.token()
+	ts := httptest.NewServer(env.srv.Handler())
+	defer ts.Close()
+
+	resumable := env.srv.Services().EnsureResumable()
+
+	const itemSize = 20 * 1024
+	payload := patternedPayload(itemSize)
+	const prefix = 4 * 1024
+
+	// declare creates a batch item and POSTs the tus upload.
+	declare := func(name string) (tusURL, completeURL, transferID string) {
+		bID, itID := createTestBatch(t, env, ts, token, name, itemSize)
+		tus := fmt.Sprintf("%s/api/batches/%s/items/%s/tus", ts.URL, bID, itID)
+		comp := fmt.Sprintf("%s/api/batches/%s/items/%s/complete", ts.URL, bID, itID)
+		req, _ := http.NewRequest(http.MethodPost, tus, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Tus-Resumable", "1.0.0")
+		req.Header.Set("Upload-Length", strconv.FormatInt(itemSize, 10))
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		if res.StatusCode != http.StatusCreated {
+			t.Fatalf("POST %s: expected 201, got %d", name, res.StatusCode)
+		}
+		return tus, comp, personalTransferID(bID, itID)
+	}
+
+	patchRange := func(tusURL string, body []byte, offset int64) int {
+		req, _ := http.NewRequest(http.MethodPatch, tusURL, bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Tus-Resumable", "1.0.0")
+		req.Header.Set("Upload-Offset", strconv.FormatInt(offset, 10))
+		req.Header.Set("Content-Type", "application/offset+octet-stream")
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		return res.StatusCode
+	}
+
+	complete := func(completeURL string) int {
+		cBody, _ := json.Marshal(map[string]string{"expectedSHA256": sha256Hex(payload)})
+		req, _ := http.NewRequest(http.MethodPost, completeURL, bytes.NewReader(cBody))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		return res.StatusCode
+	}
+
+	// --- Upload A: expires before the next PATCH (deterministic; no 24h wait) ---
+	tusA, _, idA := declare("scenario18-expired.bin")
+	if code := patchRange(tusA, payload[:prefix], 0); code != http.StatusNoContent {
+		t.Fatalf("upload A prefix PATCH: expected 204, got %d", code)
+	}
+	upA, ok := resumable.GetUpload(idA)
+	if !ok {
+		t.Fatal("upload A not registered")
+	}
+	upA.UpdateMeta(func(m *transfer.ResumableMeta) {
+		m.ExpiresAt = time.Now().Add(-time.Minute)
+	})
+	if code := patchRange(tusA, payload[prefix:], prefix); code != http.StatusGone {
+		t.Fatalf("upload A expired PATCH: expected 410 Gone, got %d", code)
+	}
+	delA, _ := http.NewRequest(http.MethodDelete, tusA, nil)
+	delA.Header.Set("Authorization", "Bearer "+token)
+	delA.Header.Set("Tus-Resumable", "1.0.0")
+	delARes, err := http.DefaultClient.Do(delA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delARes.Body.Close()
+	if delARes.StatusCode != http.StatusNoContent {
+		t.Fatalf("expired upload DELETE: expected 204, got %d", delARes.StatusCode)
+	}
+
+	// --- Upload B: NOT expired; must survive CleanupExpired untouched ---
+	tusB, compB, idB := declare("scenario18-live.bin")
+	if code := patchRange(tusB, payload[:prefix], 0); code != http.StatusNoContent {
+		t.Fatalf("upload B prefix PATCH: expected 204, got %d", code)
+	}
+
+	// --- Upload C: zero ExpiresAt disables PATCH-time expiry enforcement ---
+	tusC, compC, idC := declare("scenario18-zero.bin")
+	upC, ok := resumable.GetUpload(idC)
+	if !ok {
+		t.Fatal("upload C not registered")
+	}
+	upC.UpdateMeta(func(m *transfer.ResumableMeta) {
+		m.ExpiresAt = time.Time{}
+	})
+
+	// Cleanup purges only the expired upload.
+	resumable.CleanupExpired()
+	if _, ok := resumable.GetUpload(idA); ok {
+		t.Fatal("CleanupExpired did not purge the expired upload")
+	}
+	if _, ok := resumable.GetUpload(idB); !ok {
+		t.Fatal("CleanupExpired purged an unexpired upload")
+	}
+
+	// HEAD on the purged upload reports 404 (it is gone, not resumable).
+	headReq, _ := http.NewRequest(http.MethodHead, tusA, nil)
+	headReq.Header.Set("Authorization", "Bearer "+token)
+	headReq.Header.Set("Tus-Resumable", "1.0.0")
+	headRes, err := http.DefaultClient.Do(headReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headRes.Body.Close()
+	if headRes.StatusCode != http.StatusNotFound {
+		t.Fatalf("HEAD on purged expired upload: expected 404, got %d", headRes.StatusCode)
+	}
+
+	// Unexpired upload B resumes and completes normally.
+	if code := patchRange(tusB, payload[prefix:], prefix); code != http.StatusNoContent {
+		t.Fatalf("upload B resume PATCH: expected 204, got %d", code)
+	}
+	if code := complete(compB); code != http.StatusOK {
+		t.Fatalf("upload B complete: expected 200, got %d", code)
+	}
+
+	// Zero ExpiresAt does not block PATCHes or completion.
+	if code := patchRange(tusC, payload, 0); code != http.StatusNoContent {
+		t.Fatalf("upload C (zero ExpiresAt) PATCH: expected 204, got %d", code)
+	}
+	if code := complete(compC); code != http.StatusOK {
+		t.Fatalf("upload C (zero ExpiresAt) complete: expected 200, got %d", code)
+	}
+
+	// --- Guest leg: expiry must be enforced on the guest chain too, with no
+	// inheritance of Personal session state (fresh guest server + fresh room). ---
+	gts, _, groom, gsrvcs := setupGuestServerWithServices(t)
+	gGuest, err := groom.Join("Dina")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := groom.ApproveGuest(gGuest.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	gup, err := groom.DeclareUpload(gGuest.ID, "scenario18-guest.bin", int64(len(payload)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := groom.ApproveUpload(gup.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	gTusURL := fmt.Sprintf("%s/guest-api/uploads/%s/tus", gts.URL, gup.ID)
+	gPostReq, _ := http.NewRequest(http.MethodPost, gTusURL, nil)
+	gPostReq.Header.Set("Authorization", "Bearer "+gGuest.Token)
+	gPostReq.Header.Set("Tus-Resumable", "1.0.0")
+	gPostReq.Header.Set("Upload-Length", strconv.Itoa(len(payload)))
+	gPostRes, err := http.DefaultClient.Do(gPostReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gPostRes.Body.Close()
+	if gPostRes.StatusCode != http.StatusCreated {
+		t.Fatalf("guest POST: expected 201, got %d", gPostRes.StatusCode)
+	}
+
+	gPatchReq, _ := http.NewRequest(http.MethodPatch, gTusURL, bytes.NewReader(payload[:prefix]))
+	gPatchReq.Header.Set("Authorization", "Bearer "+gGuest.Token)
+	gPatchReq.Header.Set("Tus-Resumable", "1.0.0")
+	gPatchReq.Header.Set("Upload-Offset", "0")
+	gPatchReq.Header.Set("Content-Type", "application/offset+octet-stream")
+	gPatchRes, err := http.DefaultClient.Do(gPatchReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gPatchRes.Body.Close()
+	if gPatchRes.StatusCode != http.StatusNoContent {
+		t.Fatalf("guest prefix PATCH: expected 204, got %d", gPatchRes.StatusCode)
+	}
+
+	gResumable := gsrvcs.EnsureResumable()
+	gUp, ok := gResumable.GetUpload("guest-" + gup.ID)
+	if !ok {
+		t.Fatal("guest upload not registered")
+	}
+	gUp.UpdateMeta(func(m *transfer.ResumableMeta) {
+		m.ExpiresAt = time.Now().Add(-time.Minute)
+	})
+
+	gExpiredReq, _ := http.NewRequest(http.MethodPatch, gTusURL, bytes.NewReader(payload[prefix:]))
+	gExpiredReq.Header.Set("Authorization", "Bearer "+gGuest.Token)
+	gExpiredReq.Header.Set("Tus-Resumable", "1.0.0")
+	gExpiredReq.Header.Set("Upload-Offset", strconv.FormatInt(prefix, 10))
+	gExpiredReq.Header.Set("Content-Type", "application/offset+octet-stream")
+	gExpiredRes, err := http.DefaultClient.Do(gExpiredReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gExpiredRes.Body.Close()
+	if gExpiredRes.StatusCode != http.StatusGone {
+		t.Fatalf("guest expired PATCH: expected 410 Gone, got %d", gExpiredRes.StatusCode)
+	}
+}
+
+// TestTusScenario_20_GuestInterruptionResumeAndIsolation: on the real Guest
+// Drop Box routes, a guest upload is interrupted mid-stream, recovered via
+// HEAD, resumed, and completed; the published file lands inside the guest's
+// own directory with byte-exact content while another guest's concurrent
+// upload is unaffected. This is a software-level simulation — no physical
+// Wi-Fi or device browser is involved.
+func TestTusScenario_20_GuestInterruptionResumeAndIsolation(t *testing.T) {
+	gts, _, groom, _ := setupTestGuestServer(t)
+
+	alice, err := groom.Join("Alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := groom.ApproveGuest(alice.ID); err != nil {
+		t.Fatal(err)
+	}
+	bob, err := groom.Join("Bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := groom.ApproveGuest(bob.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	payload := patternedPayload(64 * 1024)
+	expectedHex := sha256Hex(payload)
+	const half = 32 * 1024
+
+	// Alice declares and starts uploading.
+	aUp, err := groom.DeclareUpload(alice.ID, "scenario20-alice.bin", int64(len(payload)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := groom.ApproveUpload(aUp.ID); err != nil {
+		t.Fatal(err)
+	}
+	aTusURL := fmt.Sprintf("%s/guest-api/uploads/%s/tus", gts.URL, aUp.ID)
+
+	aPostReq, _ := http.NewRequest(http.MethodPost, aTusURL, nil)
+	aPostReq.Header.Set("Authorization", "Bearer "+alice.Token)
+	aPostReq.Header.Set("Tus-Resumable", "1.0.0")
+	aPostReq.Header.Set("Upload-Length", strconv.Itoa(len(payload)))
+	aPostRes, err := http.DefaultClient.Do(aPostReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aPostRes.Body.Close()
+	if aPostRes.StatusCode != http.StatusCreated {
+		t.Fatalf("Alice POST: expected 201, got %d", aPostRes.StatusCode)
+	}
+
+	// Alice streams the first half, then the connection "drops" (client stops).
+	aPatchReq, _ := http.NewRequest(http.MethodPatch, aTusURL, bytes.NewReader(payload[:half]))
+	aPatchReq.Header.Set("Authorization", "Bearer "+alice.Token)
+	aPatchReq.Header.Set("Tus-Resumable", "1.0.0")
+	aPatchReq.Header.Set("Upload-Offset", "0")
+	aPatchReq.Header.Set("Content-Type", "application/offset+octet-stream")
+	aPatchRes, err := http.DefaultClient.Do(aPatchReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aPatchRes.Body.Close()
+	if aPatchRes.StatusCode != http.StatusNoContent {
+		t.Fatalf("Alice prefix PATCH: expected 204, got %d", aPatchRes.StatusCode)
+	}
+
+	// HEAD recovery discovers the committed offset.
+	aHeadReq, _ := http.NewRequest(http.MethodHead, aTusURL, nil)
+	aHeadReq.Header.Set("Authorization", "Bearer "+alice.Token)
+	aHeadReq.Header.Set("Tus-Resumable", "1.0.0")
+	aHeadRes, err := http.DefaultClient.Do(aHeadReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aHeadRes.Body.Close()
+	if aHeadRes.StatusCode != http.StatusOK {
+		t.Fatalf("Alice HEAD: expected 200, got %d", aHeadRes.StatusCode)
+	}
+	if got := aHeadRes.Header.Get("Upload-Offset"); got != strconv.FormatInt(half, 10) {
+		t.Fatalf("Alice HEAD Upload-Offset = %q, want %d", got, half)
+	}
+
+	// Bob uploads his own file concurrently and completes — unaffected.
+	bobPayload := patternedPayload(8 * 1024)
+	bobHex := sha256Hex(bobPayload)
+	bUp, err := groom.DeclareUpload(bob.ID, "scenario20-bob.bin", int64(len(bobPayload)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := groom.ApproveUpload(bUp.ID); err != nil {
+		t.Fatal(err)
+	}
+	bTusURL := fmt.Sprintf("%s/guest-api/uploads/%s/tus", gts.URL, bUp.ID)
+
+	bPostReq, _ := http.NewRequest(http.MethodPost, bTusURL, nil)
+	bPostReq.Header.Set("Authorization", "Bearer "+bob.Token)
+	bPostReq.Header.Set("Tus-Resumable", "1.0.0")
+	bPostReq.Header.Set("Upload-Length", strconv.Itoa(len(bobPayload)))
+	bPostRes, err := http.DefaultClient.Do(bPostReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bPostRes.Body.Close()
+	if bPostRes.StatusCode != http.StatusCreated {
+		t.Fatalf("Bob POST: expected 201, got %d", bPostRes.StatusCode)
+	}
+
+	bPatchReq, _ := http.NewRequest(http.MethodPatch, bTusURL, bytes.NewReader(bobPayload))
+	bPatchReq.Header.Set("Authorization", "Bearer "+bob.Token)
+	bPatchReq.Header.Set("Tus-Resumable", "1.0.0")
+	bPatchReq.Header.Set("Upload-Offset", "0")
+	bPatchReq.Header.Set("Content-Type", "application/offset+octet-stream")
+	bPatchRes, err := http.DefaultClient.Do(bPatchReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bPatchRes.Body.Close()
+	if bPatchRes.StatusCode != http.StatusNoContent {
+		t.Fatalf("Bob PATCH: expected 204, got %d", bPatchRes.StatusCode)
+	}
+
+	bCompleteURL := fmt.Sprintf("%s/guest-api/uploads/%s/complete", gts.URL, bUp.ID)
+	bCBody, _ := json.Marshal(map[string]string{"expectedSHA256": bobHex})
+	bCompReq, _ := http.NewRequest(http.MethodPost, bCompleteURL, bytes.NewReader(bCBody))
+	bCompReq.Header.Set("Authorization", "Bearer "+bob.Token)
+	bCompReq.Header.Set("Content-Type", "application/json")
+	bCompRes, err := http.DefaultClient.Do(bCompReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bCompRes.Body.Close()
+	if bCompRes.StatusCode != http.StatusOK {
+		t.Fatalf("Bob complete: expected 200, got %d", bCompRes.StatusCode)
+	}
+
+	// Alice resumes from the discovered offset and completes.
+	aResumeReq, _ := http.NewRequest(http.MethodPatch, aTusURL, bytes.NewReader(payload[half:]))
+	aResumeReq.Header.Set("Authorization", "Bearer "+alice.Token)
+	aResumeReq.Header.Set("Tus-Resumable", "1.0.0")
+	aResumeReq.Header.Set("Upload-Offset", strconv.FormatInt(half, 10))
+	aResumeReq.Header.Set("Content-Type", "application/offset+octet-stream")
+	aResumeRes, err := http.DefaultClient.Do(aResumeReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aResumeRes.Body.Close()
+	if aResumeRes.StatusCode != http.StatusNoContent {
+		t.Fatalf("Alice resume PATCH: expected 204, got %d", aResumeRes.StatusCode)
+	}
+
+	aCompleteURL := fmt.Sprintf("%s/guest-api/uploads/%s/complete", gts.URL, aUp.ID)
+	aCBody, _ := json.Marshal(map[string]string{"expectedSHA256": expectedHex})
+	aCompReq, _ := http.NewRequest(http.MethodPost, aCompleteURL, bytes.NewReader(aCBody))
+	aCompReq.Header.Set("Authorization", "Bearer "+alice.Token)
+	aCompReq.Header.Set("Content-Type", "application/json")
+	aCompRes, err := http.DefaultClient.Do(aCompReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer aCompRes.Body.Close()
+	if aCompRes.StatusCode != http.StatusOK {
+		t.Fatalf("Alice complete: expected 200, got %d", aCompRes.StatusCode)
+	}
+
+	var compReply struct {
+		Status string `json:"status"`
+		SHA256 string `json:"sha256"`
+		Path   string `json:"path"`
+		Size   int64  `json:"size"`
+	}
+	if err := json.NewDecoder(aCompRes.Body).Decode(&compReply); err != nil {
+		t.Fatal(err)
+	}
+	if compReply.Status != "completed" {
+		t.Fatalf("complete status = %q, want %q", compReply.Status, "completed")
+	}
+	if compReply.SHA256 != expectedHex {
+		t.Fatalf("complete sha256 = %q, want %q", compReply.SHA256, expectedHex)
+	}
+	if compReply.Size != int64(len(payload)) {
+		t.Fatalf("complete size = %d, want %d", compReply.Size, len(payload))
+	}
+
+	// Published content is byte-exact and lives inside Alice's guest directory
+	// (not in any personal/desktop transfer destination).
+	published, err := os.ReadFile(compReply.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(published, payload) {
+		t.Fatal("published file content differs from the uploaded payload")
+	}
+	wantDir := groom.GuestDirectory(alice.ID, alice.SafeSlug)
+	if filepath.Dir(compReply.Path) != wantDir {
+		t.Fatalf("published path %q is outside Alice's guest directory %q", compReply.Path, wantDir)
+	}
+
+	// The room record shows completed (not failed/canceled) with matching digest.
+	upAfter, err := groom.GetUpload(aUp.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if upAfter.State != guest.UploadCompleted {
+		t.Fatalf("room state = %q, want %q", upAfter.State, guest.UploadCompleted)
+	}
+	if upAfter.SHA256 != expectedHex {
+		t.Fatalf("room sha256 = %q, want %q", upAfter.SHA256, expectedHex)
 	}
 }

@@ -295,6 +295,22 @@ func handleBatchTusPatch(svcs *Services, stall time.Duration) http.HandlerFunc {
 			return
 		}
 
+		// Unrecoverable staging loss or expired session: 410 Gone. The client must
+		// DELETE the transfer and restart from zero rather than resume.
+		if errors.Is(streamErr, transfer.ErrPartialMissing) {
+			w.Header().Set("Tus-Resumable", tusVersion)
+			w.Header().Set("Upload-Offset", strconv.FormatInt(committedOffset, 10))
+			writeError(w, http.StatusGone, "staged part file missing; upload must restart from zero")
+			return
+		}
+
+		if errors.Is(streamErr, transfer.ErrUploadExpired) {
+			w.Header().Set("Tus-Resumable", tusVersion)
+			w.Header().Set("Upload-Offset", strconv.FormatInt(committedOffset, 10))
+			writeError(w, http.StatusGone, "upload session expired")
+			return
+		}
+
 		if streamErr != nil {
 			// Interrupted stream, read error, or sync failure: last committed checkpoint was flushed; do NOT return 204
 			w.Header().Set("Tus-Resumable", tusVersion)
@@ -759,6 +775,22 @@ func handleGuestTusPatch(svcs *Services, stall time.Duration) http.HandlerFunc {
 			w.Header().Set("Upload-Offset", strconv.FormatInt(committedOffset, 10))
 			w.Header().Set("Upload-State", "paused_storage_full")
 			writeError(w, http.StatusInsufficientStorage, "insufficient storage space")
+			return
+		}
+
+		// Unrecoverable staging loss or expired session: 410 Gone. The client must
+		// DELETE the transfer and restart from zero rather than resume.
+		if errors.Is(streamErr, transfer.ErrPartialMissing) {
+			w.Header().Set("Tus-Resumable", tusVersion)
+			w.Header().Set("Upload-Offset", strconv.FormatInt(committedOffset, 10))
+			writeError(w, http.StatusGone, "staged part file missing; upload must restart from zero")
+			return
+		}
+
+		if errors.Is(streamErr, transfer.ErrUploadExpired) {
+			w.Header().Set("Tus-Resumable", tusVersion)
+			w.Header().Set("Upload-Offset", strconv.FormatInt(committedOffset, 10))
+			writeError(w, http.StatusGone, "upload session expired")
 			return
 		}
 

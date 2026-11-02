@@ -788,6 +788,160 @@ test('Scenario 15: Browser reload / termination during partially completed uploa
   assert.equal(persistentStorage.has('transfer-s15'), false, 'Transfer record must be purged from IndexedDB upon completion')
 })
 
+test('Scenario 35: Full byte progress does not report success before digest verification', async () => {
+  const fileBytes = Buffer.from('scenario35-payload')
+  const digest = createHash('sha256').update(fileBytes).digest('hex')
+  const file = createMockFile('scenario35.bin', fileBytes)
+  const events: string[] = []
+  let completionResolve: ((response: any) => void) | null = null
+  let completionStartedResolve: (() => void) | null = null
+  const completionStarted = new Promise<void>((resolve) => {
+    completionStartedResolve = resolve
+  })
+  const completionResponse = new Promise<any>((resolve) => {
+    completionResolve = resolve
+  })
+
+  const mockFetch = async (url: string, opts: any = {}) => {
+    const method = opts.method || 'GET'
+    if (method === 'HEAD') {
+      return {
+        ok: true,
+        status: 200,
+        headers: {
+          get: (name: string) => {
+            const lower = name.toLowerCase()
+            if (lower === 'upload-offset') return '0'
+            if (lower === 'upload-length') return String(fileBytes.length)
+            if (lower === 'upload-state') return 'active'
+            return null
+          }
+        }
+      }
+    }
+    if (method === 'PATCH') {
+      const reader = opts.body.getReader()
+      while (!(await reader.read()).done) {}
+      return {
+        ok: true,
+        status: 204,
+        headers: { get: () => String(fileBytes.length) }
+      }
+    }
+    if (method === 'POST') {
+      events.push('digest-request')
+      completionStartedResolve!()
+      return completionResponse
+    }
+    throw new Error('Unexpected request: ' + method + ' ' + url)
+  }
+
+  const session = createClientContext({ mockFetch })
+  const engine = new session.client.ResumableUploadEngine()
+  let completionResult: any = null
+  let completionError: Error | null = null
+  const uploadFinished = new Promise<void>((resolve) => {
+    engine.startUpload({
+      transferId: 'scenario35-order',
+      file,
+      uploadUrl: 'http://desktop.local/tus/scenario35-order',
+      completeUrl: 'http://desktop.local/complete/scenario35-order',
+      statusUrl: 'http://desktop.local/status/scenario35-order',
+      type: 'personal'
+    }, {
+      onProgress: (value: any) => {
+        if (value.uploaded === fileBytes.length && value.total === fileBytes.length) {
+          events.push('progress-100')
+        }
+      },
+      onComplete: (value: any) => {
+        events.push('completed')
+        completionResult = value
+        resolve()
+      },
+      onError: (error: Error) => {
+        completionError = error
+        resolve()
+      }
+    })
+  })
+
+  await completionStarted
+  assert.deepEqual(events, ['progress-100', 'digest-request'],
+    'Digest submission must begin only after 100% byte progress')
+  assert.equal(completionResult, null,
+    'Completion must remain pending while digest verification is unresolved')
+  assert.equal(completionError, null,
+    'No completion error is allowed before digest verification resolves')
+
+  completionResolve!({
+    ok: true,
+    status: 200,
+    json: async () => ({ status: 'completed', sha256: digest })
+  })
+  await uploadFinished
+  assert.deepEqual(events, ['progress-100', 'digest-request', 'completed'],
+    'Successful digest verification must precede the completion callback')
+  assert.equal(completionResult.status, 'completed')
+  assert.equal(completionResult.sha256, digest)
+
+  let failedCompletion = 0
+  let failedError: Error | null = null
+  const failedFetch = async (url: string, opts: any = {}) => {
+    const method = opts.method || 'GET'
+    if (method === 'HEAD') {
+      return {
+        ok: true,
+        status: 200,
+        headers: {
+          get: (name: string) => {
+            const lower = name.toLowerCase()
+            if (lower === 'upload-offset') return '0'
+            if (lower === 'upload-length') return String(fileBytes.length)
+            if (lower === 'upload-state') return 'active'
+            return null
+          }
+        }
+      }
+    }
+    if (method === 'PATCH') {
+      const reader = opts.body.getReader()
+      while (!(await reader.read()).done) {}
+      return { ok: true, status: 204, headers: { get: () => String(fileBytes.length) } }
+    }
+    if (method === 'POST') {
+      return {
+        ok: false,
+        status: 422,
+        json: async () => ({ error: 'digest mismatch' })
+      }
+    }
+    throw new Error('Unexpected request: ' + method + ' ' + url)
+  }
+
+  const failedSession = createClientContext({ mockFetch: failedFetch })
+  const failedEngine = new failedSession.client.ResumableUploadEngine()
+  await new Promise<void>((resolve) => {
+    failedEngine.startUpload({
+      transferId: 'scenario35-failure',
+      file,
+      uploadUrl: 'http://desktop.local/tus/scenario35-failure',
+      completeUrl: 'http://desktop.local/complete/scenario35-failure',
+      statusUrl: 'http://desktop.local/status/scenario35-failure',
+      type: 'personal'
+    }, {
+      onComplete: () => { failedCompletion++ },
+      onError: (error: Error) => {
+        failedError = error
+        resolve()
+      }
+    })
+  })
+
+  assert.equal(failedCompletion, 0, 'Failed finalization must not report completed')
+  assert.equal(failedError?.message, 'digest mismatch')
+})
+
 test('Scenario 15 (Edge Case): Modified reselected file is rejected on prefix mismatch, preventing corrupted resumption', async () => {
   const totalSize = 1000
   const originalBytes = Buffer.alloc(totalSize, 0x41)
