@@ -563,7 +563,7 @@ func (a *App) shutdown(ctx context.Context) {
 			a.discardEmptyRoots(s.Key())
 			a.downloads.CancelSession(s.Key())
 		}
-		a.sessions.Close()
+		a.sessions.Shutdown()
 		a.registry.Clear()
 		a.guestMgr.Close()
 		if a.auditStore != nil {

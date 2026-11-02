@@ -67,6 +67,7 @@ import (
 	"github.com/itsyamin/flitnix/internal/devices"
 	"github.com/itsyamin/flitnix/internal/guest"
 	"github.com/itsyamin/flitnix/internal/power"
+	"github.com/itsyamin/flitnix/internal/recovery"
 	"github.com/itsyamin/flitnix/internal/session"
 	"github.com/itsyamin/flitnix/internal/textmsg"
 	"github.com/itsyamin/flitnix/internal/transfer"
@@ -131,6 +132,11 @@ type Config struct {
 	// /api/ endpoints. A nil Services keeps the server page-only: every
 	// /api/ path answers 404. It must be fully populated otherwise.
 	Services *Services
+
+	// RecoveryDir enables durable session and coordinator restoration. It is
+	// intentionally opt-in so embedded page-only and unit-test servers retain
+	// their existing in-memory behavior.
+	RecoveryDir string
 }
 
 // Services bundles the collaborators the API endpoints need. The desktop
@@ -217,8 +223,11 @@ type Server struct {
 	handler http.Handler
 	grants  *DownloadGrantStore
 
-	once  sync.Once
-	ready chan struct{}
+	once       sync.Once
+	ready      chan struct{}
+	recoverOne sync.Once
+	recoverErr error
+	store      *recovery.Store
 
 	mu           sync.Mutex
 	listener     net.Listener
@@ -229,6 +238,10 @@ type Server struct {
 // construction cannot fail. A fully populated Services yields a server with
 // authenticated transfer endpoints; a nil Services keeps the page-only
 // behaviour (all /api/ paths 404).
+// New prepares a server. Recovery is NOT performed here: it is an explicit
+// operation (Recover) that returns errors, and Serve runs it before binding
+// the listener. Until every recovery phase has succeeded the Ready channel is
+// never closed and no HTTP request is accepted.
 func New(cfg Config) *Server {
 	cfg.normalize()
 	var downloads *transfer.DownloadRegistry
@@ -271,6 +284,11 @@ func (s *Server) Services() *Services { return s.cfg.Services }
 // Config.ShutdownTimeout after which connections are force-closed; Serve
 // returns nil for a clean stop and an error for anything else.
 func (s *Server) Serve(ctx context.Context) error {
+	// Recovery is a hard gate: a failure here means global durable state is
+	// untrustworthy, so the listener is never bound and Ready never closes.
+	if err := s.Recover(); err != nil {
+		return err
+	}
 	ln, err := s.bind()
 	if err != nil {
 		return err

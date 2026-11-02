@@ -883,3 +883,279 @@ func TestResumableManager_CrossFilesystemRejection(t *testing.T) {
 		t.Fatalf("expected ErrCrossFilesystem on FinalizeComplete, got %v", err)
 	}
 }
+
+// TestResumableManager_RecoverOnStartup_PublicationRecordReplay verifies
+// Scenario 11: a hard crash during finalization is recovered through the
+// durable publication record.
+//
+// This is an in-process record-replay test: the staging state is crafted on
+// disk exactly as a crash between "publication record written" and "atomic
+// rename done" leaves it, and a fresh manager must replay the publication
+// idempotently. True process-kill coverage for the ingest phases is provided
+// by the subprocess harness in crash_subprocess_test.go.
+func TestResumableManager_RecoverOnStartup_PublicationRecordReplay(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "dest")
+	if err := os.MkdirAll(dest, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	payload := bytes.Repeat([]byte("R"), 4096)
+	sum := sha256.Sum256(payload)
+	digest := hex.EncodeToString(sum[:])
+
+	buildCrashedStaging := func(t *testing.T, transferID string) {
+		t.Helper()
+		store, err := NewStore(StoreConfig{Dir: root})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rm := NewResumableManager(store, nil)
+		if _, err := rm.CreateUpload("sess-1", transferID, "b-1", "it-1", "replayed.bin", "", int64(len(payload)), dest); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := rm.IngestStream(transferID, 0, bytes.NewReader(payload), nil); err != nil {
+			t.Fatal(err)
+		}
+		// Stop the background cleaner, then simulate the crash window: the
+		// durable publication record exists, the atomic rename never happened.
+		rm.Close()
+		pub := PublicationRecord{
+			TransferID:     transferID,
+			ExpectedSHA256: digest,
+			TargetPath:     filepath.Join(dest, "replayed.bin"),
+			Size:           int64(len(payload)),
+		}
+		pubBytes, err := json.Marshal(pub)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(rm.publishedPath(transferID), pubBytes, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("rename-not-yet-done publishes idempotently", func(t *testing.T) {
+		buildCrashedStaging(t, "wp4-sc11")
+
+		store, err := NewStore(StoreConfig{Dir: root})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rm := NewResumableManager(store, nil) // auto RecoverOnStartup
+		defer rm.Close()
+
+		// The publication was replayed: the destination file holds the exact bytes.
+		data, err := os.ReadFile(filepath.Join(dest, "replayed.bin"))
+		if err != nil {
+			t.Fatalf("publication not replayed after crash: %v", err)
+		}
+		if !bytes.Equal(data, payload) {
+			t.Fatal("replayed publication content mismatch")
+		}
+
+		// Staging is fully cleaned: no part, no meta, no publication record.
+		for _, p := range []string{
+			filepath.Join(root, StagingDirName, ".flitnix-part-wp4-sc11.part"),
+			filepath.Join(root, StagingDirName, ".flitnix-part-wp4-sc11.meta"),
+			filepath.Join(root, StagingDirName, ".published-wp4-sc11.json"),
+		} {
+			if _, err := os.Stat(p); !os.IsNotExist(err) {
+				t.Fatalf("expected staging file to be cleaned after replay: %s", p)
+			}
+		}
+
+		// The upload is deregistered: it completed before the crash.
+		if _, ok := rm.GetUpload("wp4-sc11"); ok {
+			t.Fatal("completed upload must not remain registered after publication replay")
+		}
+	})
+
+	t.Run("substituted destination detects attack and fails meta", func(t *testing.T) {
+		buildCrashedStaging(t, "wp4-sc11b")
+
+		// Same-size, different-content destination file: substitution attack.
+		if err := os.WriteFile(filepath.Join(dest, "replayed.bin"), bytes.Repeat([]byte("X"), 4096), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		store, err := NewStore(StoreConfig{Dir: root})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rm := NewResumableManager(store, nil) // auto RecoverOnStartup
+		defer rm.Close()
+
+		// The foreign content must not be replaced silently and the staged
+		// bytes must be retained for inspection; the record is dropped.
+		data, err := os.ReadFile(filepath.Join(dest, "replayed.bin"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Equal(data, payload) {
+			t.Fatal("staged content must not overwrite foreign destination content")
+		}
+		if _, err := os.Stat(filepath.Join(root, StagingDirName, ".flitnix-part-wp4-sc11b.part")); err != nil {
+			t.Fatalf("staged part must be retained on substitution: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(root, StagingDirName, ".published-wp4-sc11b.json")); !os.IsNotExist(err) {
+			t.Fatal("publication record must be dropped on substitution")
+		}
+
+		// The recovered meta is marked failed so no undefined offset recovery runs.
+		upload, ok := rm.GetUpload("wp4-sc11b")
+		if !ok {
+			t.Fatal("upload not registered after substitution handling")
+		}
+		if upload.Meta().State != ResumableFailed {
+			t.Fatalf("expected state failed after substitution, got %s", upload.Meta().State)
+		}
+	})
+}
+
+// TestResumableManager_RecoverOnStartup_CorruptMetaQuarantined verifies
+// Scenario 10: corrupted staging metadata is quarantined and never produces an
+// undefined offset recovery.
+func TestResumableManager_RecoverOnStartup_CorruptMetaQuarantined(t *testing.T) {
+	root := t.TempDir()
+	staging := filepath.Join(root, StagingDirName)
+	if err := os.MkdirAll(staging, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	metaPath := filepath.Join(staging, ".flitnix-part-wp4-sc10.meta")
+	if err := os.WriteFile(metaPath, []byte("{not valid json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := NewStore(StoreConfig{Dir: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rm := NewResumableManager(store, nil) // auto RecoverOnStartup
+	defer rm.Close()
+
+	// The corrupted meta file was quarantined.
+	if _, err := os.Stat(metaPath + ".corrupted"); err != nil {
+		t.Fatalf("expected corrupted meta to be quarantined as .corrupted: %v", err)
+	}
+	if _, err := os.Stat(metaPath); !os.IsNotExist(err) {
+		t.Fatal("expected original corrupted meta file to be renamed away")
+	}
+
+	// No upload is registered from invalid metadata.
+	if _, ok := rm.GetUpload("wp4-sc10"); ok {
+		t.Fatal("corrupted metadata must not register an upload")
+	}
+}
+
+// TestResumableManager_IngestStream_MissingPartGone410 verifies Scenario 9 at
+// the manager level: a vanished .part file with committed bytes on record must
+// fail the PATCH with ErrPartialMissing (mapped to 410 Gone by the HTTP layer)
+// instead of silently fabricating a sparse hole.
+func TestResumableManager_IngestStream_MissingPartGone410(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(StoreConfig{Dir: tmpDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rm := NewResumableManager(store, nil)
+	defer rm.Close()
+
+	if _, err := rm.CreateUpload("sess-1", "up-sc9", "b-1", "it-1", "gone.bin", "", 100*1024, tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	rm.SetCheckpointParams(32*1024, time.Hour)
+	if _, _, err := rm.IngestStream("up-sc9", 0, bytes.NewReader(bytes.Repeat([]byte("P"), 64*1024)), nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Remove the staged part behind the manager's back (external purge).
+	if err := os.Remove(filepath.Join(tmpDir, StagingDirName, ".flitnix-part-up-sc9.part")); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = rm.IngestStream("up-sc9", 64*1024, bytes.NewReader(bytes.Repeat([]byte("P"), 36*1024)), nil)
+	if !errors.Is(err, ErrPartialMissing) {
+		t.Fatalf("expected ErrPartialMissing for vanished part with committed bytes, got %v", err)
+	}
+
+	// A zero-committed upload may still recreate the part file (fresh create).
+	if _, err := rm.CreateUpload("sess-1", "up-sc9-fresh", "b-1", "it-2", "fresh.bin", "", 1024, tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := rm.IngestStream("up-sc9-fresh", 0, bytes.NewReader(bytes.Repeat([]byte("F"), 1024)), nil); err != nil {
+		t.Fatalf("expected fresh create with zero committed bytes to succeed, got %v", err)
+	}
+}
+
+// TestResumableManager_RecoverOnStartup_MissingPartRegistered verifies that
+// recovery registers uploads whose .part vanished, so HEAD exposes recorded
+// metadata and PATCH surfaces ErrPartialMissing instead of a 404.
+func TestResumableManager_RecoverOnStartup_MissingPartRegistered(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(StoreConfig{Dir: tmpDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rm := NewResumableManager(store, nil)
+	if _, err := rm.CreateUpload("sess-1", "up-sc9r", "b-1", "it-1", "vanish.bin", "", 100*1024, tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	rm.SetCheckpointParams(32*1024, time.Hour)
+	if _, _, err := rm.IngestStream("up-sc9r", 0, bytes.NewReader(bytes.Repeat([]byte("P"), 64*1024)), nil); err != nil {
+		t.Fatal(err)
+	}
+	rm.Close()
+
+	// Purge the part file while the manager is down.
+	if err := os.Remove(filepath.Join(tmpDir, StagingDirName, ".flitnix-part-up-sc9r.part")); err != nil {
+		t.Fatal(err)
+	}
+
+	rm2 := NewResumableManager(store, nil)
+	defer rm2.Close()
+
+	upload, ok := rm2.GetUpload("up-sc9r")
+	if !ok {
+		t.Fatal("upload with missing part must still be registered after recovery")
+	}
+	if upload.Meta().CommittedOffset != 64*1024 {
+		t.Fatalf("expected recorded committed offset 64 KB, got %d", upload.Meta().CommittedOffset)
+	}
+
+	// PATCH now fails with ErrPartialMissing rather than ErrUploadNotFound.
+	_, _, err = rm2.IngestStream("up-sc9r", 64*1024, bytes.NewReader(bytes.Repeat([]byte("P"), 36*1024)), nil)
+	if !errors.Is(err, ErrPartialMissing) {
+		t.Fatalf("expected ErrPartialMissing after recovery, got %v", err)
+	}
+}
+
+// TestResumableManager_IngestStream_ExpiredUploadRejected verifies Scenario 18
+// at the manager level: PATCH after the TTL is rejected with ErrUploadExpired.
+func TestResumableManager_IngestStream_ExpiredUploadRejected(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(StoreConfig{Dir: tmpDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rm := NewResumableManager(store, nil)
+	defer rm.Close()
+
+	if _, err := rm.CreateUpload("sess-1", "up-sc18", "b-1", "it-1", "expired.bin", "", 1024, tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	upload, ok := rm.GetUpload("up-sc18")
+	if !ok {
+		t.Fatal("upload not found")
+	}
+	upload.UpdateMeta(func(m *ResumableMeta) {
+		m.ExpiresAt = time.Now().Add(-time.Minute)
+	})
+
+	_, _, err = rm.IngestStream("up-sc18", 0, bytes.NewReader(bytes.Repeat([]byte("E"), 1024)), nil)
+	if !errors.Is(err, ErrUploadExpired) {
+		t.Fatalf("expected ErrUploadExpired for expired PATCH, got %v", err)
+	}
+}
