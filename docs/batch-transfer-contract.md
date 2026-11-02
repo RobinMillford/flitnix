@@ -4,8 +4,9 @@ This document defines the batch contract through Phase 5. Phase 3 added
 phone-to-desktop folder selection and sequential folder uploads. Phase 4 adds
 desktop-private file/folder source selection, native folder enumeration, and
 Wails file-drop registration. It does not add desktop-to-phone batch
-downloads, and Phase 5 adds browser-native desktop-to-phone downloads. Queue
-persistence and resumable transfers are still not included.
+downloads, and Phase 5 adds browser-native desktop-to-phone downloads. Resumable partial-item transfers and the durable recovery journal are
+implemented; recovery semantics are specified in
+`docs/phase3-scenario43-durable-recovery-design.md`.
 
 ## Domain model
 
@@ -20,7 +21,8 @@ private source path.
 `BatchView` and `ItemView` are separate phone-safe projections. They do not
 contain session ownership keys, bearer tokens, or absolute desktop paths.
 The server calculates aggregate declared bytes from validated item sizes.
-No batch state is persisted in this phase.
+Batch lifecycle transitions are journaled durably; the phone-facing views
+above remain in-memory projections of that state.
 
 Desktop selections use a separate `SharedSource` record. A file source has
 one regular-file item and retains the existing direct-download registration.
@@ -171,9 +173,8 @@ overlong/deep paths, colons, trailing spaces/dots, and Windows device names.
 This does not by itself prove that a later filesystem operation is safe.
 
 Desktop folder enumeration does not follow directory symlinks and skips
-symlinked files and special files. It records empty directories internally,
-but does not claim they are downloadable until archive generation supports
-them. Enumeration is bounded to 100,000 files and 100,000 empty directories;
+symlinked files and special files. It records empty directories, and the archive writer emits each one as an
+explicit directory entry. Enumeration is bounded to 100,000 files and 100,000 empty directories;
 each normalized source path is bounded to 4,096 bytes. A failed enumeration
 does not register a partial source.
 
@@ -189,16 +190,17 @@ batch requires explicit approval before any file content is accepted. A
 failure pauses the queue while preserving completed items. Session cancellation
 and application shutdown cancel active work and clean staging data.
 
-No resumable partial-item protocol is included yet.
+Resumable partial-item uploads (tus) are implemented for batch items.
 
 ## Browser and archive limitations
 
-Phone-to-desktop folder selection will use `webkitdirectory` where available,
+Phone-to-desktop folder selection uses `webkitdirectory` where available,
 with a flat multi-file fallback. Standard browser folder selection does not
-reliably expose empty directories.
+reliably expose empty directories, so empty directories are not uploadable
+from a phone.
 
-Desktop-to-phone folders will use a streamed, uncompressed ZIP as the
-universal default. Ordinary mobile browsers cannot universally create
+Desktop-to-phone folders use a streamed, uncompressed ZIP as the universal
+default. Ordinary mobile browsers cannot universally create
 arbitrary directory trees in Downloads, and File System Access API support and
 secure-context requirements vary. ZIP extraction remains a user/device action.
 
@@ -242,3 +244,36 @@ and removed on unmount.
   reports a failed download instead of saving a truncated ZIP.
   Browser downloads use a longer write-stall window than uploads because a
   phone browser can legitimately stop reading while it shows a save dialog.
+
+## Verified software-only acceptance (Phase 6)
+
+Verified in code and automated tests, without physical devices:
+
+- **Capability grants.** 128-bit random IDs and secrets from `crypto/rand`,
+  bound to the creating session and to one immutable archive plan, redeemed
+  exactly once by GET through an `HttpOnly`, `SameSite=Strict` cookie scoped to
+  that exact content URL, expiring after roughly one minute. Replay, use by
+  another session, and use without the cookie are rejected, and the long-lived
+  bearer token never appears in a download URL.
+- **Source mutation policy.** Every entry is opened through
+  `openTrustedSource`, which requires a regular file at `lstat` time and then
+  re-checks `os.SameFile` on the opened handle. A source that was deleted,
+  replaced, symlinked or swapped between selection and transmission fails the
+  download instead of streaming different bytes. The planned size fixes how
+  many bytes are read, so growth or truncation is reported as a changed source
+  rather than silently archived.
+- **Archive path policy.** Entry names are normalized (backslashes become
+  separators) and then rejected if absolute, empty, or containing `.`/`..`,
+  with a bounded length. Duplicate names receive deterministic ` (n)`
+  suffixes, so two entries never share a name.
+- **Streaming.** One source file at a time through the shared copy buffer,
+  `zip.Store`, no temporary complete archive, and no ZIP central directory when
+  the stream fails.
+- **Optional browser APIs.** `webkitdirectory`, the Wake Lock API and the File
+  System Access API are feature-detected; their absence only reduces
+  capability and never blocks the ordinary multiple-file flow.
+
+Still requires physical acceptance: native Windows/macOS drag-and-drop and
+file pickers, real Wi-Fi throughput (the Config-4 at least 95 % of Config-1
+target), mobile-browser save behaviour and background suspension, and a real
+device's empty-directory expectations.
