@@ -58,31 +58,26 @@ func getBenchCPUTime() time.Duration {
 	return 0
 }
 
+// createBenchFile materialises a fixture of exactly the requested size.
+//
+// The regression benchmarks measure streaming throughput and allocation, not
+// byte values, so the fixture is created sparse: the 2 GiB case keeps its
+// full size while costing almost no disk. Writing real bytes here previously
+// exhausted the machine's disk quota and failed unrelated tests.
 func createBenchFile(path string, size int64) {
 	if fi, err := os.Stat(path); err == nil && fi.Size() == size {
 		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		panic(err)
 	}
 	f, err := os.Create(path)
 	if err != nil {
 		panic(err)
 	}
 	defer f.Close()
-
-	chunk := make([]byte, 1024*1024)
-	for i := range chunk {
-		chunk[i] = byte((i * 37) & 0xff)
-	}
-
-	var written int64
-	for written < size {
-		toWrite := int64(len(chunk))
-		if size-written < toWrite {
-			toWrite = size - written
-		}
-		if _, err := f.Write(chunk[:toWrite]); err != nil {
-			panic(err)
-		}
-		written += toWrite
+	if err := f.Truncate(size); err != nil {
+		panic(err)
 	}
 }
 
