@@ -73,3 +73,33 @@ jobs:
       - name: Test Linux package assembly
         run: |
           bash scripts/package-linux.sh "0.1.0-ci" "amd64" "dist"
+
+  # Cross-platform compile and vet. A successful build proves the source
+  # compiles for the production targets; it does NOT prove native GUI
+  # behaviour, drag-and-drop, file pickers or packaging on those systems.
+  cross-platform-build:
+    name: Build & vet (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Go
+        uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Compile every package
+        run: go build ./...
+
+      - name: Vet every package
+        run: go vet ./...
+
+      - name: Platform-neutral tests
+        run: go test -count=1 ./internal/transfer ./internal/recovery ./internal/session ./internal/qr ./internal/settings
