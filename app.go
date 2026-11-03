@@ -333,6 +333,12 @@ func NewApp() (*App, error) {
 		fmt.Fprintf(os.Stderr, "flitnix: host identity initialization warning: %v\n", err)
 	}
 	pairingCoord := devices.NewPairingCoordinator(hostIdentity, devicesStore)
+	// F-05: make the pairing failure counter and lockout survive restarts. A
+	// corrupt or unwritable record fails closed inside the coordinator; here we
+	// only surface the startup problem the same way the other stores do.
+	if err := pairingCoord.EnableDurableLockout(filepath.Join(dataDir, "pairing_security.json")); err != nil {
+		fmt.Fprintf(os.Stderr, "flitnix: pairing lockout persistence warning: %v\n", err)
+	}
 
 	a := &App{
 		store:         store,
