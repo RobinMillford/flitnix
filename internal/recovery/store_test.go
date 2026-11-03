@@ -1,6 +1,7 @@
 package recovery
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/binary"
@@ -101,9 +102,7 @@ func TestStoreFreshInstallCreatesKeyDurably(t *testing.T) {
 	if info.Size() != KeyLen {
 		t.Fatalf("installation key size = %d, want %d", info.Size(), KeyLen)
 	}
-	if mode := info.Mode().Perm(); mode != 0o600 {
-		t.Fatalf("installation key mode = %o, want 600", mode)
-	}
+	assertPrivatePath(t, filepath.Join(dir, keyFileName), info)
 	if entries, _ := os.ReadDir(dir); len(entries) == 0 {
 		t.Fatal("state directory is empty")
 	}
@@ -260,6 +259,114 @@ func TestStoreIncompleteTailTruncatesToExactValidSize(t *testing.T) {
 	// Recovered state must still be appendable at the next sequence.
 	if err := reopened.Append(EventSessionCreated, sessionRecord("k2")); err != nil {
 		t.Fatalf("append after tail repair: %v", err)
+	}
+}
+
+// TestStoreTailRepairPreservesValidPrefixExactly pins the two halves of the
+// repair contract: every byte of valid history survives unchanged, and no byte
+// of the incomplete frame survives at all. A repair that kept a partial frame
+// would leave a corrupt prefix for the next reopen to reject.
+func TestStoreTailRepairPreservesValidPrefixExactly(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	for _, key := range []string{"k1", "k2", "k3"} {
+		if err := store.Append(EventSessionCreated, sessionRecord(key)); err != nil {
+			t.Fatalf("append %s: %v", key, err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	path := filepath.Join(dir, journalName)
+	prefix, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read journal: %v", err)
+	}
+	valid := int64(len(prefix))
+
+	// A torn final frame: a plausible length header and a partial body, twice
+	// so the repair must not simply drop a fixed number of trailing bytes.
+	appendBytes(t, dir, []byte{0, 0, 0, 60, '{', '"', 's'})
+	appendBytes(t, dir, []byte{0, 0, 0, 90, '}'})
+	if got := journalSize(t, dir); got <= valid {
+		t.Fatalf("journal size = %d, expected a torn tail after %d valid bytes", got, valid)
+	}
+
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatalf("reopen with incomplete tail: %v", err)
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read repaired journal: %v", err)
+	}
+	if int64(len(after)) != valid {
+		t.Fatalf("repaired journal length = %d, want exactly %d", len(after), valid)
+	}
+	if !bytes.Equal(prefix, after) {
+		t.Fatal("repair altered the valid journal prefix; history must be preserved byte for byte")
+	}
+	if got := len(reopened.State().Sessions); got != 3 {
+		t.Fatalf("replayed %d sessions after repair, want 3", got)
+	}
+	// The repaired offset must be appendable at the next sequence, with no gap.
+	if err := reopened.Append(EventSessionCreated, sessionRecord("k4")); err != nil {
+		t.Fatalf("append after repair: %v", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatalf("close repaired store: %v", err)
+	}
+
+	// A second reopen must find a fully valid journal: the repair left no
+	// trailing damage for the next start to trip over.
+	again, err := Open(dir)
+	if err != nil {
+		t.Fatalf("reopen after repaired append: %v", err)
+	}
+	defer again.Close()
+	if got := len(again.State().Sessions); got != 4 {
+		t.Fatalf("replayed %d sessions after the repair round trip, want 4", got)
+	}
+}
+
+// TestStoreUnreadableJournalFailsClosed proves a journal that cannot be opened
+// is reported as an error and never yields a usable store. The same guard
+// covers a failed truncate: recoverTail returns the wrapped error instead of
+// treating a partial repair as success.
+func TestStoreUnreadableJournalFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := store.Append(EventSessionCreated, sessionRecord("k1")); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	path := filepath.Join(dir, journalName)
+	appendBytes(t, dir, []byte{0, 0, 0, 20, '{'})
+	if err := os.Chmod(path, 0o500); err != nil {
+		t.Skipf("cannot make the journal unwritable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+
+	got, err := Open(dir)
+	if err == nil {
+		// A privileged account can write through a 0500 mode, so the scenario
+		// cannot be constructed here; the store is still usable, close it.
+		_ = got.Close()
+		t.Skip("journal remains writable for this account; cannot inject the failure")
+	}
+	if got != nil {
+		t.Fatal("Open returned a store together with an error")
 	}
 }
 

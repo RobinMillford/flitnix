@@ -106,8 +106,9 @@ func TestStore_ValidationAndNormalization(t *testing.T) {
 	if norm.Locale != "system" {
 		t.Fatalf("expected empty locale to normalize to 'system', got %q", norm.Locale)
 	}
-	if norm.DownloadDir != "/my/path" {
-		t.Fatalf("expected cleaned downloadDir '/my/path', got %q", norm.DownloadDir)
+	wantDir := filepath.Clean(filepath.FromSlash("/my/path"))
+	if norm.DownloadDir != wantDir {
+		t.Fatalf("expected cleaned downloadDir %q, got %q", wantDir, norm.DownloadDir)
 	}
 }
 

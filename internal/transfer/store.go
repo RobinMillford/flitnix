@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+
+	"github.com/itsyamin/flitnix/internal/secfile"
 )
 
 const (
@@ -95,13 +97,106 @@ func (s *Store) SetDir(dir string) error {
 	return nil
 }
 
-// ensureDir creates the receive directory when first needed. os.MkdirAll
-// is idempotent and tolerant of concurrent creators, so no extra locking is
-// required.
+// ensureDir creates the receive directory when first needed.
+//
+// Ownership is decided by the filesystem operation that created the directory,
+// never by a remembered path. os.Mkdir is atomic, so exactly one caller - in
+// this process or another - can report success for a given directory, and only
+// that caller treats it as Flitnix's to secure. A stat-then-create race, or a
+// directory deleted and recreated later, therefore cannot make Flitnix replace
+// the ACL of a directory it did not create.
 func (s *Store) ensureDir() error {
 	dir := s.Dir()
-	if err := os.MkdirAll(dir, dirPerm); err != nil {
+	created, err := mkdirLeaf(dir, dirPerm)
+	if err != nil {
 		return fmt.Errorf("transfer: cannot create receive directory %s: %w", dir, err)
+	}
+	if err := verifyCreatedDir(dir, created); err != nil {
+		return fmt.Errorf("transfer: receive directory %s: %w", dir, err)
+	}
+	return nil
+}
+
+// mkdirLeaf creates path, reporting whether this call is the one that created
+// the exact leaf directory.
+//
+// os.Mkdir is the only ownership decision: it fails with a "exists" error when
+// anyone else got there first, so the reported flag is never a guess made
+// before the creation attempt.
+func mkdirLeaf(path string, perm os.FileMode) (bool, error) {
+	err := os.Mkdir(path, perm)
+	switch {
+	case err == nil:
+		return true, nil
+	case os.IsExist(err):
+		return false, nil
+	case os.IsNotExist(err):
+		// The parent chain is missing: build it, then let os.Mkdir decide
+		// ownership of the leaf exactly as above.
+		if perr := os.MkdirAll(filepath.Dir(path), perm); perr != nil {
+			return false, perr
+		}
+		if err := os.Mkdir(path, perm); err != nil {
+			if os.IsExist(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		return true, nil
+	default:
+		return false, err
+	}
+}
+
+// verifyCreatedDir validates a directory Flitnix is about to use, and applies
+// the protected policy only when this process created it.
+//
+// A symlink or reparse point is never treated as a directory Flitnix created:
+// replacing the DACL of whatever it points at would be an escalation. The
+// target is only validated as a directory and its access is left exactly as
+// the user configured it.
+func verifyCreatedDir(path string, created bool) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, terr := os.Stat(path)
+		if terr != nil || !target.IsDir() {
+			return fmt.Errorf("unsafe destination directory %q", path)
+		}
+		return nil
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("unsafe destination directory %q", path)
+	}
+	if !created {
+		// Pre-existing and user-selected: its ACL is not ours to replace.
+		return nil
+	}
+	// dirPerm is enforced only by the kernel on the Unix family. Windows
+	// ignores it, so a directory Flitnix just created would otherwise inherit
+	// whatever its parent grants and expose received bytes.
+	if err := secfile.ProtectDir(path); err != nil {
+		return fmt.Errorf("secure: %w", err)
+	}
+	return nil
+}
+
+// protectPartFile secures a temporary file Flitnix just created, once per file
+// creation and never per chunk.
+//
+// It runs unconditionally rather than depending on the receive directory being
+// Flitnix's own: a pre-existing shared receive root keeps its ACL, so the part
+// file - and, through the hard link Commit creates, the published file - needs
+// a protected DACL of its own. Applying it to a file that already inherited the
+// same policy is idempotent, and confidentiality then never rests on any
+// bookkeeping about the parent path.
+func (s *Store) protectPartFile(f *os.File, path string) error {
+	if err := secfile.ProtectFile(path); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return fmt.Errorf("transfer: cannot secure temporary file %s: %w", path, err)
 	}
 	return nil
 }
@@ -174,6 +269,9 @@ func (s *Store) OpenPart(name string) (*PartFile, error) {
 			}
 			return nil, fmt.Errorf("transfer: cannot create temporary file in %s: %w", dir, err)
 		}
+		if err := s.protectPartFile(f, path); err != nil {
+			return nil, err
+		}
 		return &PartFile{store: s, f: f, path: path, name: name, finalDir: dir}, nil
 	}
 
@@ -200,6 +298,14 @@ func (s *Store) AllocateFolderRoot(raw string) (string, error) {
 		}
 		err := os.Mkdir(path, dirPerm)
 		if err == nil {
+			// This call created the root, so it is Flitnix's to secure. A root
+			// created inside a user-selected directory would otherwise inherit
+			// that directory's wider access; secure the root, never the
+			// directory around it.
+			if perr := secfile.ProtectDir(path); perr != nil {
+				_ = os.Remove(path)
+				return "", fmt.Errorf("transfer: secure folder root: %w", perr)
+			}
 			return candidate, nil
 		}
 		if os.IsExist(err) {
@@ -251,7 +357,7 @@ func (s *Store) OpenPartPath(root, relativePath string) (*PartFile, error) {
 	if !s.withinDir(base) {
 		return nil, fmt.Errorf("transfer: refusing folder root outside receive directory")
 	}
-	if err := ensureSafeDirectory(base, dirPerm); err != nil {
+	if err := s.prepareDir(base, dirPerm); err != nil {
 		return nil, err
 	}
 	dir := base
@@ -262,7 +368,7 @@ func (s *Store) OpenPartPath(root, relativePath string) (*PartFile, error) {
 			if !s.withinDir(dir) {
 				return nil, fmt.Errorf("transfer: refusing path outside receive directory")
 			}
-			if err := ensureSafeDirectory(dir, dirPerm); err != nil {
+			if err := s.prepareDir(dir, dirPerm); err != nil {
 				return nil, err
 			}
 		}
@@ -280,24 +386,27 @@ func (s *Store) OpenPartPath(root, relativePath string) (*PartFile, error) {
 			}
 			return nil, fmt.Errorf("transfer: cannot create temporary folder file: %w", err)
 		}
+		if err := s.protectPartFile(f, path); err != nil {
+			return nil, err
+		}
 		return &PartFile{store: s, f: f, path: path, name: name, finalDir: dir}, nil
 	}
 	return nil, errors.New("transfer: could not allocate a unique temporary folder file")
 }
 
-func ensureSafeDirectory(path string, perm os.FileMode) error {
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		if err := os.Mkdir(path, perm); err != nil && !os.IsExist(err) {
-			return fmt.Errorf("transfer: creating directory: %w", err)
-		}
-		info, err = os.Lstat(path)
-	}
+// prepareDir creates or validates one directory beneath the receive root.
+//
+// Ownership comes from mkdirLeaf's atomic creation, exactly as for the receive
+// root: a directory this call created is Flitnix's to secure, and one that was
+// already there is only validated. A directory Flitnix created inside a
+// user-selected root would otherwise inherit that root's wider DACL.
+func (s *Store) prepareDir(path string, perm os.FileMode) error {
+	created, err := mkdirLeaf(path, perm)
 	if err != nil {
-		return fmt.Errorf("transfer: inspecting directory: %w", err)
+		return fmt.Errorf("transfer: creating directory: %w", err)
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return fmt.Errorf("transfer: unsafe destination directory %q", path)
+	if err := verifyCreatedDir(path, created); err != nil {
+		return fmt.Errorf("transfer: %s: %w", path, err)
 	}
 	return nil
 }
