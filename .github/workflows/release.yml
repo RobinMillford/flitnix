@@ -51,6 +51,17 @@ jobs:
           npm ci
           npm run build
 
+      - name: Verify frontend embed assets exist
+        # main.go embeds all:frontend/dist; fail fast with a clear message if
+        # the frontend build above did not produce it, before wails compiles.
+        shell: bash
+        run: |
+          if [ ! -f frontend/dist/index.html ]; then
+            echo "::error::frontend/dist/index.html is missing; run 'npm ci && npm run build' in frontend/ before compiling Go (main.go embeds all:frontend/dist)" >&2
+            exit 1
+          fi
+          echo "frontend/dist present for go:embed"
+
       - name: Build Linux binary
         run: |
           wails build -tags webkit2_41
@@ -183,6 +194,17 @@ jobs:
           npm ci
           npm run build
 
+      - name: Verify frontend embed assets exist
+        # main.go embeds all:frontend/dist; fail fast with a clear message if
+        # the frontend build above did not produce it, before wails compiles.
+        shell: bash
+        run: |
+          if [ ! -f frontend/dist/index.html ]; then
+            echo "::error::frontend/dist/index.html is missing; run 'npm ci && npm run build' in frontend/ before compiling Go (main.go embeds all:frontend/dist)" >&2
+            exit 1
+          fi
+          echo "frontend/dist present for go:embed"
+
       - name: Build Windows Installer
         run: |
           wails build -nsis
@@ -269,6 +291,17 @@ jobs:
           cd frontend
           npm ci
           npm run build
+
+      - name: Verify frontend embed assets exist
+        # main.go embeds all:frontend/dist; fail fast with a clear message if
+        # the frontend build above did not produce it, before wails compiles.
+        shell: bash
+        run: |
+          if [ ! -f frontend/dist/index.html ]; then
+            echo "::error::frontend/dist/index.html is missing; run 'npm ci && npm run build' in frontend/ before compiling Go (main.go embeds all:frontend/dist)" >&2
+            exit 1
+          fi
+          echo "frontend/dist present for go:embed"
 
       - name: Build macOS Universal App
         run: |
