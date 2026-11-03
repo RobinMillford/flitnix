@@ -23,6 +23,10 @@ func checkSystemdInhibitContainsFlitnix() bool {
 }
 
 func TestPhysical_SystemdInhibitTransitions(t *testing.T) {
+	// Native logind integration: requires real privileges polkit denies to
+	// non-local CI sessions. Opt-in only (see native_optin_test.go).
+	requireNativeTestsOptIn(t)
+
 	mgr := New()
 	defer mgr.Close()
 
