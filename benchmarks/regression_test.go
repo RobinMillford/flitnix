@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
-	"syscall"
 	"testing"
 	"time"
 
@@ -46,16 +45,6 @@ type BenchScenarioResult struct {
 	Runs         []BenchRunMetrics `json:"runs"`
 	MedianRun    BenchRunMetrics   `json:"median_run"`
 	Pass1Percent float64           `json:"pass1_time_percent"`
-}
-
-func getBenchCPUTime() time.Duration {
-	var ru syscall.Rusage
-	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru); err == nil {
-		user := time.Duration(ru.Utime.Sec)*time.Second + time.Duration(ru.Utime.Usec)*time.Microsecond
-		sys := time.Duration(ru.Stime.Sec)*time.Second + time.Duration(ru.Stime.Usec)*time.Microsecond
-		return user + sys
-	}
-	return 0
 }
 
 // createBenchFile materialises a fixture of exactly the requested size.
@@ -218,7 +207,7 @@ func executeScenario(client *http.Client, serverURL, token string, reg *transfer
 		runtime.GC()
 		var mBefore, mAfter runtime.MemStats
 		runtime.ReadMemStats(&mBefore)
-		cpuBefore := getBenchCPUTime()
+		cpuBefore := processCPUTime()
 
 		t0 := time.Now()
 		var sourceIDs []string
@@ -271,7 +260,7 @@ func executeScenario(client *http.Client, serverURL, token string, reg *transfer
 		}
 		streamDur := time.Since(t3)
 		totalDur := time.Since(t0)
-		cpuAfter := getBenchCPUTime()
+		cpuAfter := processCPUTime()
 		runtime.ReadMemStats(&mAfter)
 
 		actualSHA := hex.EncodeToString(hasher.Sum(nil))
@@ -327,7 +316,7 @@ func executeFolderScenario(client *http.Client, serverURL, token string, reg *tr
 		runtime.GC()
 		var mBefore, mAfter runtime.MemStats
 		runtime.ReadMemStats(&mBefore)
-		cpuBefore := getBenchCPUTime()
+		cpuBefore := processCPUTime()
 
 		t0 := time.Now()
 		source, err := reg.AddFolder(folder, "")
@@ -376,7 +365,7 @@ func executeFolderScenario(client *http.Client, serverURL, token string, reg *tr
 		}
 		streamDur := time.Since(t3)
 		totalDur := time.Since(t0)
-		cpuAfter := getBenchCPUTime()
+		cpuAfter := processCPUTime()
 		runtime.ReadMemStats(&mAfter)
 
 		actualSHA := hex.EncodeToString(hasher.Sum(nil))
@@ -431,7 +420,7 @@ func executeDirectFileScenario(client *http.Client, serverURL, token string, reg
 		runtime.GC()
 		var mBefore, mAfter runtime.MemStats
 		runtime.ReadMemStats(&mBefore)
-		cpuBefore := getBenchCPUTime()
+		cpuBefore := processCPUTime()
 
 		t0 := time.Now()
 		sf, err := reg.Add(path, filepath.Base(path), "")
@@ -459,7 +448,7 @@ func executeDirectFileScenario(client *http.Client, serverURL, token string, reg
 		}
 		streamDur := time.Since(t2)
 		totalDur := time.Since(t0)
-		cpuAfter := getBenchCPUTime()
+		cpuAfter := processCPUTime()
 		runtime.ReadMemStats(&mAfter)
 
 		actualSHA := hex.EncodeToString(hasher.Sum(nil))

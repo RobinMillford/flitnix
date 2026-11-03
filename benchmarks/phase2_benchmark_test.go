@@ -14,7 +14,6 @@ import (
 	"runtime"
 	"sort"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -125,16 +124,6 @@ type Phase2ScenarioResult struct {
 	Concurrency int             `json:"concurrency"`
 	Runs        []Phase2Metrics `json:"runs"`
 	Median      Phase2Metrics   `json:"median"`
-}
-
-func getPhase2CPUTime() time.Duration {
-	var ru syscall.Rusage
-	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru); err == nil {
-		user := time.Duration(ru.Utime.Sec)*time.Second + time.Duration(ru.Utime.Usec)*time.Microsecond
-		sys := time.Duration(ru.Stime.Sec)*time.Second + time.Duration(ru.Stime.Usec)*time.Microsecond
-		return user + sys
-	}
-	return 0
 }
 
 func getPhase2Median(runs []Phase2Metrics) Phase2Metrics {
@@ -364,7 +353,7 @@ func runSingleFileBenchmark(client *http.Client, serverURL string, sessMgr *sess
 		runtime.GC()
 		var mBefore, mAfter runtime.MemStats
 		runtime.ReadMemStats(&mBefore)
-		cpuBefore := getPhase2CPUTime()
+		cpuBefore := processCPUTime()
 
 		sess, _ := sessMgr.Create()
 		token := sess.Token()
@@ -414,7 +403,7 @@ func runSingleFileBenchmark(client *http.Client, serverURL string, sessMgr *sess
 		}
 		streamDur := time.Since(t2)
 		totalDur := time.Since(t0)
-		cpuAfter := getPhase2CPUTime()
+		cpuAfter := processCPUTime()
 		runtime.ReadMemStats(&mAfter)
 
 		actualSHA := hex.EncodeToString(hasher.Sum(nil))
@@ -484,7 +473,7 @@ func runBatchBenchmark(client *http.Client, serverURL string, sessMgr *session.M
 		runtime.GC()
 		var mBefore, mAfter runtime.MemStats
 		runtime.ReadMemStats(&mBefore)
-		cpuBefore := getPhase2CPUTime()
+		cpuBefore := processCPUTime()
 
 		sess, _ := sessMgr.Create()
 		token := sess.Token()
@@ -538,7 +527,7 @@ func runBatchBenchmark(client *http.Client, serverURL string, sessMgr *session.M
 		}
 		streamDur := time.Since(t2)
 		totalDur := time.Since(t0)
-		cpuAfter := getPhase2CPUTime()
+		cpuAfter := processCPUTime()
 		runtime.ReadMemStats(&mAfter)
 
 		actualSHA := hex.EncodeToString(hasher.Sum(nil))
@@ -606,7 +595,7 @@ func runFolderBenchmark(client *http.Client, serverURL string, sessMgr *session.
 		runtime.GC()
 		var mBefore, mAfter runtime.MemStats
 		runtime.ReadMemStats(&mBefore)
-		cpuBefore := getPhase2CPUTime()
+		cpuBefore := processCPUTime()
 
 		sess, _ := sessMgr.Create()
 		token := sess.Token()
@@ -656,7 +645,7 @@ func runFolderBenchmark(client *http.Client, serverURL string, sessMgr *session.
 		}
 		streamDur := time.Since(t2)
 		totalDur := time.Since(t0)
-		cpuAfter := getPhase2CPUTime()
+		cpuAfter := processCPUTime()
 		runtime.ReadMemStats(&mAfter)
 
 		actualSHA := hex.EncodeToString(hasher.Sum(nil))
@@ -728,7 +717,7 @@ func runConcurrentBenchmark(client *http.Client, serverURL string, sessMgr *sess
 		runtime.GC()
 		var mBefore, mAfter runtime.MemStats
 		runtime.ReadMemStats(&mBefore)
-		cpuBefore := getPhase2CPUTime()
+		cpuBefore := processCPUTime()
 
 		// Each concurrent stream uses its own session to represent independent client streams
 		type task struct {
@@ -841,7 +830,7 @@ func runConcurrentBenchmark(client *http.Client, serverURL string, sessMgr *sess
 		wg.Wait()
 		totalDur := time.Since(t0)
 		streamDur := time.Since(t1)
-		cpuAfter := getPhase2CPUTime()
+		cpuAfter := processCPUTime()
 		runtime.ReadMemStats(&mAfter)
 
 		for i := 0; i < concurrency; i++ {
