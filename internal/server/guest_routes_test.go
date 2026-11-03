@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -545,12 +546,20 @@ func TestGuestCollisionPolicyHTTP(t *testing.T) {
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 
+	// Every guest request authenticates through the HttpOnly cookie, so the
+	// client needs a cookie jar: the join response no longer returns a token.
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Jar: jar}
+
 	// Join guest
 	joinData, _ := json.Marshal(map[string]string{
 		"secret":   room.InviteSecret,
 		"nickname": "Alice",
 	})
-	respJoin, err := http.Post(ts.URL+"/guest-api/join", "application/json", bytes.NewReader(joinData))
+	respJoin, err := client.Post(ts.URL+"/guest-api/join", "application/json", bytes.NewReader(joinData))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -563,9 +572,8 @@ func TestGuestCollisionPolicyHTTP(t *testing.T) {
 	// Declare first upload
 	meta1, _ := json.Marshal(map[string]any{"name": "file.txt", "size": 10})
 	req1, _ := http.NewRequest("POST", ts.URL+"/guest-api/uploads", bytes.NewReader(meta1))
-	req1.Header.Set("Authorization", "Bearer "+joinRes.Token)
 	req1.Header.Set("Content-Type", "application/json")
-	resp1, err := http.DefaultClient.Do(req1)
+	resp1, err := client.Do(req1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -576,9 +584,8 @@ func TestGuestCollisionPolicyHTTP(t *testing.T) {
 
 	// Declare second upload with same name under CollisionReject -> 409 Conflict
 	req2, _ := http.NewRequest("POST", ts.URL+"/guest-api/uploads", bytes.NewReader(meta1))
-	req2.Header.Set("Authorization", "Bearer "+joinRes.Token)
 	req2.Header.Set("Content-Type", "application/json")
-	resp2, err := http.DefaultClient.Do(req2)
+	resp2, err := client.Do(req2)
 	if err != nil {
 		t.Fatal(err)
 	}
