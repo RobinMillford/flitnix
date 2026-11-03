@@ -16,6 +16,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/itsyamin/flitnix/internal/secfile"
 )
 
 var (
@@ -203,7 +205,13 @@ type ResumableManager struct {
 // NewResumableManager initializes the resumable upload manager.
 func NewResumableManager(store *Store, quota *QuotaManager) *ResumableManager {
 	stagingDir := filepath.Join(store.Dir(), StagingDirName)
+	// The staging directory is Flitnix's own: a fixed name inside the receive
+	// root that Flitnix creates and owns, so replacing its DACL cannot revoke
+	// access anyone else was granted. Best effort here because the constructor
+	// cannot fail; CreateUpload re-applies the policy with error propagation
+	// before the first staged byte exists.
 	_ = os.MkdirAll(stagingDir, 0o700)
+	_ = secfile.ProtectDir(stagingDir)
 
 	rm := &ResumableManager{
 		store:              store,
@@ -444,12 +452,20 @@ func (rm *ResumableManager) CreateUpload(sessionKey, transferID, batchID, itemID
 		ExpiresAt:       now.Add(DefaultUploadTTL),
 	}
 
-	// Ensure staging directory exists
+	// Ensure the staging directory exists and is private before the part file
+	// is created. Windows ignores the 0700 mode, so a staging directory under
+	// a wide parent would otherwise expose partially received bytes.
 	if err := os.MkdirAll(rm.stagingDir, 0o700); err != nil {
 		if rm.quota != nil {
 			rm.quota.Release(transferID)
 		}
 		return nil, fmt.Errorf("transfer: create staging dir: %w", err)
+	}
+	if err := secfile.ProtectDir(rm.stagingDir); err != nil {
+		if rm.quota != nil {
+			rm.quota.Release(transferID)
+		}
+		return nil, fmt.Errorf("transfer: secure staging dir: %w", err)
 	}
 
 	// Create or ensure empty .part file
@@ -881,6 +897,11 @@ func (rm *ResumableManager) FinalizeComplete(transferID, expectedSHA256 string) 
 	if err := os.MkdirAll(destDir, 0o700); err != nil {
 		return nil, fmt.Errorf("transfer: create destination dir: %w", err)
 	}
+	// destDir is user-selected: a configured output folder, a documents
+	// folder, or a folder chosen per transfer. Its DACL is deliberately left
+	// alone, because replacing it would revoke access the user granted to
+	// other people or other programs. Confidentiality is enforced on the file
+	// being published instead, below.
 
 	var targetPath string
 	if meta.RelativePath != "" {
@@ -920,7 +941,18 @@ func (rm *ResumableManager) FinalizeComplete(transferID, expectedSHA256 string) 
 		targetPath = rm.resolveCollisionVariant(destDir, meta.SanitizedName)
 	}
 
-	// 1. Write durable publication record
+	// 1. Secure the file while it is still in Flitnix's own staging directory.
+	//
+	// The DACL is marked protected, so moving the file into destDir cannot make
+	// it inherit that directory's wider access, and the descriptor travels with
+	// the file through the rename below - publication stays atomic and no ACL
+	// work happens per chunk. A failure here stops publication rather than
+	// publishing a file with inherited broad access.
+	if err := secfile.ProtectFile(partPath); err != nil {
+		return nil, fmt.Errorf("transfer: secure published file: %w", err)
+	}
+
+	// 2. Write durable publication record
 	pubRecord := PublicationRecord{
 		TransferID:     transferID,
 		ExpectedSHA256: expectedSHA256,
@@ -937,13 +969,13 @@ func (rm *ResumableManager) FinalizeComplete(transferID, expectedSHA256 string) 
 		return nil, fmt.Errorf("transfer: write publication record: %w", err)
 	}
 
-	// 2. Atomic rename from .part to targetPath
+	// 3. Atomic rename from .part to targetPath
 	if err := renameFileWithRetry(partPath, targetPath); err != nil {
 		_ = os.Remove(pubPath)
 		return nil, fmt.Errorf("transfer: publish rename: %w", err)
 	}
 
-	// 3. Clean up staging files
+	// 4. Clean up staging files
 	_ = os.Remove(pubPath)
 	_ = os.Remove(rm.metaPath(transferID))
 	_ = os.Remove(rm.metaTmpPath(transferID))

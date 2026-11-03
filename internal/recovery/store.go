@@ -50,6 +50,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/itsyamin/flitnix/internal/secfile"
 )
 
 const (
@@ -242,6 +244,19 @@ func Open(dir string) (*Store, error) {
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("recovery: create state directory: %w", err)
+	}
+	// The 0700 mode above is enforced only on the Unix family. Windows ignores
+	// it, so an inherited DACL from a shared or redirected parent could let
+	// another local account read the installation key or the journal.
+	//
+	// This directory is exclusively Flitnix's: it is the application's own
+	// state, created by Flitnix and never a path the user chose to share, so
+	// replacing its DACL is correct - and must also correct a directory left
+	// over from an older install. Apply the policy before the key or any
+	// journal frame exists, and refuse to open the store rather than serve
+	// from a directory whose confidentiality is unproven.
+	if err := secfile.ProtectDir(dir); err != nil {
+		return nil, fmt.Errorf("recovery: secure state directory: %w", err)
 	}
 
 	lock, err := acquireInstanceLock(filepath.Join(dir, lockName))
@@ -541,16 +556,50 @@ func (s *Store) replay() error {
 // frames after it is reported as ErrCorrupt and never truncated away.
 func (s *Store) recoverTail(validEnd int64, last uint64, reason string) error {
 	s.preserveTailEvidence(validEnd)
-	if err := s.wal.Truncate(validEnd); err != nil {
+	if err := s.repairJournal(validEnd); err != nil {
 		return fmt.Errorf("%w: %s: truncate trailing frame: %v", ErrCorrupt, reason, err)
 	}
-	if err := s.wal.Sync(); err != nil {
-		return fmt.Errorf("%w: %s: sync truncated journal: %v", ErrCorrupt, reason, err)
-	}
-	if _, err := s.wal.Seek(0, io.SeekEnd); err != nil {
-		return fmt.Errorf("recovery: seek journal end: %w", err)
-	}
 	s.seq = last
+	return nil
+}
+
+// repairJournal closes the append-mode replay handle before truncating and
+// reopens it only after the repaired length is durable. Windows can reject
+// SetEndOfFile through an append-mode handle even when the file was opened
+// read/write, so recovery uses a dedicated non-append handle for this repair.
+func (s *Store) repairJournal(validEnd int64) error {
+	if err := s.wal.Close(); err != nil {
+		return fmt.Errorf("close journal before repair: %w", err)
+	}
+	s.wal = nil
+
+	journalPath := filepath.Join(s.dir, journalName)
+	repair, err := os.OpenFile(journalPath, os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("open journal for repair: %w", err)
+	}
+	if err := repair.Truncate(validEnd); err != nil {
+		_ = repair.Close()
+		return err
+	}
+	if err := repair.Sync(); err != nil {
+		_ = repair.Close()
+		return fmt.Errorf("sync truncated journal: %w", err)
+	}
+	if err := repair.Close(); err != nil {
+		return fmt.Errorf("close repaired journal: %w", err)
+	}
+
+	wal, err := os.OpenFile(journalPath, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600)
+	if err != nil {
+		return fmt.Errorf("reopen repaired journal: %w", err)
+	}
+	s.wal = wal
+	if _, err := s.wal.Seek(0, io.SeekEnd); err != nil {
+		_ = s.wal.Close()
+		s.wal = nil
+		return fmt.Errorf("seek repaired journal end: %w", err)
+	}
 	return nil
 }
 
