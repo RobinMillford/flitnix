@@ -136,6 +136,51 @@ func TestManager_MultipleAcquisitionsAndPartialRelease(t *testing.T) {
 	}
 }
 
+// TestManager_FullReleaseThenReacquire covers the transition the native
+// physical test exercises: a complete release must uninhibit, and the next
+// acquire after an idle period must re-inhibit with the new reason.
+func TestManager_FullReleaseThenReacquire(t *testing.T) {
+	mock := &mockBackend{supported: true}
+	mgr := NewWithBackend(mock)
+
+	l1, err := mgr.Acquire("transfer 1")
+	if err != nil {
+		t.Fatalf("acquire 1: %v", err)
+	}
+	l1.Release()
+
+	mock.mu.Lock()
+	if mock.inhibitCalls != 1 || mock.uninhibitCalls != 1 {
+		mock.mu.Unlock()
+		t.Fatalf("after first cycle: inhibit = %d, uninhibit = %d; want 1, 1", mock.inhibitCalls, mock.uninhibitCalls)
+	}
+	mock.mu.Unlock()
+
+	if st := mgr.Status(); st.Active || st.Holders != 0 || st.Reason != "" {
+		t.Errorf("status after full release: %+v; want inactive with empty reason", st)
+	}
+
+	l2, err := mgr.Acquire("transfer 2")
+	if err != nil {
+		t.Fatalf("re-acquire: %v", err)
+	}
+	defer l2.Release()
+
+	mock.mu.Lock()
+	calls, reason := mock.inhibitCalls, mock.lastReason
+	mock.mu.Unlock()
+	if calls != 2 {
+		t.Errorf("re-acquire inhibit calls = %d; want 2", calls)
+	}
+	if reason != "transfer 2" {
+		t.Errorf("re-acquire reason = %q; want %q", reason, "transfer 2")
+	}
+
+	if st := mgr.Status(); !st.Active || st.Holders != 1 || st.Reason != "transfer 2" {
+		t.Errorf("status after re-acquire: %+v", st)
+	}
+}
+
 func TestManager_DoubleReleaseIdempotent(t *testing.T) {
 	mock := &mockBackend{supported: true}
 	mgr := NewWithBackend(mock)
@@ -275,6 +320,11 @@ func TestManager_UnsupportedPlatform(t *testing.T) {
 }
 
 func TestManager_RealNativeSmoke(t *testing.T) {
+	// Native platform integration: requires real privileges (logind Inhibit
+	// on Linux) polkit denies to non-local CI sessions. Opt-in only (see
+	// native_optin_test.go).
+	requireNativeTestsOptIn(t)
+
 	mgr := New()
 	defer mgr.Close()
 
