@@ -62,9 +62,13 @@ jobs:
           go test -race ./internal/transfer ./internal/server .
 
       - name: Install Wails CLI & nfpm
+        # Pinned to the exact versions the release workflow builds with
+        # (release.yml), so CI validates the same packaging toolchain that
+        # produces the shipped artifacts. A mutable @latest here would let an
+        # upstream release change or break CI builds silently.
         run: |
-          go install github.com/wailsapp/wails/v2/cmd/wails@latest
-          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+          go install github.com/wailsapp/wails/v2/cmd/wails@v2.17.0
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.48.0
 
       - name: Test Linux application build
         run: |
@@ -73,6 +77,18 @@ jobs:
       - name: Test Linux package assembly
         run: |
           bash scripts/package-linux.sh "0.1.0-ci" "amd64" "dist"
+
+      - name: Guard against unpinned @latest tool installs
+        # Supply-chain guard (Phase 2 hardening): every `go install` in CI and
+        # release workflows must reference an explicit version. A mutable
+        # @latest would silently re-point the build toolchain at whatever an
+        # upstream module publishes next.
+        run: |
+          if grep -RnE 'go install [^ ]+@latest' .github/workflows/; then
+            echo "::error::Unpinned @latest go install found in workflows; pin an explicit tested version." >&2
+            exit 1
+          fi
+          echo "No unpinned @latest tool installs in .github/workflows/."
 
   # Cross-platform compile and vet. A successful build proves the source
   # compiles for the production targets; it does NOT prove native GUI

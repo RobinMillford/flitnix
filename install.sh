@@ -304,7 +304,21 @@ fi
 # Verify Checksum
 log_info "Verifying SHA-256 checksum..."
 ACTUAL_HASH="$(calculate_sha256 "${TMP_DIR}/${ASSET_NAME}")"
-EXPECTED_HASH="$(grep -F "${ASSET_NAME}" "${TMP_DIR}/SHA256SUMS.txt" 2>/dev/null | awk '{print $1}' || true)"
+# Exact filename match: the checksum line format is "<sha256>  <filename>".
+# Matching the whole second field (instead of a substring grep) rejects
+# similarly-named decoy entries, and a duplicate entry count other than one
+# fails closed rather than trusting an ambiguous checksum file.
+ENTRY_COUNT="$(awk -v name="${ASSET_NAME}" '$2 == name' "${TMP_DIR}/SHA256SUMS.txt" 2>/dev/null | wc -l)"
+EXPECTED_HASH="$(awk -v name="${ASSET_NAME}" '$2 == name {print $1}' "${TMP_DIR}/SHA256SUMS.txt" 2>/dev/null | head -n 1)"
+
+if [ "${ENTRY_COUNT}" -ne 1 ]; then
+    if [ "${ENTRY_COUNT}" -eq 0 ]; then
+        log_error "Asset ${ASSET_NAME} not found in SHA256SUMS.txt"
+    else
+        log_error "Asset ${ASSET_NAME} must appear exactly once in SHA256SUMS.txt (found ${ENTRY_COUNT} entries)."
+    fi
+    exit 1
+fi
 
 if [ -z "${EXPECTED_HASH}" ]; then
     log_error "Asset ${ASSET_NAME} not found in SHA256SUMS.txt"
