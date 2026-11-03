@@ -53,6 +53,16 @@ jobs:
           npm run check
           npm run build
 
+      - name: Verify frontend embed assets exist
+        # main.go embeds all:frontend/dist; fail fast with a clear message if
+        # the frontend build above did not produce it, before Go commands run.
+        run: |
+          if [ ! -f frontend/dist/index.html ]; then
+            echo "::error::frontend/dist/index.html is missing; run 'npm ci && npm run build' in frontend/ before compiling Go (main.go embeds all:frontend/dist)" >&2
+            exit 1
+          fi
+          echo "frontend/dist present for go:embed"
+
       - name: Run Go unit and integration tests
         run: |
           go test -count=1 ./...
@@ -110,6 +120,31 @@ jobs:
         with:
           go-version-file: 'go.mod'
           cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'frontend/package-lock.json'
+
+      - name: Build frontend embed assets
+        # main.go embeds all:frontend/dist. GitHub Actions jobs run in
+        # separate environments, so every job that compiles Go must produce
+        # these assets itself before `go build` / `go vet` / `go test` run.
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Verify frontend embed assets exist
+        shell: bash
+        run: |
+          if [ ! -f frontend/dist/index.html ]; then
+            echo "::error::frontend/dist/index.html is missing; run 'npm ci && npm run build' in frontend/ before compiling Go (main.go embeds all:frontend/dist)" >&2
+            exit 1
+          fi
+          echo "frontend/dist present for go:embed"
 
       - name: Compile every package
         run: go build ./...
