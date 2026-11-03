@@ -414,8 +414,7 @@ func handleBatchComplete(svcs *Services) http.HandlerFunc {
 		}
 
 		var req completeRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid complete request JSON")
+		if !decodeControlJSON(w, r, &req, "invalid complete request JSON", allowUnknownFields) {
 			return
 		}
 
@@ -905,8 +904,7 @@ func handleGuestComplete(svcs *Services) http.HandlerFunc {
 		}
 
 		var req completeRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid complete request JSON")
+		if !decodeControlJSON(w, r, &req, "invalid complete request JSON", allowUnknownFields) {
 			return
 		}
 

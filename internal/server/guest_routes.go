@@ -108,9 +108,12 @@ type guestJoinRequest struct {
 	ParticipantID string `json:"participantId,omitempty"`
 }
 
+// guestJoinResponse is the join acknowledgement shown to the guest page. It
+// deliberately carries no credential: the guest token is issued only as the
+// HttpOnly flitnix_guest_token cookie, so guest JavaScript never holds it and
+// an XSS on the guest page cannot exfiltrate a long-lived room credential.
 type guestJoinResponse struct {
 	GuestID  string `json:"guestId"`
-	Token    string `json:"token"`
 	Nickname string `json:"nickname"`
 	State    string `json:"state"`
 }
@@ -177,7 +180,7 @@ func handleGuestJoin(svcs *Services) http.HandlerFunc {
 			})
 		}
 
-		// Set HttpOnly cookie
+		// The guest credential is issued as an HttpOnly cookie and nowhere else.
 		maxAge := int(time.Until(room.ExpiresAt).Seconds())
 		if maxAge < 0 {
 			maxAge = 0
@@ -187,13 +190,23 @@ func handleGuestJoin(svcs *Services) http.HandlerFunc {
 			Value:    g.Token,
 			Path:     "/guest-api/",
 			HttpOnly: true,
+			// Lax, not Strict: the guest page is reached from a QR/link that may
+			// be a top-level cross-site navigation, and Strict would drop the
+			// cookie on that first hop and strand an approved guest. Lax still
+			// withholds the cookie from cross-site subresource requests and from
+			// cross-site POSTs, so every state-changing guest call stays
+			// protected.
 			SameSite: http.SameSiteLaxMode,
-			MaxAge:   maxAge,
+			// Secure follows the actual TLS state of this connection. Nothing is
+			// inferred from X-Forwarded-* headers: a client can forge those, and
+			// trusting them would either silently weaken the cookie or break
+			// plaintext LAN transfers. This matches the download-grant cookie.
+			Secure: r.TLS != nil,
+			MaxAge: maxAge,
 		})
 
 		writeJSON(w, http.StatusCreated, guestJoinResponse{
 			GuestID:  g.ID,
-			Token:    g.Token,
 			Nickname: g.Nickname,
 			State:    string(g.State),
 		})

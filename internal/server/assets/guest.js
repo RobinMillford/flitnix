@@ -3,7 +3,9 @@
 
   var POLL_MS = 1500;
   var inviteSecret = null;
-  var guestToken = null;
+  // Guest authentication rides on the HttpOnly flitnix_guest_token cookie,
+  // which the browser attaches automatically to same-origin requests. The
+  // long-lived guest token is never handed to JavaScript.
   var guestInfo = null;
   var isPolling = false;
   var uploadQueue = []; // Array of file upload jobs
@@ -212,7 +214,6 @@
       if (job.uploadId && (job.state === "pending" || job.state === "uploading")) {
         (function (j) {
           fetch("/guest-api/uploads/" + encodeURIComponent(j.uploadId), {
-            headers: guestToken ? { "Authorization": "Bearer " + guestToken } : {}
           }).then(function (res) { return res.json(); }).then(function (data) {
             if (data.state === "completed" && j.state !== "completed") {
               j.state = "completed";
@@ -428,9 +429,7 @@
   }
 
   function checkExistingSession() {
-    fetch("/guest-api/status", {
-      headers: guestToken ? { "Authorization": "Bearer " + guestToken } : {}
-    })
+    fetch("/guest-api/status")
       .then(function (res) {
         if (res.ok) return res.json();
         throw new Error("unauthorized");
@@ -470,7 +469,8 @@
           return res.json();
         })
         .then(function (data) {
-          guestToken = data.token;
+          // The join response sets the HttpOnly guest cookie; nothing about
+          // the credential is returned to this script.
           guestInfo = data;
           hideAllViews();
           if (waitingView) waitingView.hidden = false;
@@ -491,7 +491,6 @@
 
     function poll() {
       fetch("/guest-api/status", {
-        headers: guestToken ? { "Authorization": "Bearer " + guestToken } : {}
       })
         .then(function (res) { return res.json(); })
         .then(function (data) {
@@ -808,8 +807,7 @@
     fetch("/guest-api/uploads", {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        "Authorization": guestToken ? "Bearer " + guestToken : ""
+        "Content-Type": "application/json"
       },
       body: JSON.stringify(payload)
     })
@@ -839,7 +837,6 @@
   function pollUploadApproval(job) {
     function check() {
       fetch("/guest-api/uploads/" + encodeURIComponent(job.uploadId), {
-        headers: guestToken ? { "Authorization": "Bearer " + guestToken } : {}
       })
         .then(function (res) { return res.json(); })
         .then(function (data) {
@@ -880,14 +877,12 @@
     var completeURL = "/guest-api/uploads/" + encodeURIComponent(job.uploadId) + "/complete";
     var statusURL = "/guest-api/uploads/" + encodeURIComponent(job.uploadId) + "/status";
     var transferID = "guest-" + job.uploadId;
-    var authHeader = guestToken ? "Bearer " + guestToken : null;
 
     fetch(tusURL, {
       method: "POST",
       headers: {
         "Tus-Resumable": "1.0.0",
-        "Upload-Length": String(job.size),
-        "Authorization": authHeader || ""
+        "Upload-Length": String(job.size)
       }
     })
       .then(function () {
@@ -898,7 +893,6 @@
           uploadUrl: tusURL,
           completeUrl: completeURL,
           statusUrl: statusURL,
-          authHeader: authHeader,
           type: "guest"
         }, {
           onProgress: function (p) {
@@ -999,9 +993,6 @@
     };
 
     xhr.open("PUT", "/guest-api/uploads/" + encodeURIComponent(job.uploadId) + "/content");
-    if (guestToken) {
-      xhr.setRequestHeader("Authorization", "Bearer " + guestToken);
-    }
     xhr.send(job.file);
   }
 
