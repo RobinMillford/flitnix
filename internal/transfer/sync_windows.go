@@ -7,6 +7,14 @@ import (
 	"time"
 )
 
+// platformSupportsPipelinedCheckpoints reports whether the OS and filesystem
+// support verified atomic metadata replacement with durable directory fsync.
+// Windows NTFS does not support directory FlushFileBuffers and MoveFileEx has
+// non-POSIX replacement semantics, so Windows retains the safe synchronous path.
+func platformSupportsPipelinedCheckpoints() bool {
+	return false
+}
+
 // syncDir is a no-op on Windows because Win32 FlushFileBuffers is unsupported on directory handles.
 func syncDir(dir string) error {
 	return nil

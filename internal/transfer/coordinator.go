@@ -138,6 +138,15 @@ type Coordinator struct {
 	// durableErr latches the first failed durable transition so no later
 	// mutation can be acknowledged as durable when the journal is suspect.
 	durableErr error
+
+	onProgressHook func(sessionKey string, lease TransferLease, transferred int64)
+}
+
+// SetProgressHook registers an optional hook invoked upon every valid UpdateItemProgress call.
+func (c *Coordinator) SetProgressHook(fn func(sessionKey string, lease TransferLease, transferred int64)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onProgressHook = fn
 }
 
 // NewCoordinator creates an empty in-memory coordinator.
@@ -601,6 +610,9 @@ func (c *Coordinator) UpdateItemProgress(sessionKey string, lease TransferLease,
 	delta := transferred - item.Transferred
 	item.Transferred = transferred
 	batch.batch.TransferredBytes += delta
+	if c.onProgressHook != nil {
+		c.onProgressHook(sessionKey, lease, transferred)
+	}
 	return nil
 }
 
@@ -996,6 +1008,20 @@ func (c *Coordinator) QueueStatus(sessionKey string) (QueueSnapshot, error) {
 		}
 	}
 	return out, nil
+}
+
+// ActiveLeaseFor returns the active lease for a session if it matches batchID and itemID.
+func (c *Coordinator) ActiveLeaseFor(sessionKey, batchID, itemID string) (TransferLease, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	session := c.sessions[sessionKey]
+	if session == nil || session.active == nil {
+		return TransferLease{}, false
+	}
+	if session.active.BatchID == batchID && session.active.ItemID == itemID {
+		return session.active.TransferLease, true
+	}
+	return TransferLease{}, false
 }
 
 // CloseSession cancels and closes a session. It is idempotent and prevents

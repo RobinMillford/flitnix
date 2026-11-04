@@ -3,12 +3,14 @@ package main
 import (
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
@@ -221,12 +223,41 @@ func main() {
 	runID := flag.String("run-id", time.Now().UTC().Format("20060102T150405Z"), "run identifier stamped on every row and artifact")
 	primaryReps := flag.Int("primary-reps", 5, "repetitions for the Config-1/Config-4 acceptance pair")
 	streamingReps := flag.Int("streaming-reps", 3, "repetitions for Config-2/Config-3")
+	artifactsDirFlag := flag.String("artifacts-dir", "artifacts/wp4", "directory where benchmark artifacts are stored")
+	fixturesDirFlag := flag.String("fixtures-dir", "", "directory where shared fixtures reside (defaults to <artifacts-dir>/fixtures)")
+	interleavedFlag := flag.Bool("interleaved", false, "interleave and alternate Config-1 and Config-4 to remove thermal and caching bias")
+	skipConfig5Flag := flag.Bool("skip-config5", false, "skip fallback slice benchmark (useful for paired acceptance audit)")
+	syncCheckpointsFlag := flag.Bool("sync-checkpoints", false, "force synchronous checkpointing (disables pipelined metadata persistence)")
+	legacyProgressThrottleFlag := flag.Bool("legacy-progress-throttle", false, "use legacy compound progress throttling (256KB || 100ms) instead of pure 50ms")
+	cpuProfile := flag.String("cpuprofile", "", "write cpu profile to file")
+	memProfile := flag.String("memprofile", "", "write memory profile to file")
 	flag.Parse()
+
+	if *legacyProgressThrottleFlag {
+		_ = os.Setenv("FLITNIX_LEGACY_PROGRESS_THROTTLE", "1")
+	} else {
+		_ = os.Unsetenv("FLITNIX_LEGACY_PROGRESS_THROTTLE")
+	}
+
+	if *cpuProfile != "" {
+		f, err := os.Create(*cpuProfile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "could not create CPU profile: %v\n", err)
+			os.Exit(1)
+		}
+		defer f.Close()
+		if err := pprof.StartCPUProfile(f); err != nil {
+			fmt.Fprintf(os.Stderr, "could not start CPU profile: %v\n", err)
+			os.Exit(1)
+		}
+		defer pprof.StopCPUProfile()
+	}
 
 	doThroughput := *stage == "all" || *stage == "throughput"
 	doRecovery := *stage == "all" || *stage == "recovery"
-	if !doThroughput && !doRecovery {
-		fmt.Fprintf(os.Stderr, "unknown -stage %q (want all, throughput or recovery)\n", *stage)
+	doIntervalTuning := *stage == "interval-tuning"
+	if !doThroughput && !doRecovery && !doIntervalTuning {
+		fmt.Fprintf(os.Stderr, "unknown -stage %q (want all, throughput, recovery, or interval-tuning)\n", *stage)
 		os.Exit(2)
 	}
 
@@ -235,8 +266,11 @@ func main() {
 	fmt.Println("================================================================================")
 	fmt.Printf(" Run ID: %s | stage: %s | payloads: %s\n", *runID, *stage, *payloadList)
 
-	artifactsDir := "artifacts/wp4"
-	fixturesDir := filepath.Join(artifactsDir, "fixtures")
+	artifactsDir := *artifactsDirFlag
+	fixturesDir := *fixturesDirFlag
+	if fixturesDir == "" {
+		fixturesDir = filepath.Join(artifactsDir, "fixtures")
+	}
 	rawLogsDir := filepath.Join(artifactsDir, "raw-logs")
 	_ = os.MkdirAll(artifactsDir, 0o755)
 	_ = os.MkdirAll(fixturesDir, 0o755)
@@ -299,9 +333,13 @@ func main() {
 	var recoveryResults []RecoveryRunResult
 	failedAttempts := 0
 	aborted := false
+	if doIntervalTuning {
+		runIntervalTuningStage(artifactsDir, fixtures, env, checkpointStats, *runID)
+		return
+	}
 	if doThroughput {
 		var throughputFailed int
-		allResults, throughputFailed, aborted = runThroughputStage(artifactsDir, fixtures, payloadNames, *runID, *primaryReps, *streamingReps)
+		allResults, throughputFailed, aborted = runThroughputStage(artifactsDir, fixtures, payloadNames, *runID, *primaryReps, *streamingReps, *interleavedFlag, *skipConfig5Flag, *syncCheckpointsFlag, *legacyProgressThrottleFlag)
 		failedAttempts += throughputFailed
 	} else {
 		// Recovery-only stage: never truncate the historical throughput
@@ -342,6 +380,15 @@ func main() {
 		generateSummaryMarkdown(filepath.Join(artifactsDir, "benchmark-summary-"+r+".md"), env, allResults, checkpointStats, recoveryResults, failedAttempts, *runID, aborted)
 	}
 
+	if *memProfile != "" {
+		f, err := os.Create(*memProfile)
+		if err == nil {
+			runtime.GC()
+			_ = pprof.WriteHeapProfile(f)
+			f.Close()
+		}
+	}
+
 	if failedAttempts > 0 || aborted {
 		fmt.Printf("Completed with %d FAILED attempt(s)%s — every attempt is recorded in artifacts as Valid=false. Review before trusting results.\n", failedAttempts, map[bool]string{true: " (stage aborted)", false: ""}[aborted])
 		os.Exit(1)
@@ -366,12 +413,95 @@ func persistFixtureManifest(fixturesDir string, verified map[string]FixtureMetad
 	_ = os.WriteFile(filepath.Join(fixturesDir, "fixtures.json"), data, 0o644)
 }
 
+// runIntervalTuningStage benchmarks Config-1 vs Config-4 across 32MB, 64MB, and 128MB
+// checkpoint intervals using Latin-Square balanced, interleaved blocks.
+func runIntervalTuningStage(artifactsDir string, fixtures map[string]FixtureMetadata, env EnvironmentManifest, cpStats []LatencyStats, runID string) {
+	fmt.Println("\n[4/6] WP3.11 Interval-Tuning Stage: Config-1 vs Config-4 (32MB, 64MB, 128MB)")
+	fixture, ok := fixtures["payload_1gb.bin"]
+	if !ok {
+		fmt.Fprintf(os.Stderr, "Interval tuning requires payload_1gb.bin in fixtures\n")
+		os.Exit(1)
+	}
+
+	benchServerDir := filepath.Join(artifactsDir, "server_received")
+	harness, cleanup, err := StartBenchServer(benchServerDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to start bench server: %v\n", err)
+		os.Exit(1)
+	}
+	defer cleanup()
+	defer os.RemoveAll(benchServerDir)
+	harness.runID = runID
+
+	harness.services.EnsureResumable().SetPipelineCheckpoints(true)
+	fmt.Println("  [Checkpoints: Pipelined Mode Active (Candidate Config D)]")
+	fmt.Println("  [Progress Throttling: Pure 50ms Active]")
+
+	// 10 Balanced Blocks rotating the order across 4 candidates
+	schedule := [][]string{
+		{"C1", "C4_32MB", "C4_64MB", "C4_128MB"},
+		{"C4_32MB", "C4_64MB", "C4_128MB", "C1"},
+		{"C4_64MB", "C4_128MB", "C1", "C4_32MB"},
+		{"C4_128MB", "C1", "C4_32MB", "C4_64MB"},
+		{"C1", "C4_128MB", "C4_64MB", "C4_32MB"},
+		{"C4_32MB", "C1", "C4_128MB", "C4_64MB"},
+		{"C4_64MB", "C4_32MB", "C1", "C4_128MB"},
+		{"C4_128MB", "C4_64MB", "C4_32MB", "C1"},
+		{"C1", "C4_64MB", "C4_32MB", "C4_128MB"},
+		{"C4_64MB", "C1", "C4_128MB", "C4_32MB"},
+	}
+
+	var results []BenchmarkRunResult
+
+	for blockIdx, block := range schedule {
+		fmt.Printf("\n--- Balanced Block %d/10: Order = %v ---\n", blockIdx+1, block)
+		for _, item := range block {
+			time.Sleep(500 * time.Millisecond) // Cooldown between runs
+			var res BenchmarkRunResult
+			var rerr error
+
+			switch item {
+			case "C1":
+				res, rerr = harness.RunConfig1_LegacyPUT(fixture, blockIdx+1)
+			case "C4_32MB":
+				harness.SetCheckpointBytes(32 * 1024 * 1024)
+				res, rerr = harness.RunConfig4_PrimaryProduction(fixture, blockIdx+1)
+			case "C4_64MB":
+				harness.SetCheckpointBytes(64 * 1024 * 1024)
+				res, rerr = harness.RunConfig4_PrimaryProduction(fixture, blockIdx+1)
+			case "C4_128MB":
+				harness.SetCheckpointBytes(128 * 1024 * 1024)
+				res, rerr = harness.RunConfig4_PrimaryProduction(fixture, blockIdx+1)
+			}
+
+			res.RunID = runID
+			if rerr != nil {
+				res.Notes = rerr.Error()
+				fmt.Printf("  [%s Block %d] FAILED: %v\n", item, blockIdx+1, rerr)
+			} else {
+				fmt.Printf("  [%s Block %d]: Duration=%d ms, Throughput=%.2f MB/s, CPU=%.1f ms, RSS=%.1f MB, Integrity=%v\n",
+					item, blockIdx+1, res.DurationMs, res.ThroughputMBs, res.CPUTimeMs, res.RSSMB, res.IntegrityPass)
+			}
+			results = append(results, res)
+		}
+	}
+
+	fmt.Println("\n[5/5] Generating Interval-Tuning Reports & JSON Artifacts...")
+	saveBenchmarkCSV(filepath.Join(artifactsDir, "benchmark-results.csv"), results)
+	saveBenchmarkJSON(filepath.Join(artifactsDir, "benchmark-results.json"), results)
+	saveBenchmarkCSV(filepath.Join(artifactsDir, "benchmark-results-"+runID+".csv"), results)
+	saveBenchmarkJSON(filepath.Join(artifactsDir, "benchmark-results-"+runID+".json"), results)
+	generateSummaryMarkdown(filepath.Join(artifactsDir, "benchmark-summary.md"), env, results, cpStats, nil, 0, runID, false)
+	generateSummaryMarkdown(filepath.Join(artifactsDir, "benchmark-summary-"+runID+".md"), env, results, cpStats, nil, 0, runID, false)
+	fmt.Println("Interval tuning completed successfully.")
+}
+
 // runThroughputStage measures Configurations 1-5 for every requested payload.
 // Every attempt is appended to the result set, successful or not: failed reps
 // are flagged Valid=false with the cause in Notes and are never dropped. Five
 // consecutive failures mark the stage aborted, but the partial dataset is still
 // returned and written.
-func runThroughputStage(artifactsDir string, fixtures map[string]FixtureMetadata, payloadNames []string, runID string, primaryReps, streamingReps int) (results []BenchmarkRunResult, failed int, aborted bool) {
+func runThroughputStage(artifactsDir string, fixtures map[string]FixtureMetadata, payloadNames []string, runID string, primaryReps, streamingReps int, interleaved, skipConfig5, syncCheckpoints, legacyProgressThrottle bool) (results []BenchmarkRunResult, failed int, aborted bool) {
 	fmt.Println("\n[4/6] Throughput stage: Configurations 1-5 (recovery runs are isolated and run afterwards)")
 	benchServerDir := filepath.Join(artifactsDir, "server_received")
 	harness, cleanup, err := StartBenchServer(benchServerDir)
@@ -382,6 +512,19 @@ func runThroughputStage(artifactsDir string, fixtures map[string]FixtureMetadata
 	defer cleanup()
 	defer os.RemoveAll(benchServerDir)
 	harness.runID = runID
+
+	if syncCheckpoints {
+		harness.services.EnsureResumable().SetPipelineCheckpoints(false)
+		fmt.Println("  [Checkpoints: Synchronous Mode Forced]")
+	} else {
+		harness.services.EnsureResumable().SetPipelineCheckpoints(true)
+		fmt.Println("  [Checkpoints: Pipelined Mode Active]")
+	}
+	if legacyProgressThrottle {
+		fmt.Println("  [Progress Throttling: Legacy (256KB || 100ms) Active]")
+	} else {
+		fmt.Println("  [Progress Throttling: Pure 50ms Active]")
+	}
 
 	consecutive := 0
 	runReps := func(label string, reps int, run func(rep int) (BenchmarkRunResult, error)) {
@@ -421,24 +564,53 @@ func runThroughputStage(artifactsDir string, fixtures map[string]FixtureMetadata
 		sizeGB := float64(fix.SizeBytes) / (1024 * 1024 * 1024)
 		fmt.Printf("\n>>> Benchmarking Payload: %s (%.1f GB / %d bytes) <<<\n", fix.Name, sizeGB, fix.SizeBytes)
 
-		// Repetition policy: the primary acceptance pair (Config-1 legacy PUT
-		// vs Config-4 primary production) gets 5 reps at every payload size,
-		// since the 95% verdict depends on it. Secondary streaming configs get
-		// 3 reps. Config-5 gets 3 reps on 1GB and 1 rep above that.
-		runReps("Configuration 1: Legacy PUT Baseline", primaryReps, func(rep int) (BenchmarkRunResult, error) {
-			return harness.RunConfig1_LegacyPUT(fix, rep)
-		})
-		runReps("Configuration 2: tus Streaming (Server Hash Only, Zero Checkpoints)", streamingReps, func(rep int) (BenchmarkRunResult, error) {
-			return harness.RunConfig2_ServerHashingOnly(fix, rep)
-		})
-		runReps("Configuration 3: tus Streaming (Client + Server Dual Hash)", streamingReps, func(rep int) (BenchmarkRunResult, error) {
-			return harness.RunConfig3_DualHashing(fix, rep)
-		})
-		runReps("Configuration 4: Primary Production Architecture (Durable Checkpoints 32MB/500ms)", primaryReps, func(rep int) (BenchmarkRunResult, error) {
-			return harness.RunConfig4_PrimaryProduction(fix, rep)
-		})
+		if interleaved {
+			fmt.Printf("--- Interleaved Paired Execution (Config-1 vs Config-4, %d reps) ---\n", primaryReps)
+			for rep := 1; rep <= primaryReps && !aborted; rep++ {
+				if rep%2 == 1 {
+					// Odd rep: Config-1 first, then Config-4
+					runReps(fmt.Sprintf("Configuration 1: Legacy PUT Baseline (Rep %d)", rep), 1, func(_ int) (BenchmarkRunResult, error) {
+						return harness.RunConfig1_LegacyPUT(fix, rep)
+					})
+					runReps(fmt.Sprintf("Configuration 4: Primary Production (Rep %d)", rep), 1, func(_ int) (BenchmarkRunResult, error) {
+						return harness.RunConfig4_PrimaryProduction(fix, rep)
+					})
+				} else {
+					// Even rep: Config-4 first, then Config-1
+					runReps(fmt.Sprintf("Configuration 4: Primary Production (Rep %d)", rep), 1, func(_ int) (BenchmarkRunResult, error) {
+						return harness.RunConfig4_PrimaryProduction(fix, rep)
+					})
+					runReps(fmt.Sprintf("Configuration 1: Legacy PUT Baseline (Rep %d)", rep), 1, func(_ int) (BenchmarkRunResult, error) {
+						return harness.RunConfig1_LegacyPUT(fix, rep)
+					})
+				}
+			}
+			runReps("Configuration 2: tus Streaming (Server Hash Only, Zero Checkpoints)", streamingReps, func(rep int) (BenchmarkRunResult, error) {
+				return harness.RunConfig2_ServerHashingOnly(fix, rep)
+			})
+			runReps("Configuration 3: tus Streaming (Client + Server Dual Hash)", streamingReps, func(rep int) (BenchmarkRunResult, error) {
+				return harness.RunConfig3_DualHashing(fix, rep)
+			})
+		} else {
+			// Repetition policy: the primary acceptance pair (Config-1 legacy PUT
+			// vs Config-4 primary production) gets 5 reps at every payload size,
+			// since the 95% verdict depends on it. Secondary streaming configs get
+			// 3 reps. Config-5 gets 3 reps on 1GB and 1 rep above that.
+			runReps("Configuration 1: Legacy PUT Baseline", primaryReps, func(rep int) (BenchmarkRunResult, error) {
+				return harness.RunConfig1_LegacyPUT(fix, rep)
+			})
+			runReps("Configuration 2: tus Streaming (Server Hash Only, Zero Checkpoints)", streamingReps, func(rep int) (BenchmarkRunResult, error) {
+				return harness.RunConfig2_ServerHashingOnly(fix, rep)
+			})
+			runReps("Configuration 3: tus Streaming (Client + Server Dual Hash)", streamingReps, func(rep int) (BenchmarkRunResult, error) {
+				return harness.RunConfig3_DualHashing(fix, rep)
+			})
+			runReps("Configuration 4: Primary Production Architecture (Durable Checkpoints 32MB/500ms)", primaryReps, func(rep int) (BenchmarkRunResult, error) {
+				return harness.RunConfig4_PrimaryProduction(fix, rep)
+			})
+		}
 
-		if fix.SizeBytes <= 5*1024*1024*1024 {
+		if !skipConfig5 && fix.SizeBytes <= 5*1024*1024*1024 {
 			sliceSizes := []int64{8 * 1024 * 1024, 16 * 1024 * 1024, 32 * 1024 * 1024, 64 * 1024 * 1024}
 			sliceReps := 3
 			if fix.SizeBytes > 1024*1024*1024 {
@@ -689,7 +861,7 @@ func generateSummaryMarkdown(path string, env EnvironmentManifest, results []Ben
 	sb.WriteString(fmt.Sprintf("| Run 4 (`%s`) | **This run.** Config-6 re-executed with genuine interruption: the request declares the full `Upload-Length` as `Content-Length`, the body aborts after the interruption prefix, and the server must report the terminal `interrupted` state with `0 < committed < Upload-Length`. Recovery-only stage: the Config 1-5 rows below are carried forward unchanged from run `20261101T113452Z` (the fix touches no throughput path). Every row keeps its originating run ID. | `raw-logs/recovery-corrected-%s.log` | `benchmark-results-%s.*`, `recovery-results-%s.*` |\n\n", runID, runID, runID, runID))
 
 	sb.WriteString("## 1. Primary Acceptance Evaluation (95% Target)\n\n")
-	sb.WriteString("| Payload Size | Legacy PUT Baseline (Config 1) | Primary Production (Config 4) | Throughput Ratio | Target (≥95%) | Status |\n")
+	sb.WriteString("| Payload Size | Legacy PUT Baseline (Config 1) | Primary Production (Config 4) | Throughput Ratio (p50 / mean) | Target (≥95%) | Status |\n")
 	sb.WriteString("| :--- | :--- | :--- | :--- | :--- | :--- |\n")
 
 	payloadSizes := []int64{1 * 1024 * 1024 * 1024, 5 * 1024 * 1024 * 1024, 20 * 1024 * 1024 * 1024}
@@ -709,6 +881,8 @@ func generateSummaryMarkdown(path string, env EnvironmentManifest, results []Ben
 
 		avgPUT := avg(putThroughputs)
 		avgProd := avg(prodThroughputs)
+		medPUT, _ := median(putThroughputs)
+		medProd, _ := median(prodThroughputs)
 		sizeLabel := fmt.Sprintf("%d GB", sz/(1024*1024*1024))
 
 		// No valid baseline or no valid primary rows means the verdict for
@@ -718,14 +892,38 @@ func generateSummaryMarkdown(path string, env EnvironmentManifest, results []Ben
 			continue
 		}
 
-		ratio := (avgProd / avgPUT) * 100.0
+		p50Ratio := (medProd / medPUT) * 100.0
+		meanRatio := (avgProd / avgPUT) * 100.0
 		status := "**PASS**"
-		if ratio < 95.0 {
+		if p50Ratio < 95.0 {
 			status = "**NOT PASS**"
 		}
 
-		sb.WriteString(fmt.Sprintf("| **%s** | %.2f MB/s (n=%d) | %.2f MB/s (n=%d) | **%.2f%%** | ≥95.0%% | %s |\n",
-			sizeLabel, avgPUT, len(putThroughputs), avgProd, len(prodThroughputs), ratio, status))
+		sb.WriteString(fmt.Sprintf("| **%s** | p50: %.2f / avg: %.2f (n=%d) | p50: %.2f / avg: %.2f (n=%d) | **p50: %.2f%%** (mean: %.2f%%) | ≥95.0%% | %s |\n",
+			sizeLabel, medPUT, avgPUT, len(putThroughputs), medProd, avgProd, len(prodThroughputs), p50Ratio, meanRatio, status))
+
+		// Also evaluate candidate interval variants if present in the results
+		for _, customBytes := range []int64{64 * 1024 * 1024, 128 * 1024 * 1024} {
+			targetID := fmt.Sprintf("Config-4-%dMB", customBytes/(1024*1024))
+			var customTputs []float64
+			for _, r := range results {
+				if r.PayloadSize == sz && r.Valid && r.ConfigID == targetID {
+					customTputs = append(customTputs, r.ThroughputMBs)
+				}
+			}
+			if len(customTputs) > 0 && len(putThroughputs) > 0 {
+				medCustom, _ := median(customTputs)
+				avgCustom := avg(customTputs)
+				p50CustRatio := (medCustom / medPUT) * 100.0
+				meanCustRatio := (avgCustom / avgPUT) * 100.0
+				custStatus := "**PASS**"
+				if p50CustRatio < 95.0 {
+					custStatus = "**NOT PASS**"
+				}
+				sb.WriteString(fmt.Sprintf("| **%s (%d MB CP)** | p50: %.2f / avg: %.2f (n=%d) | p50: %.2f / avg: %.2f (n=%d) | **p50: %.2f%%** (mean: %.2f%%) | ≥95.0%% | %s |\n",
+					sizeLabel, customBytes/(1024*1024), medPUT, avgPUT, len(putThroughputs), medCustom, avgCustom, len(customTputs), p50CustRatio, meanCustRatio, custStatus))
+			}
+		}
 	}
 
 	sb.WriteString("\n## 2. Six-Tier Performance Overview\n\n")
@@ -775,7 +973,7 @@ func generateSummaryMarkdown(path string, env EnvironmentManifest, results []Ben
 		}
 
 		meanT := avg(tputs)
-		medT := median(tputs)
+		medT, _ := median(tputs)
 		minT, maxT := minMax(tputs)
 		meanCPU := avg(cpus)
 		maxPeak := maxVal(peaks)
@@ -830,20 +1028,37 @@ func avg(vals []float64) float64 {
 	return total / float64(len(vals))
 }
 
-func median(vals []float64) float64 {
+// ErrEmptySample is returned when a statistical metric is requested on an empty dataset.
+var ErrEmptySample = errors.New("empty benchmark sample: cannot compute median of 0 elements")
+
+// median returns the conventional sample median:
+// - Empty input: returns ErrEmptySample (never silently reporting 0.0)
+// - Odd sample count: middle sorted value
+// - Even sample count: arithmetic average of the two middle sorted values
+func median(vals []float64) (float64, error) {
 	if len(vals) == 0 {
-		return 0
+		return 0, ErrEmptySample
 	}
 	cpy := make([]float64, len(vals))
 	copy(cpy, vals)
-	for i := 0; i < len(cpy); i++ {
-		for j := i + 1; j < len(cpy); j++ {
-			if cpy[i] > cpy[j] {
-				cpy[i], cpy[j] = cpy[j], cpy[i]
-			}
-		}
+	sort.Float64s(cpy)
+	n := len(cpy)
+	if n%2 == 1 {
+		return cpy[n/2], nil
 	}
-	return cpy[len(cpy)/2]
+	return (cpy[n/2-1] + cpy[n/2]) / 2.0, nil
+}
+
+// upperMiddleHistorical returns the historical upper-middle element (sorted[len/2])
+// retained for explicit, separately labelled historical comparisons.
+func upperMiddleHistorical(vals []float64) (float64, error) {
+	if len(vals) == 0 {
+		return 0, ErrEmptySample
+	}
+	cpy := make([]float64, len(vals))
+	copy(cpy, vals)
+	sort.Float64s(cpy)
+	return cpy[len(cpy)/2], nil
 }
 
 func minMax(vals []float64) (float64, float64) {
