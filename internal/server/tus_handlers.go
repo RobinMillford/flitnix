@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -265,10 +266,39 @@ func handleBatchTusPatch(svcs *Services, stall time.Duration) http.HandlerFunc {
 			}
 		}
 
+		sessKey := sess.Key()
+		lease, ok := svcs.Coordinator.ActiveLeaseFor(sessKey, batchID, itemID)
+		if !ok {
+			lease, _ = svcs.Coordinator.ClaimItem(sessKey, batchID, itemID)
+		}
+		var lastProgressOffset int64 = clientOffset
+		var lastProgressTime = time.Now()
+		const progressInterval = 50 * time.Millisecond
+		useLegacyProgressThrottle := os.Getenv("FLITNIX_LEGACY_PROGRESS_THROTTLE") == "1"
 		committedOffset, state, streamErr := resumable.IngestStream(transferID, clientOffset, body, func(current int64) {
-			// Update coordinator item progress live
-			_ = svcs.Coordinator.UpdateItemProgress(sess.Key(), transfer.TransferLease{BatchID: batchID, ItemID: itemID}, current)
+			now := time.Now()
+			shouldUpdate := false
+			if useLegacyProgressThrottle {
+				if current-lastProgressOffset >= 256*1024 || now.Sub(lastProgressTime) >= 100*time.Millisecond {
+					shouldUpdate = true
+				}
+			} else {
+				if now.Sub(lastProgressTime) >= progressInterval && current > lastProgressOffset {
+					shouldUpdate = true
+				}
+			}
+			if shouldUpdate {
+				lastProgressTime = now
+				if err := svcs.Coordinator.UpdateItemProgress(sessKey, lease, current); err == nil {
+					lastProgressOffset = current
+				}
+			}
 		})
+		if committedOffset > lastProgressOffset {
+			if err := svcs.Coordinator.UpdateItemProgress(sessKey, lease, committedOffset); err == nil {
+				lastProgressOffset = committedOffset
+			}
+		}
 
 		if errors.Is(streamErr, transfer.ErrUploadLocked) {
 			w.Header().Set("Tus-Resumable", tusVersion)
@@ -487,10 +517,14 @@ func handleBatchComplete(svcs *Services) http.HandlerFunc {
 			}
 		}
 		if !alreadyCompleted {
-			realLease, claimErr := svcs.Coordinator.ClaimItem(sess.Key(), batchID, itemID)
-			if claimErr != nil {
-				writeBatchError(w, claimErr)
-				return
+			realLease, ok := svcs.Coordinator.ActiveLeaseFor(sess.Key(), batchID, itemID)
+			if !ok {
+				var claimErr error
+				realLease, claimErr = svcs.Coordinator.ClaimItem(sess.Key(), batchID, itemID)
+				if claimErr != nil {
+					writeBatchError(w, claimErr)
+					return
+				}
 			}
 			if progErr := svcs.Coordinator.UpdateItemProgress(sess.Key(), realLease, pub.Size); progErr != nil {
 				writeBatchError(w, progErr)
@@ -748,9 +782,32 @@ func handleGuestTusPatch(svcs *Services, stall time.Duration) http.HandlerFunc {
 			}
 		}
 
+		var lastGuestProgressOffset int64 = clientOffset
+		var lastGuestProgressTime = time.Now()
+		const guestProgressInterval = 50 * time.Millisecond
+		useLegacyGuestThrottle := os.Getenv("FLITNIX_LEGACY_PROGRESS_THROTTLE") == "1"
 		committedOffset, state, streamErr := resumable.IngestStream(transferID, clientOffset, body, func(current int64) {
-			room.UpdateUploadProgress(uploadID, current)
+			now := time.Now()
+			shouldUpdate := false
+			if useLegacyGuestThrottle {
+				if current-lastGuestProgressOffset >= 256*1024 || now.Sub(lastGuestProgressTime) >= 100*time.Millisecond {
+					shouldUpdate = true
+				}
+			} else {
+				if now.Sub(lastGuestProgressTime) >= guestProgressInterval && current > lastGuestProgressOffset {
+					shouldUpdate = true
+				}
+			}
+			if shouldUpdate {
+				lastGuestProgressOffset = current
+				lastGuestProgressTime = now
+				room.UpdateUploadProgress(uploadID, current)
+			}
 		})
+		if committedOffset > lastGuestProgressOffset {
+			lastGuestProgressOffset = committedOffset
+			room.UpdateUploadProgress(uploadID, committedOffset)
+		}
 
 		if errors.Is(streamErr, transfer.ErrUploadLocked) {
 			w.Header().Set("Tus-Resumable", tusVersion)

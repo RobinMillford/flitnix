@@ -204,6 +204,7 @@ const (
 type Session struct {
 	token  string // raw token: never log, never persist outside process memory
 	digest [sha256.Size]byte
+	key    string // cached hex representation of digest for zero-alloc Key() reads
 
 	// verifier is what durable records hold and what Validate compares. It is
 	// HMAC-SHA256 under the installation key when one is configured.
@@ -369,9 +370,11 @@ func (m *Manager) Create() (*Session, error) {
 		return nil, err
 	}
 	now := m.now()
+	d := digestToken(tok)
 	s := &Session{
 		token:      tok,
-		digest:     digestToken(tok),
+		digest:     d,
+		key:        hex.EncodeToString(d[:]),
 		verifier:   m.verify(tok),
 		id:         id,
 		generation: 1,
@@ -438,6 +441,7 @@ func (m *Manager) Restore(record SessionRecord) error {
 
 	s := &Session{
 		digest:     digest,
+		key:        hex.EncodeToString(digest[:]),
 		verifier:   record.Verifier,
 		id:         record.SessionID,
 		generation: record.Generation,
@@ -750,7 +754,12 @@ func (s *Session) Token() string { return s.token }
 // Key returns a stable non-secret identifier for the session (hex-encoded
 // SHA-256 of the token). Transfer records bind to this key instead of
 // propagating the raw token around the system.
-func (s *Session) Key() string { return hex.EncodeToString(s.digest[:]) }
+func (s *Session) Key() string {
+	if s.key != "" {
+		return s.key
+	}
+	return hex.EncodeToString(s.digest[:])
+}
 
 // ID returns the stable session identity reference. It is not a credential.
 func (s *Session) ID() string { return s.id }
