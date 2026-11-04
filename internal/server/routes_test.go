@@ -57,12 +57,15 @@ func TestHomePageHeadHasNoBody(t *testing.T) {
 }
 
 func TestStaticAssetsServed(t *testing.T) {
+	// A path may have more than one valid MIME answer: Windows resolves .js
+	// through the registry, which may report application/javascript, while the
+	// Go built-in table reports text/javascript. Both describe JavaScript.
 	cases := []struct {
-		path       string
-		contentTyp string
+		path        string
+		contentTyps []string
 	}{
-		{"/static/styles.css", "text/css"},
-		{"/static/app.js", "text/javascript"},
+		{"/static/styles.css", []string{"text/css"}},
+		{"/static/app.js", []string{"text/javascript", "application/javascript"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.path, func(t *testing.T) {
@@ -71,8 +74,16 @@ func TestStaticAssetsServed(t *testing.T) {
 			if rec.Code != http.StatusOK {
 				t.Fatalf("GET %s returned %d, want 200", tc.path, rec.Code)
 			}
-			if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, tc.contentTyp) {
-				t.Errorf("GET %s returned Content-Type %q, want prefix %q", tc.path, ct, tc.contentTyp)
+			ct := rec.Header().Get("Content-Type")
+			matched := false
+			for _, want := range tc.contentTyps {
+				if strings.HasPrefix(ct, want) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				t.Errorf("GET %s returned Content-Type %q, want one of %v", tc.path, ct, tc.contentTyps)
 			}
 			if rec.Body.Len() == 0 {
 				t.Errorf("GET %s returned an empty body", tc.path)

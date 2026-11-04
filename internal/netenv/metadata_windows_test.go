@@ -43,9 +43,14 @@ func makeConnectionAttributes(ssid string, ssidLen uint32, profile string) *wlan
 // buffer without any Wi-Fi hardware or WLAN API calls.
 func TestWlanConnectionMetadata(t *testing.T) {
 	t.Run("ssid and profile", func(t *testing.T) {
-		ssid, profile, ok := wlanConnectionMetadata(makeConnectionAttributes("flitnix-net", 12, "Home Wifi"))
-		if !ok || ssid != "flitnix-net" || profile != "Home Wifi" {
-			t.Errorf("got (%q, %q, %v); want (%q, %q, true)", ssid, profile, ok, "flitnix-net", "Home Wifi")
+		// uSSIDLength is the number of valid SSID bytes; the remaining bytes of
+		// the 32-byte buffer are padding the driver does not fill. A fixture
+		// that overstates the length would make the parser read that padding,
+		// so the length is derived from the SSID itself.
+		const ssid = "flitnix-net"
+		got, profile, ok := wlanConnectionMetadata(makeConnectionAttributes(ssid, uint32(len(ssid)), "Home Wifi"))
+		if !ok || got != ssid || profile != "Home Wifi" {
+			t.Errorf("got (%q, %q, %v); want (%q, %q, true)", got, profile, ok, ssid, "Home Wifi")
 		}
 	})
 

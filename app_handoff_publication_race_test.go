@@ -121,7 +121,14 @@ func TestHandoffCancelBatchFailsCommit(t *testing.T) {
 		t.Fatalf("progress 0: %v", err)
 	}
 
-	storeDir := filepath.Clean(h.a.store.Dir())
+	// Force the filesystem commit to fail deterministically. chmod cannot deny
+	// writes on Windows, so the failure is injected at the publication
+	// primitive instead — the same seam production leaves nil.
+	h.a.store.SetLinkHook(func(string, string) error {
+		return errors.New("injected commit failure")
+	})
+	t.Cleanup(func() { h.a.store.SetLinkHook(nil) })
+
 	onPublishCalled := make(chan struct{})
 
 	var submitErr error
@@ -132,16 +139,10 @@ func TestHandoffCancelBatchFailsCommit(t *testing.T) {
 		defer wg.Done()
 		_, submitErr = h.a.transfers.SubmitContentWithPublish(cid0, key, bytes.NewReader([]byte("fail")), nil, func() error {
 			err := h.a.coordinator.MarkItemPublishing(key, l0)
-			// Make the store directory read-only so the filesystem commit (hard link) fails.
-			_ = os.Chmod(storeDir, 0555)
 			close(onPublishCalled)
 			return err
 		})
 	}()
-
-	t.Cleanup(func() {
-		_ = os.Chmod(storeDir, 0755)
-	})
 
 	select {
 	case <-onPublishCalled:
@@ -158,7 +159,7 @@ func TestHandoffCancelBatchFailsCommit(t *testing.T) {
 
 	// Commit must have failed.
 	if submitErr == nil {
-		t.Fatal("SubmitContentWithPublish should have failed on read-only directory")
+		t.Fatal("SubmitContentWithPublish should have failed when the commit fails")
 	}
 
 	// Settle the failure through FailBatch.
@@ -177,9 +178,7 @@ func TestHandoffCancelBatchFailsCommit(t *testing.T) {
 		t.Fatalf("final item 1 state = %q, want canceled", view.Items[1].State)
 	}
 
-	// Restore write permissions to inspect directory.
-	_ = os.Chmod(storeDir, 0755)
-	entries, err := os.ReadDir(storeDir)
+	entries, err := os.ReadDir(filepath.Clean(h.a.store.Dir()))
 	if err != nil {
 		t.Fatalf("ReadDir: %v", err)
 	}

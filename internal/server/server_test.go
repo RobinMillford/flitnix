@@ -3,11 +3,13 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/netip"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -91,8 +93,8 @@ func TestServePortInUse(t *testing.T) {
 		if err == nil {
 			t.Fatalf("Serve succeeded on an occupied port %s, want an error", blocker.Addr())
 		}
-		if !strings.Contains(err.Error(), "already in use") {
-			t.Errorf("port-in-use error = %v, want it to mention \"already in use\"", err)
+		if !errors.Is(err, syscall.EADDRINUSE) {
+			t.Errorf("port-in-use error = %v, want it to classify as syscall.EADDRINUSE", err)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatalf("Serve did not return despite the port being occupied")
@@ -335,8 +337,8 @@ func TestServePortInUseOnSpecificAddress(t *testing.T) {
 		if err == nil {
 			t.Fatal("served on an occupied explicit address; want an error")
 		}
-		if !strings.Contains(err.Error(), "already in use") {
-			t.Errorf("error = %v, want it to mention \"already in use\"", err)
+		if !errors.Is(err, syscall.EADDRINUSE) {
+			t.Errorf("error = %v, want it to classify as syscall.EADDRINUSE", err)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("Serve did not return despite the address being occupied")

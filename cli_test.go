@@ -88,8 +88,21 @@ func TestHandleCLILaunchShares(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected code 0, got %d", code)
 	}
-	if len(shares) != 1 || shares[0] != testFile {
+	if len(shares) != 1 {
 		t.Fatalf("expected 1 share %q, got %v", testFile, shares)
+	}
+	// Compare filesystem identity, not text: Windows can report the same file
+	// through its short (8.3) and long path forms.
+	gotInfo, err := os.Stat(shares[0])
+	if err != nil {
+		t.Fatalf("stat shared path %q: %v", shares[0], err)
+	}
+	wantInfo, err := os.Stat(testFile)
+	if err != nil {
+		t.Fatalf("stat source %q: %v", testFile, err)
+	}
+	if !os.SameFile(gotInfo, wantInfo) {
+		t.Fatalf("expected 1 share of %q, got %v", testFile, shares)
 	}
 }
 

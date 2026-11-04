@@ -329,10 +329,15 @@ func (s *Server) bind() (net.Listener, error) {
 		close(s.ready)
 	})
 	if bindErr != nil {
-		if errors.Is(bindErr, syscall.EADDRINUSE) {
+		if addressInUse(bindErr) {
+			// Wrap the POSIX sentinel so callers classify a busy port with
+			// errors.Is on every platform: Windows reports Winsock's
+			// WSAEADDRINUSE, which is not the same value as
+			// syscall.EADDRINUSE. The platform error is kept as text so the
+			// message stays actionable.
 			return nil, fmt.Errorf(
-				"server: cannot listen on %s: address already in use; stop the program holding that port or choose a different address",
-				s.cfg.ListenAddr,
+				"server: cannot listen on %s: %w; stop the program holding that port or choose a different address (%v)",
+				s.cfg.ListenAddr, syscall.EADDRINUSE, bindErr,
 			)
 		}
 		return nil, fmt.Errorf("server: cannot listen on %s: %w", s.cfg.ListenAddr, bindErr)

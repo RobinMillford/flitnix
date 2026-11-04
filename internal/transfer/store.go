@@ -41,8 +41,9 @@ const DefaultReceiveSubpath = "Downloads/Flitnix"
 // are safe for concurrent use; PartFile instances are used by exactly one
 // streaming goroutine.
 type Store struct {
-	mu  sync.RWMutex
-	dir string
+	mu   sync.RWMutex
+	dir  string
+	link func(oldname, newname string) error
 }
 
 // StoreConfig configures a Store.
@@ -95,6 +96,30 @@ func (s *Store) SetDir(dir string) error {
 	defer s.mu.Unlock()
 	s.dir = abs
 	return nil
+}
+
+// SetLinkHook installs a fault-injection seam for the atomic publish step.
+// Production never calls it: Commit uses os.Link whenever the hook is nil.
+// It exists so tests can make publication fail deterministically on every
+// platform, including Windows, where a permission fixture (chmod) cannot deny
+// a write.
+func (s *Store) SetLinkHook(fn func(oldname, newname string) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.link = fn
+}
+
+// linkFile publishes oldname under newname through the injected hook when one
+// is installed. Hard links are the production primitive: atomic, and they
+// never overwrite an existing file.
+func (s *Store) linkFile(oldname, newname string) error {
+	s.mu.RLock()
+	hook := s.link
+	s.mu.RUnlock()
+	if hook != nil {
+		return hook(oldname, newname)
+	}
+	return os.Link(oldname, newname)
 }
 
 // ensureDir creates the receive directory when first needed.
@@ -458,7 +483,7 @@ func (p *PartFile) Commit() (string, error) {
 			// contract; kept as defense in depth against future changes.
 			return "", fmt.Errorf("transfer: refusing to write outside the receive directory: %s", final)
 		}
-		err := os.Link(p.path, final)
+		err := p.store.linkFile(p.path, final)
 		if err == nil {
 			_ = os.Remove(p.path) // drop the temporary link; the data survives
 			return final, nil
