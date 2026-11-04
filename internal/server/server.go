@@ -143,6 +143,7 @@ type Config struct {
 // application is the composition root: it owns these instances (and the
 // receive Store inside the transfer Service) and handed to Config.
 type Services struct {
+	resumableMu    sync.Mutex
 	Sessions       *session.Manager
 	Transfers      *transfer.Service
 	Coordinator    *transfer.Coordinator
@@ -183,6 +184,8 @@ func (s *Services) EnsureResumable() *transfer.ResumableManager {
 	if s == nil {
 		return nil
 	}
+	s.resumableMu.Lock()
+	defer s.resumableMu.Unlock()
 	if s.Resumable != nil {
 		return s.Resumable
 	}

@@ -59,6 +59,8 @@ Flitnix combines the performance and concurrency safety of Go with a modern Svel
 - **Pure Local Network (Zero Cloud)**:
   - All transfers stream directly over your local Wi-Fi or mobile hotspot. No external cloud relays or tracking.
 - **Rock-Solid Reliability**:
+  - Tus 1.0.0 resumable transfer protocol with pipelined metadata checkpointing and single-pass write-and-hash integrity.
+  - Comprehensive 25-scenario reliability suite covering network dropouts, host sleep/wake, app restarts, disk limits, and cross-platform filename conflicts.
   - Two-phase publication reservation ensures cancellation requests and successful disk commits never produce corrupted or ghost files.
   - Safe session teardown prevents revoked sessions or network drops from leaving dangling locks or orphaned temporary files.
   - Native Wi-Fi SSID identification on Linux, Windows, and macOS.
