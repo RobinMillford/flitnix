@@ -277,6 +277,12 @@ func (s *Store) OpenPart(name string) (*PartFile, error) {
 	if name == "" || filepath.Base(name) != name || name == "." || name == ".." {
 		return nil, fmt.Errorf("%w: %q is not a bare base name", ErrInvalidFilename, name)
 	}
+	if isWindowsReservedComponent(name) {
+		return nil, fmt.Errorf("%w: %q uses a reserved Windows device name", ErrInvalidFilename, name)
+	}
+	if strings.HasSuffix(name, ".") || strings.HasSuffix(name, " ") {
+		return nil, fmt.Errorf("%w: %q ends with a space or dot", ErrInvalidFilename, name)
+	}
 	if err := s.ensureDir(); err != nil {
 		return nil, err
 	}

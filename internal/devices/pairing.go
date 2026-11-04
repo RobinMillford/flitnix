@@ -8,8 +8,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 var (
@@ -402,14 +405,14 @@ func (c *PairingCoordinator) PrepareApproval(sessionKeyHash []byte, deviceName, 
 	}
 
 	p.RequestID = hex.EncodeToString(reqIDBytes)
-	p.DeviceName = deviceName
+	p.DeviceName = SanitizeDeviceName(deviceName)
 	p.decisionChan = make(chan bool, 1)
 	p.decisionMade = false
 	p.State = StatePendingApproval
 
 	if c.OnPairingPrompt != nil {
 		ch := p.decisionChan
-		go c.OnPairingPrompt(deviceName, hex.EncodeToString(p.ClientID), p.SASDisplay, ch)
+		go c.OnPairingPrompt(p.DeviceName, hex.EncodeToString(p.ClientID), p.SASDisplay, ch)
 	}
 
 	return p.RequestID, p.decisionChan, p.ExpiresAt, nil
@@ -695,4 +698,30 @@ func (c *PairingCoordinator) pruneFailuresLocked(now time.Time) {
 		}
 	}
 	c.failureTimestamps = valid
+}
+
+var ansiEscapeRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
+// SanitizeDeviceName cleans and bounds client-provided device names before
+// exposing them to the desktop operator or storing them. Control characters,
+// ANSI escape codes, and excess length are stripped; empty or whitespace-only
+// names receive a safe default.
+func SanitizeDeviceName(raw string) string {
+	stripped := ansiEscapeRegex.ReplaceAllString(raw, "")
+	trimmed := strings.TrimSpace(stripped)
+	var b strings.Builder
+	for _, r := range trimmed {
+		if r >= 32 && r != 127 && !unicode.IsControl(r) {
+			b.WriteRune(r)
+		}
+	}
+	cleaned := strings.TrimSpace(b.String())
+	if cleaned == "" {
+		return "Unnamed Device"
+	}
+	runes := []rune(cleaned)
+	if len(runes) > 64 {
+		return string(runes[:64])
+	}
+	return cleaned
 }
