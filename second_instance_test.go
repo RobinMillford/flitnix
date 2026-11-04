@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -126,6 +127,9 @@ func TestSecondInstanceLaunch_Deduplication(t *testing.T) {
 }
 
 func TestEnsureLinuxNautilusScript(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Nautilus (GNOME Files) integration is Linux-only: ensureLinuxNautilusScript is a no-op elsewhere")
+	}
 	tempHome := t.TempDir()
 	t.Setenv("HOME", tempHome)
 	t.Setenv("XDG_CURRENT_DESKTOP", "GNOME")

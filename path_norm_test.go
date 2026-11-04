@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -122,8 +123,14 @@ func TestNormalizePathArgument_FileURI(t *testing.T) {
 		t.Fatalf("expected %q, got %q", canonical, got)
 	}
 
-	// file://localhost/path
-	localhostURI := "file://localhost" + filepath.ToSlash(f)
+	// file://localhost/path. A Windows file URI carries the drive letter in the
+	// path component (/C:/...), so the authority is exactly "localhost" on
+	// every platform.
+	localhostURI := (&url.URL{
+		Scheme: "file",
+		Host:   "localhost",
+		Path:   "/" + strings.TrimPrefix(filepath.ToSlash(f), "/"),
+	}).String()
 	gotLH, err := NormalizePathArgument(localhostURI, "")
 	if err != nil {
 		t.Fatalf("unexpected error for localhost URI: %v", err)

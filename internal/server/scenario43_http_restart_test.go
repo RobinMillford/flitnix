@@ -16,7 +16,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -33,16 +32,6 @@ const (
 	scenario43Payload = "scenario-43-awaiting-digest-payload"
 )
 
-func scenario43Skip(t *testing.T) {
-	t.Helper()
-	if runtimeGOOS := os.Getenv("GOOS"); runtimeGOOS != "" && runtimeGOOS != "linux" {
-		t.Skip("Scenario 43 abrupt-process coverage uses SIGKILL and is Linux-specific")
-	}
-	if syscall.SIGKILL == 0 {
-		t.Skip("SIGKILL is unavailable on this platform")
-	}
-}
-
 // TestWp4Scenario43HTTPServerProcessRestart is the full acceptance boundary:
 // the original session authenticates, the original batch/item identity and
 // approval are restored, HTTP HEAD is authoritative, completion publishes the
@@ -50,8 +39,6 @@ func scenario43Skip(t *testing.T) {
 // retransmitted. PATCH count is instrumented independently in both process
 // lifetimes instead of being inferred from the request sequence.
 func TestWp4Scenario43HTTPServerProcessRestart(t *testing.T) {
-	scenario43Skip(t)
-
 	stateDir := t.TempDir()
 	payload := []byte(scenario43Payload)
 	expected := sha256.Sum256(payload)
@@ -106,10 +93,16 @@ func TestWp4Scenario43HTTPServerProcessRestart(t *testing.T) {
 	// The response is fully consumed before SIGKILL. No graceful shutdown API
 	// is called: this models a server crash at the durable awaiting_digest
 	// boundary.
-	if err := childA.kill(); err == nil {
-		t.Fatal("crashed server exited successfully; want SIGKILL termination")
-	} else if !errors.Is(err, os.ErrProcessDone) && !strings.Contains(err.Error(), "signal: killed") {
-		t.Fatalf("server A termination = %v, want SIGKILL", err)
+	if killErr := childA.kill(); killErr == nil {
+		t.Fatal("crashed server exited successfully; want abrupt termination")
+	} else if !errors.Is(killErr, os.ErrProcessDone) && !scenario43AbruptTermination(killErr) {
+		t.Fatalf("server A termination = %v, want abrupt termination", killErr)
+	}
+	// The child must actually be gone: Wait reaped it before kill returned.
+	// (ProcessState.Exited reports false for a signal-killed child, so the
+	// reaped state itself is the evidence, not Exited.)
+	if state := childA.cmd.ProcessState; state == nil {
+		t.Fatal("server A was not reaped after termination")
 	}
 	if got := counterA.patches(); got != 1 {
 		t.Fatalf("server A PATCH count = %d, want 1", got)
@@ -204,7 +197,6 @@ func TestWp4Scenario43HTTPServerProcessRestart(t *testing.T) {
 // TestWp4Scenario43RevokedSessionCannotContinue proves a revocation is
 // durable: the token must not work in a fresh process.
 func TestWp4Scenario43RevokedSessionCannotContinue(t *testing.T) {
-	scenario43Skip(t)
 	stateDir := t.TempDir()
 
 	childA := startScenario43HTTPChild(t, "revoke-before-crash", stateDir, "")
@@ -229,7 +221,6 @@ func TestWp4Scenario43RevokedSessionCannotContinue(t *testing.T) {
 // a restart: the durable ExpiresAt is authoritative even though no expiry
 // event was appended before the crash.
 func TestWp4Scenario43ExpiredSessionCannotContinue(t *testing.T) {
-	scenario43Skip(t)
 	stateDir := t.TempDir()
 
 	childA := startScenario43HTTPChild(t, "expire-before-crash", stateDir, "")
@@ -253,7 +244,6 @@ func TestWp4Scenario43ExpiredSessionCannotContinue(t *testing.T) {
 // TestWp4Scenario43InvalidJournalPreventsReadiness proves global journal
 // corruption is fail-closed: the child exits without ever publishing readiness.
 func TestWp4Scenario43InvalidJournalPreventsReadiness(t *testing.T) {
-	scenario43Skip(t)
 	stateDir := t.TempDir()
 	seedRecoveryState(t, stateDir)
 
@@ -278,7 +268,6 @@ func TestWp4Scenario43InvalidJournalPreventsReadiness(t *testing.T) {
 // key alongside existing trusted state fails closed instead of silently
 // generating a replacement and restoring old sessions.
 func TestWp4Scenario43MissingKeyPreventsReadiness(t *testing.T) {
-	scenario43Skip(t)
 	stateDir := t.TempDir()
 	seedRecoveryState(t, stateDir)
 	if err := os.Remove(filepath.Join(stateDir, "install-key-v1")); err != nil {
@@ -295,7 +284,6 @@ func TestWp4Scenario43MissingKeyPreventsReadiness(t *testing.T) {
 // TestWp4Scenario43ResumableRecoveryFailurePreventsReadiness proves a staging
 // recovery failure blocks listener readiness instead of serving unknown state.
 func TestWp4Scenario43ResumableRecoveryFailurePreventsReadiness(t *testing.T) {
-	scenario43Skip(t)
 	stateDir := t.TempDir()
 	seedRecoveryState(t, stateDir)
 	// A regular file where the staging directory belongs makes os.ReadDir fail
@@ -312,7 +300,6 @@ func TestWp4Scenario43ResumableRecoveryFailurePreventsReadiness(t *testing.T) {
 // durable batch/item/owner association is quarantined, is never addressable
 // through HTTP, and is never published.
 func TestWp4Scenario43OrphanStagingCannotBePublished(t *testing.T) {
-	scenario43Skip(t)
 	stateDir := t.TempDir()
 
 	childA := startScenario43HTTPChild(t, "serve-before-crash", stateDir, "")
@@ -533,7 +520,7 @@ func (c *scenario43HTTPChild) kill() error {
 	if c.cmd.Process == nil {
 		return os.ErrProcessDone
 	}
-	signalErr := c.cmd.Process.Signal(syscall.SIGKILL)
+	signalErr := terminateScenario43Child(c.cmd.Process)
 	if signalErr != nil && !errors.Is(signalErr, os.ErrProcessDone) {
 		return signalErr
 	}
@@ -542,7 +529,7 @@ func (c *scenario43HTTPChild) kill() error {
 		c.exitErr <- waitErr
 		return waitErr
 	case <-time.After(20 * time.Second):
-		return errors.New("server child did not exit after SIGKILL")
+		return errors.New("server child did not exit after termination")
 	}
 }
 

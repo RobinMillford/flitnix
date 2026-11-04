@@ -1067,7 +1067,13 @@ func (rm *ResumableManager) RecoverOnStartup() error {
 func (rm *ResumableManager) recoverStaging() error {
 	entries, err := os.ReadDir(rm.stagingDir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		// Only a genuinely absent staging directory is a clean start. The
+		// error itself cannot decide that: on Windows ReadDir on a regular
+		// file reports ERROR_PATH_NOT_FOUND, which os.IsNotExist considers a
+		// missing path, so the platform's own classification would let a
+		// corrupt staging path pass startup recovery. Lstat answers the real
+		// question, and every other failure stays fatal (fail closed).
+		if _, statErr := os.Lstat(rm.stagingDir); os.IsNotExist(statErr) {
 			return nil
 		}
 		return err

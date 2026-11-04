@@ -382,13 +382,17 @@ func TestPairingSecurity_WriteFailureFailsClosed(t *testing.T) {
 		t.Fatalf("EnableDurableLockout on a not-yet-existing record must start clean: %v", err)
 	}
 
-	// Make every subsequent save fail: the record's parent directory becomes
-	// read-only, so creating the temp file is denied while reading (a missing
-	// file) stayed clean.
-	if err := os.Chmod(dir, 0o555); err != nil {
+	// Make every subsequent save fail deterministically: the record path becomes
+	// a non-empty directory, so the temp file's atomic rename can never install
+	// it. A chmod fixture cannot deny writes on Windows (mode bits are ignored
+	// there), which would leave the save succeeding and the test asserting
+	// nothing.
+	if err := os.MkdirAll(secPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	if err := os.WriteFile(filepath.Join(secPath, "occupied"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	sessionKey := sha256Sum([]byte("session"))
 	clientPub, _, err := GenerateKeyPair()

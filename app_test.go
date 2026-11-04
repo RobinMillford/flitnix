@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/itsyamin/flitnix/internal/netenv"
@@ -347,10 +348,13 @@ func TestEnsureServerPortOccupied(t *testing.T) {
 	if err == nil {
 		t.Fatal("occupied address must fail with a clear error")
 	}
-	for _, want := range []string{"could not start on " + listen, "address already in use"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q does not mention %q", err, want)
-		}
+	// Classify the failure by error identity, not by English text: Windows
+	// reports Winsock's WSAEADDRINUSE with a different message.
+	if !errors.Is(err, syscall.EADDRINUSE) {
+		t.Errorf("error = %v, want it to classify as syscall.EADDRINUSE", err)
+	}
+	if want := "could not start on " + listen; !strings.Contains(err.Error(), want) {
+		t.Errorf("error %q does not mention %q", err, want)
 	}
 	if a.srv != nil {
 		t.Fatal("failed start must not leave a server behind")
