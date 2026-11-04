@@ -33,6 +33,12 @@
     <span class="status__text">Checking connection…</span>
   </section>
 
+  <aside class="awareness-banner" id="awareness-banner" hidden role="status" aria-live="polite">
+    <span class="awareness-banner__icon" aria-hidden="true">ℹ</span>
+    <span class="awareness-banner__text" id="awareness-banner-text"></span>
+    <button type="button" class="awareness-banner__close" id="awareness-banner-close" aria-label="Dismiss">&times;</button>
+  </aside>
+
   <!-- Shown only when there is no usable session token: either the page was
        opened without a QR link or the session it belonged to has ended. -->
   <section class="card card--warn" id="rescan" hidden>
@@ -41,6 +47,17 @@
   </section>
 
   <section class="flow" id="flow" hidden>
+
+    <section class="card awareness-card" id="awareness-card">
+      <div class="awareness-card__header">
+        <h2 class="awareness-card__title">Background & Screen</h2>
+        <span class="badge badge--waiting" id="wake-lock-badge">Best-effort</span>
+      </div>
+      <p class="awareness-card__desc">
+        Mobile browsers throttle or pause transfers when the screen turns off or the tab is hidden. Keep this tab open for best reliability.
+      </p>
+      <div class="awareness-card__control" id="wake-lock-container"></div>
+    </section>
 
     <section class="panel">
       <div class="panel__head">
@@ -94,6 +111,7 @@
 
 </main>
 <script src="/static/sha256.min.js"></script>
+<script src="/static/resumable-client.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

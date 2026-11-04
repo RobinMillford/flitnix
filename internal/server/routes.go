@@ -91,7 +91,13 @@ func newRouter(services *Services, stall, downloadStall time.Duration, grants *D
 		// endpoint set without a live session either way.
 		api := newAPIMux(services, stall, grants)
 		mux.Handle("/api/", requireSession(services, api.ServeHTTP))
-		mux.HandleFunc("GET /api/downloads/{id}/content", serveArchiveDownload(services, grants, downloadStall))
+		downloadHandler := serveArchiveDownload(services, grants, downloadStall)
+		mux.HandleFunc("GET /api/downloads/{id}", downloadHandler)
+		mux.HandleFunc("HEAD /api/downloads/{id}", downloadHandler)
+		mux.HandleFunc("GET /api/downloads/{id}/content", downloadHandler)
+		mux.HandleFunc("HEAD /api/downloads/{id}/content", downloadHandler)
+		mux.HandleFunc("GET /api/archive-downloads/{id}", downloadHandler)
+		mux.HandleFunc("HEAD /api/archive-downloads/{id}", downloadHandler)
 
 		if services.GuestManager != nil {
 			guestAPI := newGuestAPIMux(services, stall)
@@ -299,6 +305,15 @@ func newAPIMux(services *Services, stall time.Duration, grants *DownloadGrantSto
 	mux.HandleFunc("GET /api/batches/{id}", handleBatchStatus(services))
 	mux.HandleFunc("DELETE /api/batches/{id}/items/{itemID}", handleBatchItemCancel(services))
 	mux.HandleFunc("PUT /api/batches/{batchID}/items/{itemID}/content", handleBatchContent(services, stall))
+
+	// Resumable upload endpoints (tus 1.0.0 & application lifecycle)
+	mux.HandleFunc("OPTIONS /api/batches/{batchID}/items/{itemID}/tus", handleBatchTusOptions())
+	mux.HandleFunc("POST /api/batches/{batchID}/items/{itemID}/tus", handleBatchTusCreate(services))
+	mux.HandleFunc("HEAD /api/batches/{batchID}/items/{itemID}/tus", handleBatchTusHead(services))
+	mux.HandleFunc("PATCH /api/batches/{batchID}/items/{itemID}/tus", handleBatchTusPatch(services, stall))
+	mux.HandleFunc("DELETE /api/batches/{batchID}/items/{itemID}/tus", handleBatchTusDelete(services))
+	mux.HandleFunc("POST /api/batches/{batchID}/items/{itemID}/complete", handleBatchComplete(services))
+	mux.HandleFunc("GET /api/batches/{batchID}/items/{itemID}/status", handleBatchItemStatus(services))
 	mux.HandleFunc("GET /api/files", serveFilesList(services))
 	mux.HandleFunc("GET /api/files/{id}/download", serveFileDownload(services, stall))
 	mux.HandleFunc("GET /api/sources", serveSourcesList(services))
@@ -685,10 +700,62 @@ func handleUploadDeclare(svcs *Services, _ time.Duration) http.HandlerFunc {
 	}
 }
 
-// isMaxBytes bigotry-free detection of *http.MaxBytesError (Go 1.19+).
+// isMaxBytes detects *http.MaxBytesError (Go 1.19+).
 func isMaxBytes(err error) bool {
 	var maxErr *http.MaxBytesError
 	return errors.As(err, &maxErr)
+}
+
+// maxControlBytes bounds the JSON body of a small, fixed-shape control
+// request: the three pairing phases, the device auth challenge, the
+// auto-approve flag and upload completion. Every such payload is a handful of
+// short strings and booleans, so 8 KiB is generous by orders of magnitude and
+// anything larger is not a control request.
+//
+// This deliberately does NOT bound upload or download bodies: streaming data
+// is capped by the declared size and the tus offset rules instead, and a
+// MaxBytesReader here would break the large-file path.
+const maxControlBytes = 8 * 1024
+
+// Field-strictness choices for decodeControlJSON, named so call sites stay
+// readable. Both values preserve the strictness each handler had before the
+// body bound was added; neither is a policy change.
+const (
+	rejectUnknownFields = true
+	allowUnknownFields  = false
+)
+
+// decodeControlJSON reads one maxControlBytes-bounded JSON object from the
+// request body into dst and reports whether the handler should continue.
+//
+// Oversized payloads answer 413 and are never buffered in full; malformed JSON
+// answers invalidMsg as 400. The response is written before returning false,
+// so callers only need to `return`.
+func decodeControlJSON(w http.ResponseWriter, r *http.Request, dst any, invalidMsg string, disallowUnknown bool) bool {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxControlBytes))
+	if err != nil {
+		if isMaxBytes(err) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return false
+		}
+		writeError(w, http.StatusBadRequest, invalidMsg)
+		return false
+	}
+	if len(body) > maxControlBytes {
+		// MaxBytesReader only errors once the excess write happens; a reader
+		// that stops exactly on the boundary is caught by this backstop.
+		writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+		return false
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	if disallowUnknown {
+		dec.DisallowUnknownFields()
+	}
+	if err := dec.Decode(dst); err != nil {
+		writeError(w, http.StatusBadRequest, invalidMsg)
+		return false
+	}
+	return true
 }
 
 // handleUploadStatus serves GET /api/uploads/{id}: the phone polls its own
@@ -747,6 +814,14 @@ func handleUploadContent(svcs *Services, stall time.Duration) http.HandlerFunc {
 		}
 		sess.Begin()
 		defer sess.End()
+		if svcs.Inhibitor != nil {
+			pLease, pErr := svcs.Inhibitor.Acquire("Receiving upload " + id)
+			if pErr != nil {
+				diagnose(svcs, "power inhibitor acquire failed: %v", pErr)
+			} else if pLease != nil {
+				defer pLease.Release()
+			}
+		}
 		body := &stallBodyReader{
 			ReadCloser: r.Body,
 			rc:         http.NewResponseController(w),
@@ -1084,6 +1159,14 @@ func handleBatchContent(svcs *Services, stall time.Duration) http.HandlerFunc {
 			writeBatchError(w, err)
 			return
 		}
+		if svcs.Inhibitor != nil {
+			pLease, pErr := svcs.Inhibitor.Acquire(fmt.Sprintf("Receiving item %s in batch %s", itemID, batchID))
+			if pErr != nil {
+				diagnose(svcs, "power inhibitor acquire failed: %v", pErr)
+			} else if pLease != nil {
+				defer pLease.Release()
+			}
+		}
 		body := &stallBodyReader{ReadCloser: r.Body, rc: http.NewResponseController(w), stall: stall}
 		start := time.Now()
 		// Quarter marks of large streams are the only mid-stream
@@ -1283,6 +1366,14 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 			}
 			downloadID = dl.ID
 			svcs.Downloads.Begin(downloadID)
+		}
+		if svcs.Inhibitor != nil {
+			pLease, pErr := svcs.Inhibitor.Acquire("Downloading " + sf.Name)
+			if pErr != nil {
+				diagnose(svcs, "power inhibitor acquire failed: %v", pErr)
+			} else if pLease != nil {
+				defer pLease.Release()
+			}
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
@@ -1566,10 +1657,7 @@ func handlePairChallenge(svcs *Services) http.HandlerFunc {
 			ClientPublicKey  string `json:"clientPublicKey"`
 			ClientCommitment string `json:"clientCommitment"`
 		}
-		dec := json.NewDecoder(r.Body)
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid pairing challenge payload")
+		if !decodeControlJSON(w, r, &req, "invalid pairing challenge payload", rejectUnknownFields) {
 			return
 		}
 		if req.ClientPublicKey == "" || req.ClientCommitment == "" {
@@ -1620,10 +1708,7 @@ func handlePairReveal(svcs *Services) http.HandlerFunc {
 			ClientEphemeralKey string `json:"clientEphemeralKey"`
 			ClientSalt         string `json:"clientSalt"`
 		}
-		dec := json.NewDecoder(r.Body)
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid pairing reveal payload")
+		if !decodeControlJSON(w, r, &req, "invalid pairing reveal payload", rejectUnknownFields) {
 			return
 		}
 
@@ -1684,10 +1769,7 @@ func handlePairRequest(svcs *Services) http.HandlerFunc {
 			PairingNonce    string `json:"pairingNonce"`
 			ClientProof     string `json:"clientProof"`
 		}
-		dec := json.NewDecoder(r.Body)
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid pairing request payload")
+		if !decodeControlJSON(w, r, &req, "invalid pairing request payload", rejectUnknownFields) {
 			return
 		}
 
@@ -1786,10 +1868,7 @@ func handleAuthChallenge(svcs *Services) http.HandlerFunc {
 		var req struct {
 			DeviceID string `json:"deviceId"`
 		}
-		dec := json.NewDecoder(r.Body)
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid auth challenge request")
+		if !decodeControlJSON(w, r, &req, "invalid auth challenge request", rejectUnknownFields) {
 			return
 		}
 		if _, exists := svcs.Devices.Get(req.DeviceID); !exists {
@@ -1862,10 +1941,7 @@ func handleDeviceSetAutoApprove(svcs *Services) http.HandlerFunc {
 		var req struct {
 			AutoApprove bool `json:"autoApprove"`
 		}
-		dec := json.NewDecoder(r.Body)
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid request body")
+		if !decodeControlJSON(w, r, &req, "invalid request body", rejectUnknownFields) {
 			return
 		}
 		if err := svcs.Devices.SetAutoApprove(id, req.AutoApprove); err != nil {

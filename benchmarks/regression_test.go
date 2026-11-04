@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
-	"syscall"
 	"testing"
 	"time"
 
@@ -48,41 +47,26 @@ type BenchScenarioResult struct {
 	Pass1Percent float64           `json:"pass1_time_percent"`
 }
 
-func getBenchCPUTime() time.Duration {
-	var ru syscall.Rusage
-	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru); err == nil {
-		user := time.Duration(ru.Utime.Sec)*time.Second + time.Duration(ru.Utime.Usec)*time.Microsecond
-		sys := time.Duration(ru.Stime.Sec)*time.Second + time.Duration(ru.Stime.Usec)*time.Microsecond
-		return user + sys
-	}
-	return 0
-}
-
+// createBenchFile materialises a fixture of exactly the requested size.
+//
+// The regression benchmarks measure streaming throughput and allocation, not
+// byte values, so the fixture is created sparse: the 2 GiB case keeps its
+// full size while costing almost no disk. Writing real bytes here previously
+// exhausted the machine's disk quota and failed unrelated tests.
 func createBenchFile(path string, size int64) {
 	if fi, err := os.Stat(path); err == nil && fi.Size() == size {
 		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		panic(err)
 	}
 	f, err := os.Create(path)
 	if err != nil {
 		panic(err)
 	}
 	defer f.Close()
-
-	chunk := make([]byte, 1024*1024)
-	for i := range chunk {
-		chunk[i] = byte((i * 37) & 0xff)
-	}
-
-	var written int64
-	for written < size {
-		toWrite := int64(len(chunk))
-		if size-written < toWrite {
-			toWrite = size - written
-		}
-		if _, err := f.Write(chunk[:toWrite]); err != nil {
-			panic(err)
-		}
-		written += toWrite
+	if err := f.Truncate(size); err != nil {
+		panic(err)
 	}
 }
 
@@ -223,7 +207,7 @@ func executeScenario(client *http.Client, serverURL, token string, reg *transfer
 		runtime.GC()
 		var mBefore, mAfter runtime.MemStats
 		runtime.ReadMemStats(&mBefore)
-		cpuBefore := getBenchCPUTime()
+		cpuBefore := processCPUTime()
 
 		t0 := time.Now()
 		var sourceIDs []string
@@ -276,7 +260,7 @@ func executeScenario(client *http.Client, serverURL, token string, reg *transfer
 		}
 		streamDur := time.Since(t3)
 		totalDur := time.Since(t0)
-		cpuAfter := getBenchCPUTime()
+		cpuAfter := processCPUTime()
 		runtime.ReadMemStats(&mAfter)
 
 		actualSHA := hex.EncodeToString(hasher.Sum(nil))
@@ -332,7 +316,7 @@ func executeFolderScenario(client *http.Client, serverURL, token string, reg *tr
 		runtime.GC()
 		var mBefore, mAfter runtime.MemStats
 		runtime.ReadMemStats(&mBefore)
-		cpuBefore := getBenchCPUTime()
+		cpuBefore := processCPUTime()
 
 		t0 := time.Now()
 		source, err := reg.AddFolder(folder, "")
@@ -381,7 +365,7 @@ func executeFolderScenario(client *http.Client, serverURL, token string, reg *tr
 		}
 		streamDur := time.Since(t3)
 		totalDur := time.Since(t0)
-		cpuAfter := getBenchCPUTime()
+		cpuAfter := processCPUTime()
 		runtime.ReadMemStats(&mAfter)
 
 		actualSHA := hex.EncodeToString(hasher.Sum(nil))
@@ -436,7 +420,7 @@ func executeDirectFileScenario(client *http.Client, serverURL, token string, reg
 		runtime.GC()
 		var mBefore, mAfter runtime.MemStats
 		runtime.ReadMemStats(&mBefore)
-		cpuBefore := getBenchCPUTime()
+		cpuBefore := processCPUTime()
 
 		t0 := time.Now()
 		sf, err := reg.Add(path, filepath.Base(path), "")
@@ -464,7 +448,7 @@ func executeDirectFileScenario(client *http.Client, serverURL, token string, reg
 		}
 		streamDur := time.Since(t2)
 		totalDur := time.Since(t0)
-		cpuAfter := getBenchCPUTime()
+		cpuAfter := processCPUTime()
 		runtime.ReadMemStats(&mAfter)
 
 		actualSHA := hex.EncodeToString(hasher.Sum(nil))

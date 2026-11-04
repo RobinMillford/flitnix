@@ -38,6 +38,15 @@ func newGuestAPIMux(services *Services, stall time.Duration) http.Handler {
 	mux.HandleFunc("POST /guest-api/uploads", handleGuestUploadDeclare(services))
 	mux.HandleFunc("GET /guest-api/uploads/{id}", handleGuestUploadStatus(services))
 	mux.HandleFunc("PUT /guest-api/uploads/{id}/content", handleGuestUploadContent(services, stall))
+
+	// Resumable upload endpoints (tus 1.0.0 & application lifecycle)
+	mux.HandleFunc("OPTIONS /guest-api/uploads/{uploadID}/tus", handleGuestTusOptions())
+	mux.HandleFunc("POST /guest-api/uploads/{uploadID}/tus", handleGuestTusCreate(services))
+	mux.HandleFunc("HEAD /guest-api/uploads/{uploadID}/tus", handleGuestTusHead(services))
+	mux.HandleFunc("PATCH /guest-api/uploads/{uploadID}/tus", handleGuestTusPatch(services, stall))
+	mux.HandleFunc("DELETE /guest-api/uploads/{uploadID}/tus", handleGuestTusDelete(services))
+	mux.HandleFunc("POST /guest-api/uploads/{uploadID}/complete", handleGuestComplete(services))
+	mux.HandleFunc("GET /guest-api/uploads/{uploadID}/status", handleGuestResumableStatus(services))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if services != nil {
 			services.RecordContact("guest_api")
@@ -99,9 +108,12 @@ type guestJoinRequest struct {
 	ParticipantID string `json:"participantId,omitempty"`
 }
 
+// guestJoinResponse is the join acknowledgement shown to the guest page. It
+// deliberately carries no credential: the guest token is issued only as the
+// HttpOnly flitnix_guest_token cookie, so guest JavaScript never holds it and
+// an XSS on the guest page cannot exfiltrate a long-lived room credential.
 type guestJoinResponse struct {
 	GuestID  string `json:"guestId"`
-	Token    string `json:"token"`
 	Nickname string `json:"nickname"`
 	State    string `json:"state"`
 }
@@ -168,7 +180,7 @@ func handleGuestJoin(svcs *Services) http.HandlerFunc {
 			})
 		}
 
-		// Set HttpOnly cookie
+		// The guest credential is issued as an HttpOnly cookie and nowhere else.
 		maxAge := int(time.Until(room.ExpiresAt).Seconds())
 		if maxAge < 0 {
 			maxAge = 0
@@ -178,13 +190,23 @@ func handleGuestJoin(svcs *Services) http.HandlerFunc {
 			Value:    g.Token,
 			Path:     "/guest-api/",
 			HttpOnly: true,
+			// Lax, not Strict: the guest page is reached from a QR/link that may
+			// be a top-level cross-site navigation, and Strict would drop the
+			// cookie on that first hop and strand an approved guest. Lax still
+			// withholds the cookie from cross-site subresource requests and from
+			// cross-site POSTs, so every state-changing guest call stays
+			// protected.
 			SameSite: http.SameSiteLaxMode,
-			MaxAge:   maxAge,
+			// Secure follows the actual TLS state of this connection. Nothing is
+			// inferred from X-Forwarded-* headers: a client can forge those, and
+			// trusting them would either silently weaken the cookie or break
+			// plaintext LAN transfers. This matches the download-grant cookie.
+			Secure: r.TLS != nil,
+			MaxAge: maxAge,
 		})
 
 		writeJSON(w, http.StatusCreated, guestJoinResponse{
 			GuestID:  g.ID,
-			Token:    g.Token,
 			Nickname: g.Nickname,
 			State:    string(g.State),
 		})
@@ -418,6 +440,15 @@ func handleGuestUploadContent(svcs *Services, stall time.Duration) http.HandlerF
 				ReadCloser: r.Body,
 				rc:         rc,
 				stall:      stall,
+			}
+		}
+
+		if svcs.Inhibitor != nil {
+			pLease, pErr := svcs.Inhibitor.Acquire("Receiving guest upload " + up.FileName)
+			if pErr != nil && svcs.Diagnose != nil {
+				svcs.Diagnose("power inhibitor acquire failed: %v", pErr)
+			} else if pLease != nil {
+				defer pLease.Release()
 			}
 		}
 

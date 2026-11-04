@@ -12,6 +12,12 @@ jobs:
   build-linux:
     name: Build Linux Packages
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Keyless artifact attestation (F-03): Sigstore signing through GitHub's
+      # own OIDC identity — no key material to manage or store.
+      id-token: write
+      attestations: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -44,6 +50,17 @@ jobs:
           cd frontend
           npm ci
           npm run build
+
+      - name: Verify frontend embed assets exist
+        # main.go embeds all:frontend/dist; fail fast with a clear message if
+        # the frontend build above did not produce it, before wails compiles.
+        shell: bash
+        run: |
+          if [ ! -f frontend/dist/index.html ]; then
+            echo "::error::frontend/dist/index.html is missing; run 'npm ci && npm run build' in frontend/ before compiling Go (main.go embeds all:frontend/dist)" >&2
+            exit 1
+          fi
+          echo "frontend/dist present for go:embed"
 
       - name: Build Linux binary
         run: |
@@ -90,9 +107,26 @@ jobs:
           path: artifacts/*
           if-no-files-found: error
 
+      - name: Attest Linux build provenance
+        # F-03: records a Sigstore build provenance attestation for each Linux
+        # artifact in the repository's attestation store. Verifiable (once a
+        # release with attestations exists) with:
+        #   gh attestation verify <asset> -R RobinMillford/flitnix
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            artifacts/flitnix_*.deb
+            artifacts/flitnix_*.rpm
+            artifacts/flitnix_*.tar.gz
+
   build-windows:
     name: Build Windows Installer
     runs-on: windows-latest
+    permissions:
+      contents: read
+      # Keyless artifact attestation (F-03), as in build-linux.
+      id-token: write
+      attestations: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -160,6 +194,17 @@ jobs:
           npm ci
           npm run build
 
+      - name: Verify frontend embed assets exist
+        # main.go embeds all:frontend/dist; fail fast with a clear message if
+        # the frontend build above did not produce it, before wails compiles.
+        shell: bash
+        run: |
+          if [ ! -f frontend/dist/index.html ]; then
+            echo "::error::frontend/dist/index.html is missing; run 'npm ci && npm run build' in frontend/ before compiling Go (main.go embeds all:frontend/dist)" >&2
+            exit 1
+          fi
+          echo "frontend/dist present for go:embed"
+
       - name: Build Windows Installer
         run: |
           wails build -nsis
@@ -207,9 +252,19 @@ jobs:
           path: artifacts/*
           if-no-files-found: error
 
+      - name: Attest Windows build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: artifacts/flitnix_*_setup.exe
+
   build-macos:
     name: Build macOS Universal App & DMG
     runs-on: macos-latest
+    permissions:
+      contents: read
+      # Keyless artifact attestation (F-03), as in build-linux.
+      id-token: write
+      attestations: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -236,6 +291,17 @@ jobs:
           cd frontend
           npm ci
           npm run build
+
+      - name: Verify frontend embed assets exist
+        # main.go embeds all:frontend/dist; fail fast with a clear message if
+        # the frontend build above did not produce it, before wails compiles.
+        shell: bash
+        run: |
+          if [ ! -f frontend/dist/index.html ]; then
+            echo "::error::frontend/dist/index.html is missing; run 'npm ci && npm run build' in frontend/ before compiling Go (main.go embeds all:frontend/dist)" >&2
+            exit 1
+          fi
+          echo "frontend/dist present for go:embed"
 
       - name: Build macOS Universal App
         run: |
@@ -297,6 +363,13 @@ jobs:
           name: macos-artifacts
           path: artifacts/*
           if-no-files-found: error
+
+      - name: Attest macOS build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            artifacts/flitnix_*_macOS_universal.dmg
+            artifacts/flitnix_*_macOS_universal.zip
 
   publish:
     name: Publish Draft Release

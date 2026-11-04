@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
+	"io"
 	"sync"
 	"time"
 
@@ -13,9 +14,12 @@ import (
 )
 
 const (
-	grantLifetime   = 60 * time.Second
-	maxGrantSources = 512
-	grantCookieName = "flitnix-download-grant"
+	grantLifetime            = 60 * time.Second
+	maxGrantSources          = 512
+	grantCookieName          = "flitnix-download-grant"
+	continuationCookiePrefix = "flitnix-cont-"
+	continuationIdleTimeout  = 30 * time.Minute
+	continuationMaxAge       = 86400 * time.Second // 24 hours
 
 	// progressRetention is how long a finished (completed, failed or
 	// expired) progress record stays pollable. The phone stops polling at the
@@ -65,6 +69,24 @@ type archiveEntry struct {
 	ModTime time.Time
 }
 
+type continuationRecord struct {
+	GrantID       string
+	Ticket        string
+	SessionKey    string
+	Sess          *session.Session
+	Entries       []archiveEntry
+	Total         int64
+	Filename      string
+	SHA256        string
+	ProgressID    string
+	DownloadID    string
+	Archive       bool
+	CreatedAt     time.Time
+	LastActive    time.Time
+	ActiveStreams int
+	LockHandle    io.Closer
+}
+
 // downloadGrant is the immutable, server-built plan one browser navigation
 // may redeem once. The plan is fixed when the grant is created from
 // server-side source metadata; nothing the browser sends later (a save-as
@@ -78,6 +100,7 @@ type downloadGrant struct {
 	Archive                                 bool
 	ArchiveSize                             int64
 	SHA256                                  string
+	ContinuationTicket                      string
 	ExpiresAt                               time.Time
 }
 
@@ -105,21 +128,23 @@ func (p *archiveProgress) now() time.Time {
 // DownloadGrantStore holds deliberately short-lived, in-memory browser grants
 // and the progress records that follow them.
 type DownloadGrantStore struct {
-	mu        sync.Mutex
-	now       func() time.Time
-	grants    map[string]downloadGrant
-	progress  map[string]*archiveProgress
-	active    map[string]int
-	downloads *transfer.DownloadRegistry
+	mu            sync.Mutex
+	now           func() time.Time
+	grants        map[string]downloadGrant
+	continuations map[string]*continuationRecord
+	progress      map[string]*archiveProgress
+	active        map[string]int
+	downloads     *transfer.DownloadRegistry
 }
 
 func newGrantStore(downloads *transfer.DownloadRegistry) *DownloadGrantStore {
 	return &DownloadGrantStore{
-		now:       time.Now,
-		grants:    make(map[string]downloadGrant),
-		progress:  make(map[string]*archiveProgress),
-		active:    make(map[string]int),
-		downloads: downloads,
+		now:           time.Now,
+		grants:        make(map[string]downloadGrant),
+		continuations: make(map[string]*continuationRecord),
+		progress:      make(map[string]*archiveProgress),
+		active:        make(map[string]int),
+		downloads:     downloads,
 	}
 }
 
@@ -150,6 +175,18 @@ func (s *DownloadGrantStore) pruneLocked(now time.Time) {
 				}
 				p.mu.Unlock()
 			}
+		}
+	}
+	for id, cont := range s.continuations {
+		if cont.ActiveStreams > 0 {
+			continue
+		}
+		if now.Sub(cont.LastActive) > continuationIdleTimeout || now.Sub(cont.CreatedAt) > continuationMaxAge {
+			if cont.LockHandle != nil {
+				_ = cont.LockHandle.Close()
+			}
+			delete(s.continuations, id)
+			continue
 		}
 	}
 	for id, p := range s.progress {
@@ -214,10 +251,15 @@ func (s *DownloadGrantStore) create(sess *session.Session, sources []archiveSour
 		}
 		downloadID = record.ID
 	}
+	var sha256Hex string
+	if len(sources) == 1 && sources[0].Kind == transfer.SourceKindFile {
+		sha256Hex = sources[0].File.SHA256
+	}
 	grant := downloadGrant{
 		ID: id, Secret: secret, Session: key, Sess: sess, Filename: filename,
 		Progress: progressID, DownloadID: downloadID, Entries: entries, Total: total,
 		Archive:   len(sources) != 1 || sources[0].Kind != transfer.SourceKindFile,
+		SHA256:    sha256Hex,
 		ExpiresAt: now.Add(grantLifetime),
 	}
 	progress := &archiveProgress{ID: progressID, Session: key, Total: total, State: progressPending, Updated: now, clock: s.now, downloads: s.downloads, downloadID: downloadID}
@@ -272,8 +314,143 @@ func (s *DownloadGrantStore) redeem(id, secret string) (downloadGrant, *archiveP
 		p.downloads.Begin(p.downloadID)
 	}
 	p.mu.Unlock()
+
+	ticket, err := randomGrantValue()
+	if err == nil {
+		grant.ContinuationTicket = ticket
+		s.continuations[id] = &continuationRecord{
+			GrantID:       id,
+			Ticket:        ticket,
+			SessionKey:    grant.Session,
+			Sess:          grant.Sess,
+			Entries:       grant.Entries,
+			Total:         grant.Total,
+			Filename:      grant.Filename,
+			SHA256:        grant.SHA256,
+			ProgressID:    grant.Progress,
+			DownloadID:    grant.DownloadID,
+			Archive:       grant.Archive,
+			CreatedAt:     now,
+			LastActive:    now,
+			ActiveStreams: 1,
+		}
+	}
+
 	s.pruneLocked(now)
 	return grant, p, nil
+}
+
+// authorizeContinuation validates a resource-specific continuation cookie ticket.
+// It enforces constant-time comparison, session status checks, and a 30-minute
+// sliding idle timeout. Actively streaming downloads are exempt from idle expiration.
+func (s *DownloadGrantStore) authorizeContinuation(id, ticket string) (downloadGrant, *archiveProgress, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+
+	cont, ok := s.continuations[id]
+	if !ok || subtle.ConstantTimeCompare([]byte(cont.Ticket), []byte(ticket)) != 1 {
+		s.pruneLocked(now)
+		return downloadGrant{}, nil, errGrantInvalid
+	}
+	if cont.Sess == nil || cont.Sess.Status() != session.StatusActive {
+		if cont.LockHandle != nil {
+			_ = cont.LockHandle.Close()
+		}
+		delete(s.continuations, id)
+		s.pruneLocked(now)
+		return downloadGrant{}, nil, errGrantSession
+	}
+	if (cont.ActiveStreams == 0 && now.Sub(cont.LastActive) > continuationIdleTimeout) || now.Sub(cont.CreatedAt) > continuationMaxAge {
+		if cont.LockHandle != nil {
+			_ = cont.LockHandle.Close()
+		}
+		delete(s.continuations, id)
+		s.pruneLocked(now)
+		return downloadGrant{}, nil, errGrantExpired
+	}
+	s.pruneLocked(now)
+	cont.LastActive = now
+	cont.ActiveStreams++
+
+	p := s.progress[cont.ProgressID]
+	grant := downloadGrant{
+		ID:                 cont.GrantID,
+		Secret:             cont.Ticket,
+		Session:            cont.SessionKey,
+		Sess:               cont.Sess,
+		Filename:           cont.Filename,
+		Progress:           cont.ProgressID,
+		DownloadID:         cont.DownloadID,
+		Entries:            cont.Entries,
+		Total:              cont.Total,
+		Archive:            cont.Archive,
+		SHA256:             cont.SHA256,
+		ContinuationTicket: cont.Ticket,
+		ExpiresAt:          now.Add(continuationIdleTimeout),
+	}
+	return grant, p, nil
+}
+
+// finishStream decrements active stream count for a continuation record and
+// stamps LastActive so the 30-minute idle countdown begins only after streaming ends.
+func (s *DownloadGrantStore) finishStream(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cont, ok := s.continuations[id]; ok {
+		if cont.ActiveStreams > 0 {
+			cont.ActiveStreams--
+		}
+		cont.LastActive = s.now()
+	}
+}
+
+// RevokeSession purges all grants, continuations, and active records for a revoked session.
+func (s *DownloadGrantStore) RevokeSession(sessionKey string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, g := range s.grants {
+		if g.Session == sessionKey {
+			delete(s.grants, id)
+		}
+	}
+	for id, cont := range s.continuations {
+		if cont.SessionKey == sessionKey {
+			if cont.LockHandle != nil {
+				_ = cont.LockHandle.Close()
+			}
+			delete(s.continuations, id)
+		}
+	}
+	delete(s.active, sessionKey)
+}
+
+func (s *DownloadGrantStore) attachContinuationLock(id string, lock io.Closer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cont, ok := s.continuations[id]; ok {
+		if cont.LockHandle != nil && cont.LockHandle != lock {
+			_ = cont.LockHandle.Close()
+		}
+		cont.LockHandle = lock
+	} else if lock != nil {
+		_ = lock.Close()
+	}
+}
+
+func (s *DownloadGrantStore) hasContinuationLock(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cont, ok := s.continuations[id]; ok {
+		return cont.LockHandle != nil
+	}
+	return false
+}
+
+func (s *DownloadGrantStore) continuationCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.continuations)
 }
 
 func (s *DownloadGrantStore) finish(grant downloadGrant) {

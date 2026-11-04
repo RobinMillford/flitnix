@@ -3,6 +3,7 @@ package transfer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -17,13 +18,73 @@ var (
 	ErrLeaseInvalid      = errors.New("transfer: invalid or stale item lease")
 	ErrInvalidTransition = errors.New("transfer: invalid batch transition")
 	ErrProgressInvalid   = errors.New("transfer: invalid item progress")
+
+	// ErrDurableState means a lifecycle transition could not be committed to
+	// the durable coordinator journal. The operation that needed durability
+	// must not be reported as successful, and every later mutating operation
+	// fails the same way until the process is restarted from durable state.
+	ErrDurableState = errors.New("transfer: durable lifecycle state unavailable")
 )
+
+// LifecycleEventKind names one durable coordinator transition.
+type LifecycleEventKind string
+
+const (
+	LifecycleBatchDeclared    LifecycleEventKind = "BatchDeclared"
+	LifecycleApprovalChanged  LifecycleEventKind = "BatchApprovalChanged"
+	LifecycleItemTransition   LifecycleEventKind = "ItemTransition"
+	LifecycleUploadAllocated  LifecycleEventKind = "UploadAllocated"
+	LifecycleBatchStateChange LifecycleEventKind = "BatchStateChanged"
+	LifecycleSessionClosed    LifecycleEventKind = "SessionClosed"
+)
+
+// LifecycleEvent is one coordinator transition handed to the configured
+// persist hook. Payloads are deliberately bounded: a batch record is carried
+// only once, at declaration, and item transitions carry only the item.
+// Runtime-only state (leases, cancellation callbacks, mutexes) is never part
+// of an event.
+type LifecycleEvent struct {
+	Kind LifecycleEventKind
+
+	// Batch is the complete record, set only for LifecycleBatchDeclared.
+	Batch *TransferBatch
+
+	BatchID string
+
+	// Item is the transitioned item, set for LifecycleItemTransition.
+	Item *TransferItem
+
+	// ItemID and ContentID are set for LifecycleUploadAllocated.
+	ItemID    string
+	ContentID string
+
+	// ApprovalState is set for LifecycleApprovalChanged.
+	ApprovalState ApprovalState
+
+	// BatchState, Error, CompletedAt and Transferred describe a batch-level
+	// transition and are set for LifecycleApprovalChanged, for an item
+	// transition that also changed the batch, and for
+	// LifecycleBatchStateChange.
+	BatchState  BatchState
+	Error       string
+	CompletedAt time.Time
+	Transferred int64
+
+	// Batches carries the affected batch records for LifecycleSessionClosed.
+	Batches []TransferBatch
+}
 
 // CoordinatorConfig configures the in-memory batch coordinator.
 type CoordinatorConfig struct {
 	// Now is injectable so lifecycle timestamps can be deterministic in tests.
 	// A nil clock uses time.Now.
 	Now func() time.Time
+
+	OnChange func(CoordinatorState)
+}
+
+type CoordinatorState struct {
+	Batches []TransferBatch
 }
 
 // TransferLease identifies one exclusive ownership claim for an item.
@@ -68,9 +129,15 @@ type coordinatorBatch struct {
 type Coordinator struct {
 	mu       sync.Mutex
 	now      func() time.Time
+	onChange func(CoordinatorState)
+	persist  func(LifecycleEvent) error
 	closed   bool
 	batches  map[string]*coordinatorBatch
 	sessions map[string]*coordinatorSession
+
+	// durableErr latches the first failed durable transition so no later
+	// mutation can be acknowledged as durable when the journal is suspect.
+	durableErr error
 }
 
 // NewCoordinator creates an empty in-memory coordinator.
@@ -79,11 +146,138 @@ func NewCoordinator(cfg CoordinatorConfig) *Coordinator {
 	if now == nil {
 		now = time.Now
 	}
+
 	return &Coordinator{
 		now:      now,
+		onChange: cfg.OnChange,
 		batches:  make(map[string]*coordinatorBatch),
 		sessions: make(map[string]*coordinatorSession),
 	}
+}
+
+func (c *Coordinator) SetChangeHook(hook func(CoordinatorState)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onChange = hook
+}
+
+// SetPersistHook installs the durable lifecycle sink. It must commit the
+// event before returning nil; an error is propagated to the operation that
+// required durability and permanently latches the coordinator's durable state
+// as unavailable. The hook runs under the coordinator mutex, so it must not
+// call back into the coordinator.
+func (c *Coordinator) SetPersistHook(hook func(LifecycleEvent) error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.persist = hook
+}
+
+// DurableError reports the latched durable-transition failure, if any.
+func (c *Coordinator) DurableError() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.durableErr
+}
+
+// commitLocked durably records one transition. Callers must hold c.mu.
+//
+// A failed commit leaves the in-memory transition applied but the subsystem
+// latched: the failed operation returns an error (so it is never acknowledged)
+// and every later mutating operation fails the same way, while reads keep
+// working. A restart replays the last durable state, which is a valid
+// recoverable state.
+func (c *Coordinator) commitLocked(ev LifecycleEvent) error {
+	if c.durableErr != nil {
+		return c.durableErr
+	}
+	if c.persist == nil {
+		return nil
+	}
+	if err := c.persist(ev); err != nil {
+		c.durableErr = fmt.Errorf("%w: %v", ErrDurableState, err)
+		return c.durableErr
+	}
+	return nil
+}
+
+// commitBatchLocked records the current batch state.
+func (c *Coordinator) commitBatchLocked(batch *coordinatorBatch) error {
+	return c.commitLocked(LifecycleEvent{
+		Kind: LifecycleBatchStateChange, BatchID: batch.batch.ID,
+		BatchState: batch.batch.State, Error: batch.batch.Error,
+		CompletedAt: batch.batch.CompletedAt, Transferred: batch.batch.TransferredBytes,
+	})
+}
+
+func (c *Coordinator) Snapshot() CoordinatorState {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.snapshotLocked()
+}
+
+func (c *Coordinator) snapshotLocked() CoordinatorState {
+	out := CoordinatorState{Batches: make([]TransferBatch, 0, len(c.batches))}
+	for _, batch := range c.batches {
+		copyBatch := batch.batch
+		copyBatch.Items = append([]TransferItem(nil), batch.batch.Items...)
+		out.Batches = append(out.Batches, copyBatch)
+	}
+	return out
+}
+
+func (c *Coordinator) notifyLocked() {
+	if c.onChange != nil {
+		c.onChange(c.snapshotLocked())
+	}
+}
+
+// RestoreBatch inserts an already-authorized batch with stable IDs. It is
+// used only during trusted startup replay.
+func (c *Coordinator) RestoreBatch(batch TransferBatch) error {
+	if batch.ID == "" || batch.SessionKey == "" || len(batch.Items) == 0 {
+		return ErrInvalidBatch
+	}
+	if _, err := ValidateManifest(BatchManifest{Direction: batch.Direction, Kind: batch.Kind, RootName: batch.RootName, Items: manifestItems(batch.Items)}); err != nil {
+		return err
+	}
+
+	// Reconciliation, not resurrection: a fresh process has no live stream, so
+	// any item the previous process had leased (or any item still waiting on
+	// an approval that durable state proves was granted) becomes eligible
+	// again. Its durable bytes are authoritative in resumable metadata, and
+	// the client continues from the HEAD offset. Terminal states — canceled,
+	// rejected, failed, completed — are never reopened.
+	for i := range batch.Items {
+		switch batch.Items[i].State {
+		case ItemStateTransferring:
+			batch.Items[i].State = ItemStateQueued
+		case ItemStatePending:
+			if batch.ApprovalState == ApprovalApproved {
+				batch.Items[i].State = ItemStateQueued
+			}
+		}
+	}
+	if batch.State == BatchStateTransferring {
+		batch.State = BatchStateQueued
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || c.batches[batch.ID] != nil {
+		return ErrInvalidTransition
+	}
+	session := c.sessionLocked(batch.SessionKey)
+	c.batches[batch.ID] = &coordinatorBatch{batch: batch}
+	session.batches = append(session.batches, batch.ID)
+	return nil
+}
+
+func manifestItems(items []TransferItem) []ManifestItem {
+	out := make([]ManifestItem, len(items))
+	for i, item := range items {
+		out[i] = ManifestItem{ID: item.ID, Sequence: item.Sequence, RelativePath: item.RelativePath, DisplayName: item.DisplayName, Size: item.DeclaredSize, SHA256: item.SHA256}
+	}
+	return out
 }
 
 // CreateBatch validates a manifest, assigns server-owned IDs and appends the
@@ -143,6 +337,10 @@ func (c *Coordinator) CreateBatch(sessionKey string, manifest BatchManifest) (Ba
 	c.batches[batchID] = &coordinatorBatch{batch: batch}
 	session.batches = append(session.batches, batchID)
 	c.pruneTerminalLocked(session)
+	c.notifyLocked()
+	if err := c.commitLocked(LifecycleEvent{Kind: LifecycleBatchDeclared, Batch: &batch}); err != nil {
+		return BatchView{}, err
+	}
 	return batch.View(), nil
 }
 
@@ -208,6 +406,13 @@ func (c *Coordinator) ApproveBatch(sessionKey, batchID string) (BatchView, error
 			batch.batch.Items[i].State = ItemStateQueued
 		}
 	}
+	c.notifyLocked()
+	if err := c.commitLocked(LifecycleEvent{
+		Kind: LifecycleApprovalChanged, BatchID: batch.batch.ID,
+		ApprovalState: batch.batch.ApprovalState, BatchState: batch.batch.State,
+	}); err != nil {
+		return BatchView{}, err
+	}
 	return batch.batch.View(), nil
 }
 
@@ -232,6 +437,11 @@ func (c *Coordinator) SetItemContentID(sessionKey, batchID, itemID, contentID st
 		return ErrInvalidTransition
 	}
 	item.ContentID = contentID
+	if err := c.commitLocked(LifecycleEvent{
+		Kind: LifecycleUploadAllocated, BatchID: batch.batch.ID, ItemID: item.ID, ContentID: contentID,
+	}); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -343,6 +553,13 @@ func (c *Coordinator) claimLocked(session *coordinatorSession, item *TransferIte
 		Sequence: item.Sequence, DeclaredSize: item.DeclaredSize, Item: item.View(),
 	}
 	session.active = &activeLease{TransferLease: lease}
+	if err := c.commitLocked(LifecycleEvent{
+		Kind: LifecycleItemTransition, BatchID: batch.batch.ID, Item: item,
+		BatchState: batch.batch.State, Transferred: batch.batch.TransferredBytes,
+	}); err != nil {
+		session.active = nil
+		return TransferLease{}, err
+	}
 	return lease, nil
 }
 
@@ -440,6 +657,14 @@ func (c *Coordinator) CompleteItem(sessionKey string, lease TransferLease, sha25
 	} else {
 		batch.batch.State = BatchStateQueued
 	}
+	c.notifyLocked()
+	if err := c.commitLocked(LifecycleEvent{
+		Kind: LifecycleItemTransition, BatchID: batch.batch.ID, Item: item,
+		BatchState: batch.batch.State, Error: batch.batch.Error,
+		CompletedAt: batch.batch.CompletedAt, Transferred: batch.batch.TransferredBytes,
+	}); err != nil {
+		return BatchView{}, err
+	}
 	return batch.batch.View(), nil
 }
 
@@ -481,6 +706,13 @@ func (c *Coordinator) FailItem(sessionKey string, lease TransferLease, transferE
 	session.paused = true
 	batch.batch.State = BatchStateFailed
 	batch.batch.Error = item.Error
+	if commitErr := c.commitLocked(LifecycleEvent{
+		Kind: LifecycleItemTransition, BatchID: batch.batch.ID, Item: item,
+		BatchState: batch.batch.State, Error: batch.batch.Error,
+		CompletedAt: batch.batch.CompletedAt, Transferred: batch.batch.TransferredBytes,
+	}); commitErr != nil {
+		return BatchView{}, commitErr
+	}
 	return batch.batch.View(), nil
 }
 
@@ -542,6 +774,9 @@ func (c *Coordinator) FailBatch(sessionKey string, lease TransferLease, transfer
 			batch.batch.CompletedAt = c.now()
 		}
 	}
+	if err := c.commitBatchLocked(batch); err != nil {
+		return BatchView{}, err
+	}
 	return batch.batch.View(), nil
 }
 
@@ -601,6 +836,13 @@ func (c *Coordinator) CancelItem(sessionKey, batchID, itemID string) error {
 					session.paused = false
 				}
 				c.recomputeBatchTerminalStateLocked(batch)
+				if commitErr := c.commitLocked(LifecycleEvent{
+					Kind: LifecycleItemTransition, BatchID: batch.batch.ID, Item: item,
+					BatchState: batch.batch.State, Error: batch.batch.Error,
+					CompletedAt: batch.batch.CompletedAt, Transferred: batch.batch.TransferredBytes,
+				}); commitErr != nil {
+					err = commitErr
+				}
 			}
 		}
 	}
@@ -643,6 +885,12 @@ func (c *Coordinator) RetryItem(sessionKey, batchID, itemID string) (BatchView, 
 	batch.batch.Error = ""
 	batch.batch.State = BatchStateQueued
 	session.paused = false
+	if err := c.commitLocked(LifecycleEvent{
+		Kind: LifecycleItemTransition, BatchID: batch.batch.ID, Item: item,
+		BatchState: batch.batch.State, Transferred: batch.batch.TransferredBytes,
+	}); err != nil {
+		return BatchView{}, err
+	}
 	return batch.batch.View(), nil
 }
 
@@ -805,9 +1053,25 @@ func (c *Coordinator) CloseSession(sessionKey string) error {
 			}
 		}
 	}
+	// Session closure is a durable lifecycle transition: a restart must not
+	// resurrect a closed session's queue. Every affected batch record is
+	// carried so replay can restore the terminal projection without
+	// re-running cancellation logic.
+	closed := make([]TransferBatch, 0, len(session.batches))
+	for _, id := range session.batches {
+		if batch := c.batches[id]; batch != nil {
+			closed = append(closed, batch.batch)
+		}
+	}
+	commitErr := c.commitLocked(LifecycleEvent{
+		Kind: LifecycleSessionClosed, BatchID: "", Batches: closed,
+	})
 	c.mu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+	if commitErr != nil {
+		return commitErr
 	}
 	return nil
 }
@@ -917,6 +1181,9 @@ func (c *Coordinator) endBatch(sessionKey, batchID string, state BatchState, app
 				}
 			}
 			view = batch.batch.View()
+			if commitErr := c.commitBatchLocked(batch); commitErr != nil {
+				err = commitErr
+			}
 		}
 	}
 	c.mu.Unlock()

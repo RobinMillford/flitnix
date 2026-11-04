@@ -97,7 +97,7 @@ func setupPairCLIServer(t *testing.T) *pairCLITestServer {
 func TestPairCLIFirstContactYesRefused(t *testing.T) {
 	s := setupPairCLIServer(t)
 	clientConfigDir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", clientConfigDir)
+	setClientConfigDir(t, clientConfigDir)
 
 	var stdout, stderr bytes.Buffer
 	args := []string{"--to", s.url, "--yes"}
@@ -125,7 +125,7 @@ func TestPairCLIFirstContactYesRefused(t *testing.T) {
 func TestPairCLIFirstContactJSONInteractionRequired(t *testing.T) {
 	s := setupPairCLIServer(t)
 	clientConfigDir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", clientConfigDir)
+	setClientConfigDir(t, clientConfigDir)
 
 	var stdout, stderr bytes.Buffer
 	args := []string{"--to", s.url, "--json"}
@@ -151,7 +151,7 @@ func TestPairCLIFirstContactJSONInteractionRequired(t *testing.T) {
 func TestPairCLIPinnedHostAllowsYesAndJSON(t *testing.T) {
 	s := setupPairCLIServer(t)
 	clientConfigDir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", clientConfigDir)
+	setClientConfigDir(t, clientConfigDir)
 
 	// Pre-pin the server's legitimate public key
 	khPath := filepath.Join(clientConfigDir, "flitnix", "known_hosts.json")
@@ -191,7 +191,7 @@ func TestPairCLIPinnedHostAllowsYesAndJSON(t *testing.T) {
 func TestPairCLIPinnedHostRejectsKeyChange(t *testing.T) {
 	s := setupPairCLIServer(t)
 	clientConfigDir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", clientConfigDir)
+	setClientConfigDir(t, clientConfigDir)
 
 	// Pre-pin an IMPOSTER public key for this HostID
 	khPath := filepath.Join(clientConfigDir, "flitnix", "known_hosts.json")
@@ -215,4 +215,15 @@ func TestPairCLIPinnedHostRejectsKeyChange(t *testing.T) {
 	if !strings.Contains(stderr.String(), "CRITICAL SECURITY ALERT") {
 		t.Fatalf("expected security alert in stderr, got: %s", stderr.String())
 	}
+}
+
+// setClientConfigDir isolates the client's persistent configuration for one
+// test. os.UserConfigDir resolves to %AppData% on Windows and to
+// XDG_CONFIG_HOME on Unix, so both are redirected: pinning only the Unix
+// variable would leave the test reading (and writing) the runner's real
+// known_hosts.json on Windows, where the pre-seeded pin would never be found.
+func setClientConfigDir(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("AppData", dir)
 }

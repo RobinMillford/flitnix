@@ -13,6 +13,10 @@ import (
 const (
 	wlanInterfaceStateConnected     = 1
 	wlanIntfOpcodeCurrentConnection = 7
+	// WLAN_INTERFACE_MAX_NAME_LENGTH bounds the number of interfaces the OS
+	// can enumerate. The bound keeps unsafe.Slice below a sane size even if a
+	// driver ever returned a corrupt NumberOfItems header.
+	maxWlanEnumeratedInterfaces = 256
 )
 
 type wlanInterfaceInfo struct {
@@ -64,18 +68,31 @@ func wlanSSID(iface net.Interface) (string, string, bool) {
 		return "", "", false
 	}
 	defer mod.NewProc("WlanCloseHandle").Call(uintptr(handle), 0)
-	var list uintptr
+	// The Native Wi-Fi API returns pointers into memory it allocates with
+	// LocalAlloc. They are received through *unsafe.Pointer output variables
+	// (never through uintptr lvalues), so every cast below converts a real
+	// unsafe.Pointer to a typed pointer — the pattern `go vet` accepts and
+	// the only one that keeps the pointer visible to the GC while in use.
+	var list unsafe.Pointer
 	r1, _, _ = enum.Call(uintptr(handle), 0, uintptr(unsafe.Pointer(&list)))
-	if r1 != 0 || list == 0 {
+	if r1 != 0 || list == nil {
 		return "", "", false
 	}
-	defer free.Call(list)
-	header := (*wlanInterfaceInfoListHeader)(unsafe.Pointer(list))
-	itemSize := unsafe.Sizeof(wlanInterfaceInfo{})
-	base := list + unsafe.Sizeof(*header)
+	// list is Windows-allocated memory freed by WlanFreeMemory, not by the Go
+	// GC, so no runtime.KeepAlive is needed; every use happens before this
+	// deferred free runs.
+	defer free.Call(uintptr(list))
+	header := (*wlanInterfaceInfoListHeader)(list)
+	if header.NumberOfItems > maxWlanEnumeratedInterfaces {
+		return "", "", false
+	}
+	items := unsafe.Slice(
+		(*wlanInterfaceInfo)(unsafe.Add(list, unsafe.Sizeof(*header))),
+		header.NumberOfItems,
+	)
 	var connected *wlanInterfaceInfo
-	for i := uint32(0); i < header.NumberOfItems; i++ {
-		info := (*wlanInterfaceInfo)(unsafe.Pointer(base + uintptr(i)*itemSize))
+	for i := range items {
+		info := &items[i]
 		if info.State != wlanInterfaceStateConnected {
 			continue
 		}
@@ -91,18 +108,31 @@ func wlanSSID(iface net.Interface) (string, string, bool) {
 		return "", "", false
 	}
 	{
-		var data uintptr
+		var data unsafe.Pointer
 		var size uint32
 		var opcode uint32
 		r1, _, _ = query.Call(uintptr(handle), uintptr(unsafe.Pointer(&connected.InterfaceGUID)), wlanIntfOpcodeCurrentConnection, 0, uintptr(unsafe.Pointer(&size)), uintptr(unsafe.Pointer(&data)), uintptr(unsafe.Pointer(&opcode)))
-		if r1 != 0 || data == 0 {
+		if r1 != 0 || data == nil {
 			return "", "", false
 		}
-		defer free.Call(data)
-		attr := (*wlanConnectionAttributes)(unsafe.Pointer(data))
-		if attr.Ssid.SSIDLength == 0 {
-			return "", windows.UTF16ToString(attr.ProfileName[:]), true
-		}
-		return string(attr.Ssid.SSID[:attr.Ssid.SSIDLength]), windows.UTF16ToString(attr.ProfileName[:]), true
+		defer free.Call(uintptr(data))
+		attr := (*wlanConnectionAttributes)(data)
+		return wlanConnectionMetadata(attr)
 	}
+}
+
+// wlanConnectionMetadata extracts (ssid, profile, ok) from a
+// wlanConnectionAttributes buffer. Pure parsing, no syscalls, so it is unit
+// tested in metadata_windows_test.go without Wi-Fi hardware.
+func wlanConnectionMetadata(attr *wlanConnectionAttributes) (string, string, bool) {
+	profile := windows.UTF16ToString(attr.ProfileName[:])
+	if attr.Ssid.SSIDLength == 0 {
+		return "", profile, true
+	}
+	if attr.Ssid.SSIDLength > uint32(len(attr.Ssid.SSID)) {
+		// DOT11_SSID caps the length at 32; a larger driver-reported length
+		// means corrupt data. Fail closed instead of slicing out of bounds.
+		return "", "", false
+	}
+	return string(attr.Ssid.SSID[:attr.Ssid.SSIDLength]), profile, true
 }

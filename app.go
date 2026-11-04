@@ -36,6 +36,7 @@ import (
 	"github.com/itsyamin/flitnix/internal/doctor"
 	"github.com/itsyamin/flitnix/internal/guest"
 	"github.com/itsyamin/flitnix/internal/netenv"
+	"github.com/itsyamin/flitnix/internal/power"
 	"github.com/itsyamin/flitnix/internal/qr"
 	"github.com/itsyamin/flitnix/internal/server"
 	"github.com/itsyamin/flitnix/internal/session"
@@ -256,6 +257,7 @@ type App struct {
 	devicesStore  *devices.Store
 	hostIdentity  *devices.HostIdentity
 	pairing       *devices.PairingCoordinator
+	inhibitor     power.Inhibitor
 	startupMu     sync.Mutex
 	startupDone   bool
 	initialShares []string
@@ -331,6 +333,12 @@ func NewApp() (*App, error) {
 		fmt.Fprintf(os.Stderr, "flitnix: host identity initialization warning: %v\n", err)
 	}
 	pairingCoord := devices.NewPairingCoordinator(hostIdentity, devicesStore)
+	// F-05: make the pairing failure counter and lockout survive restarts. A
+	// corrupt or unwritable record fails closed inside the coordinator; here we
+	// only surface the startup problem the same way the other stores do.
+	if err := pairingCoord.EnableDurableLockout(filepath.Join(dataDir, "pairing_security.json")); err != nil {
+		fmt.Fprintf(os.Stderr, "flitnix: pairing lockout persistence warning: %v\n", err)
+	}
 
 	a := &App{
 		store:         store,
@@ -346,6 +354,7 @@ func NewApp() (*App, error) {
 		devicesStore:  devicesStore,
 		hostIdentity:  hostIdentity,
 		pairing:       pairingCoord,
+		inhibitor:     power.New(),
 		source:        netenv.DefaultSource(),
 	}
 	a.sessions = session.NewManager(session.Config{OnExpire: a.releaseSession, OnEnd: a.logSessionEnd})
@@ -560,11 +569,14 @@ func (a *App) shutdown(ctx context.Context) {
 			a.discardEmptyRoots(s.Key())
 			a.downloads.CancelSession(s.Key())
 		}
-		a.sessions.Close()
+		a.sessions.Shutdown()
 		a.registry.Clear()
 		a.guestMgr.Close()
 		if a.auditStore != nil {
 			a.auditStore.Close()
+		}
+		if a.inhibitor != nil {
+			_ = a.inhibitor.Close()
 		}
 		a.stopServer()
 	})
@@ -614,6 +626,7 @@ func (a *App) startServerLocked(listen string) error {
 			Devices:        a.devicesStore,
 			HostIdentity:   a.hostIdentity,
 			Pairing:        a.pairing,
+			Inhibitor:      a.inhibitor,
 			OnPhoneContact: a.recordPhoneContact,
 			Diagnose:       a.logTransferDiagnostics,
 		},
@@ -914,6 +927,14 @@ func (a *App) RecentUploads() []UploadView {
 
 func (a *App) RecentDownloads() []DownloadView {
 	return downloadViews(a.downloads.List())
+}
+
+// SleepInhibition returns the observable state of system idle sleep inhibition.
+func (a *App) SleepInhibition() power.Status {
+	if a.inhibitor == nil {
+		return power.Status{Supported: false}
+	}
+	return a.inhibitor.Status()
 }
 
 // ApproveUpload accepts the pending upload with the given ID. The phone

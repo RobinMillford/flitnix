@@ -3,7 +3,9 @@
 
   var POLL_MS = 1500;
   var inviteSecret = null;
-  var guestToken = null;
+  // Guest authentication rides on the HttpOnly flitnix_guest_token cookie,
+  // which the browser attaches automatically to same-origin requests. The
+  // long-lived guest token is never handed to JavaScript.
   var guestInfo = null;
   var isPolling = false;
   var uploadQueue = []; // Array of file upload jobs
@@ -51,6 +53,210 @@
   var dynamicFormFields = document.getElementById("dynamic-form-fields");
   var roomInfo = null;
 
+  // ------------------------------------------------------------------
+  // Screen Wake Lock & Background Awareness
+  // ------------------------------------------------------------------
+  var awarenessBanner = document.getElementById("awareness-banner");
+  var awarenessBannerText = document.getElementById("awareness-banner-text");
+  var awarenessBannerClose = document.getElementById("awareness-banner-close");
+  var wakeLockBadge = document.getElementById("wake-lock-badge");
+  var wakeLockContainer = document.getElementById("wake-lock-container");
+  var bannerTimer = null;
+
+  var isWakeLockSupported = !!(window.isSecureContext && navigator.wakeLock && typeof navigator.wakeLock.request === "function");
+  var userWakeLockRequested = false;
+  var wakeLockSentinel = null;
+  var wakeLockAcquiring = false;
+  var wasBackgroundedDuringTransfer = false;
+
+  function showAwarenessBanner(msg) {
+    if (!awarenessBanner || !awarenessBannerText) return;
+    if (bannerTimer) { clearTimeout(bannerTimer); bannerTimer = null; }
+    awarenessBannerText.textContent = msg;
+    awarenessBanner.hidden = false;
+    bannerTimer = setTimeout(function () {
+      if (awarenessBanner) awarenessBanner.hidden = true;
+      bannerTimer = null;
+    }, 7000);
+  }
+
+  function hideAwarenessBanner() {
+    if (bannerTimer) { clearTimeout(bannerTimer); bannerTimer = null; }
+    if (awarenessBanner) awarenessBanner.hidden = true;
+  }
+
+  if (awarenessBannerClose) {
+    awarenessBannerClose.addEventListener("click", hideAwarenessBanner);
+  }
+
+  function hasActiveTransfers() {
+    if (isUploading) return true;
+    for (var i = 0; i < uploadQueue.length; i++) {
+      var s = uploadQueue[i].state;
+      if (s === "queued" || s === "declaring" || s === "pending" || s === "approved" || s === "uploading") {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function updateAwarenessUI() {
+    if (!wakeLockBadge || !wakeLockContainer) return;
+
+    if (!isWakeLockSupported) {
+      wakeLockBadge.textContent = "Best-effort";
+      wakeLockBadge.className = "badge badge--waiting";
+      wakeLockContainer.innerHTML = '<p class="wake-lock-unsupported"><span aria-hidden="true">🔒</span> Screen wake lock requires HTTPS or localhost and is unavailable on this local HTTP connection. Keep this tab open and visible during transfers.</p>';
+      return;
+    }
+
+    var cb = document.getElementById("wake-lock-cb");
+    if (!cb) {
+      wakeLockContainer.innerHTML = [
+        '<label class="wake-lock-label" for="wake-lock-cb">',
+        '  <input type="checkbox" id="wake-lock-cb">',
+        '  <span>Keep screen awake during transfer</span>',
+        '</label>',
+        '<p class="wake-lock-note">Prevents display timeout while transfers are active. Uses more battery. Transfers may still pause if the browser is backgrounded.</p>'
+      ].join("");
+      cb = document.getElementById("wake-lock-cb");
+      if (cb) {
+        cb.checked = userWakeLockRequested;
+        cb.addEventListener("change", function () {
+          userWakeLockRequested = !!cb.checked;
+          syncWakeLock();
+        });
+      }
+    } else {
+      cb.checked = userWakeLockRequested;
+    }
+
+    var active = wakeLockSentinel !== null && !wakeLockSentinel.released;
+    var transfersActive = hasActiveTransfers();
+
+    if (active) {
+      wakeLockBadge.textContent = "Screen wake active";
+      wakeLockBadge.className = "badge badge--approved";
+    } else if (userWakeLockRequested) {
+      if (wakeLockAcquiring) {
+        wakeLockBadge.textContent = "Acquiring wake lock…";
+        wakeLockBadge.className = "badge badge--uploading";
+      } else {
+        wakeLockBadge.textContent = "Screen wake standby";
+        wakeLockBadge.className = "badge badge--waiting";
+      }
+    } else {
+      if (transfersActive) {
+        wakeLockBadge.textContent = "Active transfer";
+        wakeLockBadge.className = "badge badge--uploading";
+      } else {
+        wakeLockBadge.textContent = "Idle";
+        wakeLockBadge.className = "badge badge--waiting";
+      }
+    }
+  }
+
+  function acquireWakeLock() {
+    if (!isWakeLockSupported || !userWakeLockRequested) return;
+    if (wakeLockSentinel !== null || wakeLockAcquiring) return;
+    if (document.visibilityState !== "visible") return;
+    if (!hasActiveTransfers()) return;
+
+    wakeLockAcquiring = true;
+    updateAwarenessUI();
+
+    navigator.wakeLock.request("screen").then(function (sentinel) {
+      wakeLockAcquiring = false;
+      wakeLockSentinel = sentinel;
+      sentinel.addEventListener("release", function () {
+        wakeLockSentinel = null;
+        updateAwarenessUI();
+      });
+      updateAwarenessUI();
+    }).catch(function (err) {
+      wakeLockAcquiring = false;
+      wakeLockSentinel = null;
+      if (window.console && typeof window.console.warn === "function") {
+        window.console.warn("Screen wake lock request failed:", err);
+      }
+      updateAwarenessUI();
+    });
+  }
+
+  function releaseWakeLock() {
+    if (wakeLockSentinel !== null) {
+      var s = wakeLockSentinel;
+      wakeLockSentinel = null;
+      try { s.release(); } catch (err) {}
+    }
+    updateAwarenessUI();
+  }
+
+  function syncWakeLock() {
+    if (!isWakeLockSupported) {
+      updateAwarenessUI();
+      return;
+    }
+    if (userWakeLockRequested && hasActiveTransfers() && document.visibilityState === "visible") {
+      acquireWakeLock();
+    } else {
+      if (wakeLockSentinel !== null) {
+        releaseWakeLock();
+      } else {
+        updateAwarenessUI();
+      }
+    }
+  }
+
+  function reconcileActiveTransfers() {
+    for (var i = 0; i < uploadQueue.length; i++) {
+      var job = uploadQueue[i];
+      if (job.uploadId && (job.state === "pending" || job.state === "uploading")) {
+        (function (j) {
+          fetch("/guest-api/uploads/" + encodeURIComponent(j.uploadId), {
+          }).then(function (res) { return res.json(); }).then(function (data) {
+            if (data.state === "completed" && j.state !== "completed") {
+              j.state = "completed";
+              j.transferred = j.size;
+              updateJobUI(j);
+              isUploading = false;
+              syncWakeLock();
+              pumpQueue();
+            } else if (data.state === "rejected" || data.state === "failed") {
+              j.state = data.state;
+              if (data.error) j.error = data.error;
+              updateJobUI(j);
+              isUploading = false;
+              syncWakeLock();
+              pumpQueue();
+            }
+          }).catch(function () {});
+        })(job);
+      }
+    }
+  }
+
+  function onVisibilityChange() {
+    if (document.visibilityState === "hidden") {
+      if (hasActiveTransfers()) {
+        wasBackgroundedDuringTransfer = true;
+        if (window.console && typeof window.console.info === "function") {
+          window.console.info("Flitnix Guest: page moved to background during transfer");
+        }
+      }
+    } else if (document.visibilityState === "visible") {
+      if (wasBackgroundedDuringTransfer) {
+        wasBackgroundedDuringTransfer = false;
+        showAwarenessBanner("Flitnix was moved to the background. Transfer status has been refreshed.");
+        reconcileActiveTransfers();
+      }
+      syncWakeLock();
+    }
+    updateAwarenessUI();
+  }
+
+  document.addEventListener("visibilitychange", onVisibilityChange);
+
   function setStatus(state, msg) {
     if (statusCard) statusCard.dataset.state = state;
     if (statusText) statusText.textContent = msg;
@@ -62,6 +268,7 @@
     if (waitingView) waitingView.hidden = true;
     if (rejectedView) rejectedView.hidden = true;
     if (uploadView) uploadView.hidden = true;
+    releaseWakeLock();
   }
 
   function formatEta(seconds) {
@@ -213,6 +420,7 @@
     fetchRoomInfo();
     showJoinForm();
   }
+  updateAwarenessUI();
 
   function showJoinForm() {
     hideAllViews();
@@ -221,9 +429,7 @@
   }
 
   function checkExistingSession() {
-    fetch("/guest-api/status", {
-      headers: guestToken ? { "Authorization": "Bearer " + guestToken } : {}
-    })
+    fetch("/guest-api/status")
       .then(function (res) {
         if (res.ok) return res.json();
         throw new Error("unauthorized");
@@ -263,7 +469,8 @@
           return res.json();
         })
         .then(function (data) {
-          guestToken = data.token;
+          // The join response sets the HttpOnly guest cookie; nothing about
+          // the credential is returned to this script.
           guestInfo = data;
           hideAllViews();
           if (waitingView) waitingView.hidden = false;
@@ -284,7 +491,6 @@
 
     function poll() {
       fetch("/guest-api/status", {
-        headers: guestToken ? { "Authorization": "Bearer " + guestToken } : {}
       })
         .then(function (res) { return res.json(); })
         .then(function (data) {
@@ -307,6 +513,7 @@
     if (data.state === "approved") {
       hideAllViews();
       if (uploadView) uploadView.hidden = false;
+      updateAwarenessUI();
       if (guestBadge) guestBadge.textContent = "Connected: " + (data.nickname || "Guest");
       setStatus("ready", "Connected to Guest Drop Box");
       pumpQueue();
@@ -423,6 +630,7 @@
       uploadQueue.push(job);
       renderJob(job);
     }
+    syncWakeLock();
     pumpQueue();
   }
 
@@ -571,6 +779,7 @@
   }
 
   function pumpQueue() {
+    syncWakeLock();
     if (isUploading) return;
     var nextJob = null;
     for (var i = 0; i < uploadQueue.length; i++) {
@@ -588,6 +797,7 @@
   function processJob(job) {
     job.state = "declaring";
     updateJobUI(job);
+    syncWakeLock();
 
     var payload = { name: job.name, size: job.size };
     if (job.formValues && Object.keys(job.formValues).length > 0) {
@@ -597,8 +807,7 @@
     fetch("/guest-api/uploads", {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        "Authorization": guestToken ? "Bearer " + guestToken : ""
+        "Content-Type": "application/json"
       },
       body: JSON.stringify(payload)
     })
@@ -620,6 +829,7 @@
         job.error = err.message || "Declaration failed";
         updateJobUI(job);
         isUploading = false;
+        syncWakeLock();
         pumpQueue();
       });
   }
@@ -627,7 +837,6 @@
   function pollUploadApproval(job) {
     function check() {
       fetch("/guest-api/uploads/" + encodeURIComponent(job.uploadId), {
-        headers: guestToken ? { "Authorization": "Bearer " + guestToken } : {}
       })
         .then(function (res) { return res.json(); })
         .then(function (data) {
@@ -639,6 +848,7 @@
             job.state = "rejected";
             updateJobUI(job);
             isUploading = false;
+            syncWakeLock();
             pumpQueue();
           } else if (data.state === "pending") {
             setTimeout(check, 1000);
@@ -646,6 +856,7 @@
             job.state = data.state || "failed";
             updateJobUI(job);
             isUploading = false;
+            syncWakeLock();
             pumpQueue();
           }
         })
@@ -657,9 +868,83 @@
     check();
   }
 
-  function streamJobContent(job) {
+  function streamJobContentResumable(job) {
     job.state = "uploading";
     updateJobUI(job);
+    syncWakeLock();
+
+    var tusURL = "/guest-api/uploads/" + encodeURIComponent(job.uploadId) + "/tus";
+    var completeURL = "/guest-api/uploads/" + encodeURIComponent(job.uploadId) + "/complete";
+    var statusURL = "/guest-api/uploads/" + encodeURIComponent(job.uploadId) + "/status";
+    var transferID = "guest-" + job.uploadId;
+
+    fetch(tusURL, {
+      method: "POST",
+      headers: {
+        "Tus-Resumable": "1.0.0",
+        "Upload-Length": String(job.size)
+      }
+    })
+      .then(function () {
+        var engine = new FlitnixResumable.ResumableUploadEngine();
+        job.resumableSession = engine.startUpload({
+          transferId: transferID,
+          file: job.file,
+          uploadUrl: tusURL,
+          completeUrl: completeURL,
+          statusUrl: statusURL,
+          type: "guest"
+        }, {
+          onProgress: function (p) {
+            job.transferred = p.uploaded;
+            job.speed = p.speed || 0;
+            updateJobUI(job);
+            updateAwarenessUI();
+          },
+          onRebuildProgress: function (p) {
+            if (job.el && job.el.detail) {
+              job.el.detail.textContent = "Rebuilding prefix (" + formatBytes(p.hashed) + " / " + formatBytes(p.total) + ")…";
+            }
+          },
+          onReconnecting: function (r) {
+            if (job.el && job.el.detail) {
+              job.el.detail.textContent = "Reconnecting (attempt " + r.attempt + "/" + r.maxRetries + ")…";
+            }
+          },
+          onComplete: function () {
+            job.resumableSession = null;
+            job.state = "completed";
+            job.transferred = job.size;
+            updateJobUI(job);
+            isUploading = false;
+            syncWakeLock();
+            pumpQueue();
+          },
+          onError: function (err) {
+            job.resumableSession = null;
+            job.state = "failed";
+            job.error = (err && err.message) || "Upload failed";
+            updateJobUI(job);
+            isUploading = false;
+            syncWakeLock();
+            pumpQueue();
+          }
+        });
+      })
+      .catch(function (err) {
+        job.state = "failed";
+        job.error = (err && err.message) || "Tus creation failed";
+        updateJobUI(job);
+        isUploading = false;
+        syncWakeLock();
+        pumpQueue();
+      });
+  }
+
+  function streamJobContentLegacy(job) {
+    job.state = "uploading";
+    updateJobUI(job);
+    syncWakeLock();
 
     var xhr = new XMLHttpRequest();
     var lastLoaded = 0;
@@ -679,6 +964,7 @@
           lastTime = now;
         }
         updateJobUI(job);
+        updateAwarenessUI();
       }
     };
 
@@ -693,6 +979,7 @@
         updateJobUI(job);
       }
       isUploading = false;
+      syncWakeLock();
       pumpQueue();
     };
 
@@ -701,14 +988,20 @@
       job.error = "Network error during upload";
       updateJobUI(job);
       isUploading = false;
+      syncWakeLock();
       pumpQueue();
     };
 
     xhr.open("PUT", "/guest-api/uploads/" + encodeURIComponent(job.uploadId) + "/content");
-    if (guestToken) {
-      xhr.setRequestHeader("Authorization", "Bearer " + guestToken);
-    }
     xhr.send(job.file);
+  }
+
+  function streamJobContent(job) {
+    if (typeof FlitnixResumable !== "undefined") {
+      streamJobContentResumable(job);
+    } else {
+      streamJobContentLegacy(job);
+    }
   }
 
 })();
