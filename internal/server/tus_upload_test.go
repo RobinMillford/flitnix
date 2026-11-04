@@ -750,27 +750,28 @@ func (r *errAfterReader) Read(p []byte) (n int, err error) {
 }
 
 // waitUploadSettled waits until an interrupted PATCH has persisted its committed
-// offset and interrupted state and has released the upload's lifecycle lock.
+// offset and expected state and has released the upload's lifecycle lock.
 //
 // The committed offset becomes visible while the handler still holds the lock
 // (the checkpoint is written, then the state is stored, then the deferred unlock
-// runs), so polling the offset alone races the unlock. Polling the lock itself
-// synchronizes on handler completion instead of guessing at a delay; the state
-// guard keeps the wait from returning during the window before the handler has
-// acquired the lock at all.
-func waitUploadSettled(t *testing.T, upload *transfer.ResumableUpload, wantOffset int64) {
+// runs), so polling the offset alone races the unlock and a resume sent in that
+// window is answered with 423. Polling the lock itself synchronizes on handler
+// completion instead of guessing at a delay; the state and offset guard keeps the
+// wait from returning before the handler has entered its interruption path.
+func waitUploadSettled(t *testing.T, upload *transfer.ResumableUpload, wantState transfer.ResumableState, wantOffset int64) {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
 	for {
 		meta := upload.Meta()
-		if meta.State == transfer.ResumableInterrupted && meta.CommittedOffset == wantOffset {
+		if meta.State == wantState && meta.CommittedOffset == wantOffset {
 			if upload.TryLock() {
 				upload.Unlock()
 				return
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("upload did not settle after the interrupted PATCH: state=%q committed=%d", meta.State, meta.CommittedOffset)
+			t.Fatalf("upload did not settle after the interrupted PATCH: want state=%q offset=%d, got state=%q offset=%d",
+				wantState, wantOffset, meta.State, meta.CommittedOffset)
 		}
 		time.Sleep(time.Millisecond)
 	}
@@ -827,7 +828,7 @@ func TestTusScenarios_1_2_3_InterruptionAndResume(t *testing.T) {
 	if !ok {
 		t.Fatal("upload not found after interrupted PATCH")
 	}
-	waitUploadSettled(t, interrupted, 10*1024)
+	waitUploadSettled(t, interrupted, transfer.ResumableInterrupted, 10*1024)
 
 	// Client re-authenticates and queries HEAD (Discovery)
 	headReq, _ := http.NewRequest(http.MethodHead, tusURL, nil)
@@ -932,7 +933,7 @@ func TestTusScenario_InterruptedPatchReleasesLock(t *testing.T) {
 	if !ok {
 		t.Fatal("upload not found after interrupted PATCH")
 	}
-	waitUploadSettled(t, interrupted, 8*1024)
+	waitUploadSettled(t, interrupted, transfer.ResumableInterrupted, 8*1024)
 
 	// The lock is free, so a resume from the committed offset is accepted.
 	patchReq2, _ := http.NewRequest(http.MethodPatch, tusURL, bytes.NewReader(payload[8*1024:]))
@@ -1169,14 +1170,32 @@ func TestTusPatch_TruncatedBodyTests(t *testing.T) {
 		}
 	}
 
-	// Wait for server to process and commit uncommitted bytes
-	for i := 0; i < 100; i++ {
-		if upA, ok := env.srv.Services().EnsureResumable().GetUpload(personalTransferID(bID, itID)); ok {
-			if upA.Meta().CommittedOffset == 300 {
-				break
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
+	// The committed offset becomes visible before the handler releases the lock,
+	// so wait for the persisted interruption and the released lock. A resume sent
+	// inside that window is answered with 423 on a slow filesystem.
+	interruptedA, okA := env.srv.Services().EnsureResumable().GetUpload(personalTransferID(bID, itID))
+	if !okA {
+		t.Fatal("upload not found after truncated PATCH")
+	}
+	waitUploadSettled(t, interruptedA, transfer.ResumableInterrupted, 300)
+
+	// Concurrency protection still applies: while another request holds the lock,
+	// a PATCH is rejected rather than queued behind it.
+	interruptedA.Lock()
+	holdReqA, _ := http.NewRequest(http.MethodPatch, tusURL, bytes.NewReader([]byte("x")))
+	holdReqA.Header.Set("Authorization", "Bearer "+token)
+	holdReqA.Header.Set("Tus-Resumable", "1.0.0")
+	holdReqA.Header.Set("Upload-Offset", "300")
+	holdReqA.Header.Set("Content-Type", "application/offset+octet-stream")
+	holdResA, err := http.DefaultClient.Do(holdReqA)
+	if err != nil {
+		interruptedA.Unlock()
+		t.Fatal(err)
+	}
+	holdResA.Body.Close()
+	interruptedA.Unlock()
+	if holdResA.StatusCode != 423 {
+		t.Fatalf("expected 423 Locked for concurrent PATCH after interruption, got %d", holdResA.StatusCode)
 	}
 
 	// Next HEAD must return authoritative committed offset (300)
