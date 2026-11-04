@@ -28,6 +28,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -119,6 +120,67 @@ func runCrashChildMode(mode, root string) error {
 		}
 		// Crash without releasing the 6 MB reservation.
 		return nil
+
+	case "crash-after-meta-tmp-sync":
+		rm := newCrashManager(store, root, 1<<30)
+		rm.SetCheckpointParams(64*1024, time.Hour)
+		if _, err := rm.CreateUpload("crash-sess", "sc-tmp-sync", "b", "it", "tmp_sync.bin", "", 128*1024, root); err != nil {
+			return err
+		}
+		rm.SetMetaSyncHook(func(f *os.File) error {
+			err := f.Sync()
+			if err == nil {
+				// Process termination after .meta.tmp Sync but before rename
+				os.Exit(1)
+			}
+			return err
+		})
+		_, _, _ = rm.IngestStream("sc-tmp-sync", 0, &fixedChunkReader{data: crashPayload(128*1024, 'S'), chunkSize: 32 * 1024}, nil)
+		return errors.New("expected crash hook to exit")
+
+	case "crash-after-rename":
+		rm := newCrashManager(store, root, 1<<30)
+		rm.SetCheckpointParams(64*1024, time.Hour)
+		if _, err := rm.CreateUpload("crash-sess", "sc-rename", "b", "it", "rename.bin", "", 128*1024, root); err != nil {
+			return err
+		}
+		rm.SetMetaRenameHook(func(oldPath, newPath string) error {
+			err := renameFileWithRetry(oldPath, newPath)
+			if err == nil {
+				// Process termination after rename but before parent-directory Sync
+				os.Exit(1)
+			}
+			return err
+		})
+		_, _, _ = rm.IngestStream("sc-rename", 0, &fixedChunkReader{data: crashPayload(128*1024, 'R'), chunkSize: 32 * 1024}, nil)
+		return errors.New("expected crash hook to exit")
+
+	case "crash-after-syncdir":
+		rm := newCrashManager(store, root, 1<<30)
+		rm.SetCheckpointParams(64*1024, time.Hour)
+		if _, err := rm.CreateUpload("crash-sess", "sc-syncdir", "b", "it", "syncdir.bin", "", 128*1024, root); err != nil {
+			return err
+		}
+		rm.SetMetaSyncDirHook(func(dir string) error {
+			err := syncDir(dir)
+			if err == nil {
+				// Process termination after parent-directory Sync but before HTTP response
+				os.Exit(1)
+			}
+			return err
+		})
+		_, _, _ = rm.IngestStream("sc-syncdir", 0, &fixedChunkReader{data: crashPayload(128*1024, 'D'), chunkSize: 32 * 1024}, nil)
+		return errors.New("expected crash hook to exit")
+
+	case "crash-uncommitted-tail":
+		rm := newCrashManager(store, root, 1<<30)
+		rm.SetCheckpointParams(64*1024, time.Hour)
+		if _, err := rm.CreateUpload("crash-sess", "sc-tail", "b", "it", "tail.bin", "", 128*1024, root); err != nil {
+			return err
+		}
+		// Ingest 64 KB (checkpoint fired & durable), then 32 KB, then hard exit
+		_, _, _ = rm.IngestStream("sc-tail", 0, &exitMidstreamReader{data: crashPayload(96*1024, 'T'), chunkSize: 32 * 1024}, nil)
+		return errors.New("expected exitMidstreamReader to exit")
 	}
 	return fmt.Errorf("unknown crash mode %q", mode)
 }
@@ -127,9 +189,10 @@ func runCrashChildMode(mode, root string) error {
 // next Read, simulating a power-loss crash in the middle of IngestStream: no
 // defers run, no interruption commit path runs, nothing is flushed.
 type exitMidstreamReader struct {
-	data   []byte
-	pos    int
-	exited bool
+	data      []byte
+	pos       int
+	chunkSize int
+	exited    bool
 }
 
 func (r *exitMidstreamReader) Read(p []byte) (int, error) {
@@ -140,7 +203,14 @@ func (r *exitMidstreamReader) Read(p []byte) (int, error) {
 		}
 		return 0, io.EOF
 	}
-	n := copy(p, r.data[r.pos:])
+	n := r.chunkSize
+	if n == 0 || n > len(p) {
+		n = len(p)
+	}
+	if n > len(r.data)-r.pos {
+		n = len(r.data) - r.pos
+	}
+	copy(p[:n], r.data[r.pos:r.pos+n])
 	r.pos += n
 	return n, nil
 }
@@ -305,5 +375,297 @@ func TestWp4Crash_Scenario36_QuotaReservationsRestoredFromStaging(t *testing.T) 
 		t.Fatal("crashed upload not registered after recovery")
 	} else if upload.Meta().CommittedOffset != 0 {
 		t.Fatalf("expected zero committed bytes, got %d", upload.Meta().CommittedOffset)
+	}
+}
+
+// TestCrashBoundary_AfterMetaTmpSync_RollsBackToPreviousCheckpoint tests process termination
+// right after .meta.tmp Sync completes, but before os.Rename executes.
+// The unrenamed .meta.tmp must be safely ignored, recovery must load canonical .meta (offset 0),
+// uncheckpointed part-file bytes must be truncated, and resumption must complete with full SHA-256 integrity.
+func TestCrashBoundary_AfterMetaTmpSync_RollsBackToPreviousCheckpoint(t *testing.T) {
+	root := t.TempDir()
+	runCrashChild(t, "crash-after-meta-tmp-sync", root)
+
+	staging := filepath.Join(root, StagingDirName)
+	tmpPath := filepath.Join(staging, ".flitnix-part-sc-tmp-sync.meta.tmp")
+	metaPath := filepath.Join(staging, ".flitnix-part-sc-tmp-sync.meta")
+	partPath := filepath.Join(staging, ".flitnix-part-sc-tmp-sync.part")
+
+	// Pre-recovery assertions: .meta.tmp was synced on disk
+	if _, err := os.Stat(tmpPath); err != nil {
+		t.Fatalf("expected .meta.tmp to exist on disk after crash, got %v", err)
+	}
+	mData, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatalf("read canonical meta before recovery: %v", err)
+	}
+	var preMeta ResumableMeta
+	if err := json.Unmarshal(mData, &preMeta); err != nil {
+		t.Fatalf("unmarshal canonical meta: %v", err)
+	}
+	if preMeta.CommittedOffset != 0 {
+		t.Fatalf("expected canonical meta to still record offset 0 before recovery, got %d", preMeta.CommittedOffset)
+	}
+
+	// Recovery: fresh manager reconciles staging
+	store, err := NewStore(StoreConfig{Dir: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rm := newCrashManager(store, root, 1<<30)
+	defer rm.Close()
+
+	upload, ok := rm.GetUpload("sc-tmp-sync")
+	if !ok {
+		t.Fatal("upload not registered after recovery")
+	}
+	// Recovery MUST NOT advance merely because .meta.tmp was synced!
+	if got := upload.Meta().CommittedOffset; got != 0 {
+		t.Fatalf("expected recovery offset 0, got %d", got)
+	}
+	// Verify part file was truncated to 0
+	pfi, err := os.Stat(partPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pfi.Size() != 0 {
+		t.Fatalf("expected part file truncated to 0, got %d", pfi.Size())
+	}
+
+	// Resume from 0 and complete transfer
+	payload := crashPayload(128*1024, 'S')
+	off, state, err := rm.IngestStream("sc-tmp-sync", 0, bytes.NewReader(payload), nil)
+	if err != nil {
+		t.Fatalf("resume failed: %v", err)
+	}
+	if off != 128*1024 || state != ResumableAwaitingDigest {
+		t.Fatalf("expected 128 KB awaiting_digest, got %d / %s", off, state)
+	}
+
+	expectedSum := sha256.Sum256(payload)
+	pub, err := rm.FinalizeComplete("sc-tmp-sync", hex.EncodeToString(expectedSum[:]))
+	if err != nil {
+		t.Fatalf("finalize failed: %v", err)
+	}
+	if pub == nil || pub.ExpectedSHA256 != hex.EncodeToString(expectedSum[:]) {
+		t.Fatalf("unexpected publication record: %+v", pub)
+	}
+}
+
+// TestCrashBoundary_AfterRename_ProcessCrashPreservesRenamedMeta tests process termination
+// immediately after atomic os.Rename succeeds, before syncDir runs.
+// In a process termination, the OS VFS preserves the rename; recovery recognizes the 64 KB checkpoint,
+// and the upload resumes from 64 KB with full SHA-256 integrity.
+func TestCrashBoundary_AfterRename_ProcessCrashPreservesRenamedMeta(t *testing.T) {
+	root := t.TempDir()
+	runCrashChild(t, "crash-after-rename", root)
+
+	staging := filepath.Join(root, StagingDirName)
+	metaPath := filepath.Join(staging, ".flitnix-part-sc-rename.meta")
+	partPath := filepath.Join(staging, ".flitnix-part-sc-rename.part")
+
+	// Pre-recovery assertions: canonical .meta was replaced on disk
+	mData, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatalf("read canonical meta before recovery: %v", err)
+	}
+	var preMeta ResumableMeta
+	if err := json.Unmarshal(mData, &preMeta); err != nil {
+		t.Fatalf("unmarshal canonical meta: %v", err)
+	}
+	if preMeta.CommittedOffset != 64*1024 {
+		t.Fatalf("expected canonical meta to record offset 64 KB, got %d", preMeta.CommittedOffset)
+	}
+
+	// Recovery: fresh manager reconciles staging
+	store, err := NewStore(StoreConfig{Dir: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rm := newCrashManager(store, root, 1<<30)
+	defer rm.Close()
+
+	upload, ok := rm.GetUpload("sc-rename")
+	if !ok {
+		t.Fatal("upload not registered after recovery")
+	}
+	if got := upload.Meta().CommittedOffset; got != 64*1024 {
+		t.Fatalf("expected recovery offset 64 KB, got %d", got)
+	}
+	if got := upload.Meta().State; got != ResumableInterrupted {
+		t.Fatalf("expected state interrupted, got %s", got)
+	}
+
+	pfi, err := os.Stat(partPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pfi.Size() != 64*1024 {
+		t.Fatalf("expected part file size 64 KB, got %d", pfi.Size())
+	}
+
+	// Resume from 64 KB to 128 KB
+	fullPayload := crashPayload(128*1024, 'R')
+	off, state, err := rm.IngestStream("sc-rename", 64*1024, bytes.NewReader(fullPayload[64*1024:]), nil)
+	if err != nil {
+		t.Fatalf("resume failed: %v", err)
+	}
+	if off != 128*1024 || state != ResumableAwaitingDigest {
+		t.Fatalf("expected 128 KB awaiting_digest, got %d / %s", off, state)
+	}
+
+	expectedSum := sha256.Sum256(fullPayload)
+	pub, err := rm.FinalizeComplete("sc-rename", hex.EncodeToString(expectedSum[:]))
+	if err != nil {
+		t.Fatalf("finalize failed: %v", err)
+	}
+	if pub == nil || pub.ExpectedSHA256 != hex.EncodeToString(expectedSum[:]) {
+		t.Fatalf("unexpected publication record: %+v", pub)
+	}
+}
+
+// TestCrashBoundary_AfterSyncDir_RecoversCommittedOffset tests process termination
+// after parent directory sync completes, but before the HTTP response is sent.
+// Both part-file data, canonical metadata, and directory link are fully durable on disk.
+func TestCrashBoundary_AfterSyncDir_RecoversCommittedOffset(t *testing.T) {
+	root := t.TempDir()
+	runCrashChild(t, "crash-after-syncdir", root)
+
+	staging := filepath.Join(root, StagingDirName)
+	metaPath := filepath.Join(staging, ".flitnix-part-sc-syncdir.meta")
+	partPath := filepath.Join(staging, ".flitnix-part-sc-syncdir.part")
+
+	// Pre-recovery assertions
+	mData, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatalf("read canonical meta before recovery: %v", err)
+	}
+	var preMeta ResumableMeta
+	if err := json.Unmarshal(mData, &preMeta); err != nil {
+		t.Fatalf("unmarshal canonical meta: %v", err)
+	}
+	if preMeta.CommittedOffset != 64*1024 {
+		t.Fatalf("expected canonical meta offset 64 KB, got %d", preMeta.CommittedOffset)
+	}
+
+	// Recovery
+	store, err := NewStore(StoreConfig{Dir: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rm := newCrashManager(store, root, 1<<30)
+	defer rm.Close()
+
+	upload, ok := rm.GetUpload("sc-syncdir")
+	if !ok {
+		t.Fatal("upload not registered after recovery")
+	}
+	if got := upload.Meta().CommittedOffset; got != 64*1024 {
+		t.Fatalf("expected recovery offset 64 KB, got %d", got)
+	}
+
+	pfi, err := os.Stat(partPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pfi.Size() != 64*1024 {
+		t.Fatalf("expected part file size 64 KB, got %d", pfi.Size())
+	}
+
+	// Resume and complete
+	fullPayload := crashPayload(128*1024, 'D')
+	off, state, err := rm.IngestStream("sc-syncdir", 64*1024, bytes.NewReader(fullPayload[64*1024:]), nil)
+	if err != nil {
+		t.Fatalf("resume failed: %v", err)
+	}
+	if off != 128*1024 || state != ResumableAwaitingDigest {
+		t.Fatalf("expected 128 KB awaiting_digest, got %d / %s", off, state)
+	}
+
+	expectedSum := sha256.Sum256(fullPayload)
+	pub, err := rm.FinalizeComplete("sc-syncdir", hex.EncodeToString(expectedSum[:]))
+	if err != nil {
+		t.Fatalf("finalize failed: %v", err)
+	}
+	if pub == nil || pub.ExpectedSHA256 != hex.EncodeToString(expectedSum[:]) {
+		t.Fatalf("unexpected publication record: %+v", pub)
+	}
+}
+
+// TestCrashBoundary_UncommittedTailTruncated tests process termination after
+// additional uncommitted part-file bytes have been written past the last durable checkpoint.
+// Pre-recovery part file has 96 KB on disk; recovery truncates part file back to the durable 64 KB
+// checkpoint, prevents acknowledgement of the uncommitted 32 KB tail, and completes cleanly.
+func TestCrashBoundary_UncommittedTailTruncated(t *testing.T) {
+	root := t.TempDir()
+	runCrashChild(t, "crash-uncommitted-tail", root)
+
+	staging := filepath.Join(root, StagingDirName)
+	partPath := filepath.Join(staging, ".flitnix-part-sc-tail.part")
+	metaPath := filepath.Join(staging, ".flitnix-part-sc-tail.meta")
+
+	// Pre-recovery assertions: part file has 96 KB, meta has 64 KB
+	pfiPre, err := os.Stat(partPath)
+	if err != nil {
+		t.Fatalf("part file stat before recovery: %v", err)
+	}
+	if pfiPre.Size() != 96*1024 {
+		t.Fatalf("expected uncheckpointed part file size 96 KB before recovery, got %d", pfiPre.Size())
+	}
+
+	mData, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatalf("read canonical meta: %v", err)
+	}
+	var preMeta ResumableMeta
+	if err := json.Unmarshal(mData, &preMeta); err != nil {
+		t.Fatalf("unmarshal meta: %v", err)
+	}
+	if preMeta.CommittedOffset != 64*1024 {
+		t.Fatalf("expected committed offset 64 KB before recovery, got %d", preMeta.CommittedOffset)
+	}
+
+	// Recovery
+	store, err := NewStore(StoreConfig{Dir: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rm := newCrashManager(store, root, 1<<30)
+	defer rm.Close()
+
+	upload, ok := rm.GetUpload("sc-tail")
+	if !ok {
+		t.Fatal("upload not registered after recovery")
+	}
+	if got := upload.Meta().CommittedOffset; got != 64*1024 {
+		t.Fatalf("expected recovery offset 64 KB, got %d", got)
+	}
+
+	// Verify the 32 KB uncommitted tail was truncated
+	pfiPost, err := os.Stat(partPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pfiPost.Size() != 64*1024 {
+		t.Fatalf("expected part file truncated to 64 KB after recovery, got %d", pfiPost.Size())
+	}
+
+	// Resume from 64 KB
+	fullPayload := crashPayload(128*1024, 'T')
+	off, state, err := rm.IngestStream("sc-tail", 64*1024, bytes.NewReader(fullPayload[64*1024:]), nil)
+	if err != nil {
+		t.Fatalf("resume failed: %v", err)
+	}
+	if off != 128*1024 || state != ResumableAwaitingDigest {
+		t.Fatalf("expected 128 KB awaiting_digest, got %d / %s", off, state)
+	}
+
+	expectedSum := sha256.Sum256(fullPayload)
+	pub, err := rm.FinalizeComplete("sc-tail", hex.EncodeToString(expectedSum[:]))
+	if err != nil {
+		t.Fatalf("finalize failed: %v", err)
+	}
+	if pub == nil || pub.ExpectedSHA256 != hex.EncodeToString(expectedSum[:]) {
+		t.Fatalf("unexpected publication record: %+v", pub)
 	}
 }

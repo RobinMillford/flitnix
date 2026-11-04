@@ -88,11 +88,12 @@ type RecoveryRunResult struct {
 }
 
 type BenchHarness struct {
-	serverURL  string
-	token      string
-	services   *server.Services
-	receiveDir string
-	client     *http.Client
+	serverURL       string
+	token           string
+	services        *server.Services
+	receiveDir      string
+	client          *http.Client
+	checkpointBytes int64
 	// runID labels every row with the run that produced it so historical
 	// partial or invalid datasets are never silently mixed.
 	runID string
@@ -101,6 +102,11 @@ type BenchHarness struct {
 	// the run, so an expected interruption can never poison a throughput
 	// queue.
 	isolated bool
+}
+
+// SetCheckpointBytes configures custom checkpoint interval bytes for Config-4.
+func (h *BenchHarness) SetCheckpointBytes(b int64) {
+	h.checkpointBytes = b
 }
 
 // getCPUTime and getRSSMB are platform-specific; see proc_unix.go and
@@ -644,13 +650,20 @@ func (h *BenchHarness) RunConfig3_DualHashing(fixture FixtureMetadata, rep int) 
 // Configuration 4: Primary Production Architecture (Continuous Streaming + Durable Checkpoints)
 // -----------------------------------------------------------------------------
 func (h *BenchHarness) RunConfig4_PrimaryProduction(fixture FixtureMetadata, rep int) (BenchmarkRunResult, error) {
+	cpBytes := h.checkpointBytes
+	if cpBytes <= 0 {
+		cpBytes = transfer.DefaultCheckpointBytes
+	}
 	configID := "Config-4"
 	configName := "Primary Production Architecture (Checkpoints 32MB/500ms + Dual Hash)"
+	if cpBytes != transfer.DefaultCheckpointBytes {
+		configID = fmt.Sprintf("Config-4-%dMB", cpBytes/(1024*1024))
+		configName = fmt.Sprintf("Primary Production Architecture (Checkpoints %dMB/500ms + Dual Hash)", cpBytes/(1024*1024))
+	}
 	itemName := fmt.Sprintf("prod_primary_%d_%s", rep, fixture.Name)
 
 	rm := h.services.EnsureResumable()
-	// Restore standard production checkpoint defaults: 32 MB / 500 ms
-	rm.SetCheckpointParams(transfer.DefaultCheckpointBytes, transfer.DefaultCheckpointDuration)
+	rm.SetCheckpointParams(cpBytes, transfer.DefaultCheckpointDuration)
 
 	bID, itID, err := h.createBatch(itemName, fixture.SizeBytes)
 	if err != nil {
@@ -753,6 +766,11 @@ func (h *BenchHarness) RunConfig4_PrimaryProduction(fixture FixtureMetadata, rep
 	}
 
 	notes := "Full production path: 32MB/500ms checkpoints + client hash + complete digest"
+	if rm.PipelineCheckpoints() {
+		notes += " (pipelined metadata persistence)"
+	} else {
+		notes += " (synchronous metadata persistence)"
+	}
 	if verr != nil {
 		notes = "INTEGRITY FAILURE: " + verr.Error()
 	}

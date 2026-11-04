@@ -181,16 +181,17 @@ type resumableFsHooks struct {
 
 // ResumableManager manages persistent tus uploads and staging in .flitnix-tmp/.
 type ResumableManager struct {
-	mu                 sync.RWMutex
-	store              *Store
-	quota              *QuotaManager
-	stagingDir         string
-	uploads            map[string]*ResumableUpload
-	checkpointBytes    int64
-	checkpointDuration time.Duration
-	stopCleaner        chan struct{}
-	checkSameFs        func(path1, path2 string) (bool, error)
-	fsHooks            resumableFsHooks
+	mu                  sync.RWMutex
+	store               *Store
+	quota               *QuotaManager
+	stagingDir          string
+	uploads             map[string]*ResumableUpload
+	checkpointBytes     int64
+	checkpointDuration  time.Duration
+	pipelineCheckpoints bool
+	stopCleaner         chan struct{}
+	checkSameFs         func(path1, path2 string) (bool, error)
+	fsHooks             resumableFsHooks
 
 	// recoveryMu guards the one-shot staging recovery so the constructor's
 	// pass and the explicit startup-recovery pass cannot interleave.
@@ -214,14 +215,15 @@ func NewResumableManager(store *Store, quota *QuotaManager) *ResumableManager {
 	_ = secfile.ProtectDir(stagingDir)
 
 	rm := &ResumableManager{
-		store:              store,
-		quota:              quota,
-		stagingDir:         stagingDir,
-		uploads:            make(map[string]*ResumableUpload),
-		checkpointBytes:    DefaultCheckpointBytes,
-		checkpointDuration: DefaultCheckpointDuration,
-		stopCleaner:        make(chan struct{}),
-		checkSameFs:        sameFilesystem,
+		store:               store,
+		quota:               quota,
+		stagingDir:          stagingDir,
+		uploads:             make(map[string]*ResumableUpload),
+		checkpointBytes:     DefaultCheckpointBytes,
+		checkpointDuration:  DefaultCheckpointDuration,
+		pipelineCheckpoints: false,
+		stopCleaner:         make(chan struct{}),
+		checkSameFs:         sameFilesystem,
 	}
 
 	// Recover existing staging uploads. A failure is retained, not discarded:
@@ -310,6 +312,23 @@ func (rm *ResumableManager) SetCheckpointParams(bytes int64, duration time.Durat
 	}
 }
 
+// SetPipelineCheckpoints toggles asynchronous pipelined metadata persistence.
+// If the current platform does not support verified atomic metadata replacement
+// and directory fsync (e.g. Windows or non-Linux OS), this is a no-op and the
+// manager retains the safe synchronous checkpoint path.
+func (rm *ResumableManager) SetPipelineCheckpoints(enabled bool) {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	rm.pipelineCheckpoints = enabled && platformSupportsPipelinedCheckpoints()
+}
+
+// PipelineCheckpoints reports whether asynchronous pipelined metadata persistence is active.
+func (rm *ResumableManager) PipelineCheckpoints() bool {
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+	return rm.pipelineCheckpoints && platformSupportsPipelinedCheckpoints()
+}
+
 // StagingDir returns the absolute staging directory.
 func (rm *ResumableManager) StagingDir() string {
 	return rm.stagingDir
@@ -333,7 +352,7 @@ func (rm *ResumableManager) publishedPath(transferID string) string {
 
 // writeDurableMeta atomically updates the sidecar .meta file.
 func (rm *ResumableManager) writeDurableMeta(meta *ResumableMeta) error {
-	data, err := json.MarshalIndent(meta, "", "  ")
+	data, err := json.Marshal(meta)
 	if err != nil {
 		return err
 	}
@@ -587,6 +606,7 @@ func (rm *ResumableManager) executeDurableCheckpoint(partFile *os.File, currentO
 
 	// 2. Serialize SHA-256 hasher state
 	var hashRec *HashStateRecord
+	prefixDigest := hex.EncodeToString(streamHasher.Sum(nil))
 	if bm, ok := streamHasher.(interface{ MarshalBinary() ([]byte, error) }); ok {
 		stateBytes, err := bm.MarshalBinary()
 		if err == nil {
@@ -594,7 +614,7 @@ func (rm *ResumableManager) executeDurableCheckpoint(partFile *os.File, currentO
 				Version:         1,
 				Format:          "crypto/sha256/binary-opaque",
 				CommittedOffset: currentOffset,
-				PrefixDigest:    hex.EncodeToString(streamHasher.Sum(nil)),
+				PrefixDigest:    prefixDigest,
 				StateBase64:     base64.StdEncoding.EncodeToString(stateBytes),
 			}
 		}
@@ -603,7 +623,7 @@ func (rm *ResumableManager) executeDurableCheckpoint(partFile *os.File, currentO
 	// 3. Prepare candidate metadata without mutating upload.meta yet
 	candidateMeta := upload.Meta()
 	candidateMeta.CommittedOffset = currentOffset
-	candidateMeta.PrefixDigest = hex.EncodeToString(streamHasher.Sum(nil))
+	candidateMeta.PrefixDigest = prefixDigest
 	candidateMeta.HashState = hashRec
 	candidateMeta.UpdatedAt = time.Now()
 
@@ -713,6 +733,94 @@ func (rm *ResumableManager) IngestStream(transferID string, clientOffset int64, 
 	checkpointBytes := rm.checkpointBytes
 	checkpointDuration := rm.checkpointDuration
 
+	rm.mu.RLock()
+	isPipelined := rm.pipelineCheckpoints
+	rm.mu.RUnlock()
+
+	type pipelinedCheckpoint struct {
+		candidateMeta ResumableMeta
+		errCh         chan error
+	}
+	var pendingCP *pipelinedCheckpoint
+
+	awaitPendingCP := func() error {
+		if pendingCP == nil {
+			return nil
+		}
+		err := <-pendingCP.errCh
+		if err != nil {
+			pendingCP = nil
+			return err
+		}
+		committedMeta := pendingCP.candidateMeta
+		upload.UpdateMeta(func(m *ResumableMeta) {
+			*m = committedMeta
+		})
+		if rm.quota != nil {
+			rm.quota.UpdateOffset(committedMeta.TransferID, committedMeta.CommittedOffset)
+		}
+		pendingCP = nil
+		return nil
+	}
+	defer func() {
+		_ = awaitPendingCP()
+	}()
+
+	commitCheckpoint := func(offset int64, isFinal bool) error {
+		if err := awaitPendingCP(); err != nil {
+			return err
+		}
+
+		if err := rm.syncPartFile(partFile); err != nil {
+			return fmt.Errorf("transfer: partFile.Sync: %w", err)
+		}
+
+		var hashRec *HashStateRecord
+		prefixDigest := hex.EncodeToString(streamHasher.Sum(nil))
+		if bm, ok := streamHasher.(interface{ MarshalBinary() ([]byte, error) }); ok {
+			stateBytes, err := bm.MarshalBinary()
+			if err == nil {
+				hashRec = &HashStateRecord{
+					Version:         1,
+					Format:          "crypto/sha256/binary-opaque",
+					CommittedOffset: offset,
+					PrefixDigest:    prefixDigest,
+					StateBase64:     base64.StdEncoding.EncodeToString(stateBytes),
+				}
+			}
+		}
+
+		candidateMeta := upload.Meta()
+		candidateMeta.CommittedOffset = offset
+		candidateMeta.PrefixDigest = prefixDigest
+		candidateMeta.HashState = hashRec
+		candidateMeta.UpdatedAt = time.Now()
+
+		if !isPipelined || isFinal {
+			if err := rm.writeDurableMeta(&candidateMeta); err != nil {
+				return fmt.Errorf("transfer: durable meta write: %w", err)
+			}
+			upload.UpdateMeta(func(meta *ResumableMeta) {
+				*meta = candidateMeta
+			})
+			if rm.quota != nil {
+				rm.quota.UpdateOffset(candidateMeta.TransferID, offset)
+			}
+			return nil
+		}
+
+		task := &pipelinedCheckpoint{
+			candidateMeta: candidateMeta,
+			errCh:         make(chan error, 1),
+		}
+		pendingCP = task
+		go func(cp *pipelinedCheckpoint) {
+			cp.errCh <- rm.writeDurableMeta(&cp.candidateMeta)
+		}(task)
+
+		return nil
+	}
+
 	for {
 		nRead, rerr := body.Read(buf)
 		if nRead > 0 {
@@ -728,10 +836,11 @@ func (rm *ResumableManager) IngestStream(transferID string, clientOffset int64, 
 				}
 			}
 			if werr != nil {
+				_ = awaitPendingCP()
 				// Check for ENOSPC
 				if errors.Is(werr, syscall.ENOSPC) {
 					if uncommittedBytes > 0 {
-						_ = rm.executeDurableCheckpoint(partFile, currentOffset, streamHasher, upload)
+						_ = commitCheckpoint(currentOffset, true)
 					}
 					var snap ResumableMeta
 					upload.UpdateMeta(func(m *ResumableMeta) {
@@ -743,7 +852,7 @@ func (rm *ResumableManager) IngestStream(transferID string, clientOffset int64, 
 				}
 				// Other write error: commit valid portion and return
 				if uncommittedBytes > 0 {
-					_ = rm.executeDurableCheckpoint(partFile, currentOffset, streamHasher, upload)
+					_ = commitCheckpoint(currentOffset, true)
 				}
 				return upload.Meta().CommittedOffset, upload.Meta().State, werr
 			}
@@ -751,7 +860,7 @@ func (rm *ResumableManager) IngestStream(transferID string, clientOffset int64, 
 
 		// Step 3: Checkpoint threshold
 		if uncommittedBytes >= checkpointBytes || time.Since(lastCheckpointTime) >= checkpointDuration {
-			if syncErr := rm.executeDurableCheckpoint(partFile, currentOffset, streamHasher, upload); syncErr != nil {
+			if syncErr := commitCheckpoint(currentOffset, false); syncErr != nil {
 				return upload.Meta().CommittedOffset, upload.Meta().State, syncErr
 			}
 			uncommittedBytes = 0
@@ -762,12 +871,15 @@ func (rm *ResumableManager) IngestStream(transferID string, clientOffset int64, 
 		if rerr != nil {
 			if uncommittedBytes > 0 {
 				// Commit trailing uncommitted bytes; NEVER ignore checkpoint error!
-				if syncErr := rm.executeDurableCheckpoint(partFile, currentOffset, streamHasher, upload); syncErr != nil {
+				if syncErr := commitCheckpoint(currentOffset, true); syncErr != nil {
 					return upload.Meta().CommittedOffset, upload.Meta().State, syncErr
 				}
 				uncommittedBytes = 0
+			} else {
+				if syncErr := awaitPendingCP(); syncErr != nil {
+					return upload.Meta().CommittedOffset, upload.Meta().State, syncErr
+				}
 			}
-			// If uncommittedBytes == 0, duplicate checkpoint is bypassed!
 
 			if !errors.Is(rerr, io.EOF) {
 				// Premature socket close or cancellation (io.ErrUnexpectedEOF, context.Canceled, etc.)
@@ -776,13 +888,20 @@ func (rm *ResumableManager) IngestStream(transferID string, clientOffset int64, 
 					m.State = ResumableInterrupted
 					snap = *m
 				})
-				_ = rm.writeDurableMeta(&snap)
+				if syncErr := rm.writeDurableMeta(&snap); syncErr != nil {
+					return snap.CommittedOffset, snap.State, fmt.Errorf("transfer: durable meta write on interruption: %w", syncErr)
+				}
 				return snap.CommittedOffset, ResumableInterrupted, rerr
 			}
 
 			// Clean EOF of request body reached
 			break
 		}
+	}
+
+	// Ensure all background checkpoint work has settled
+	if err := awaitPendingCP(); err != nil {
+		return upload.Meta().CommittedOffset, upload.Meta().State, err
 	}
 
 	// Update in-memory hasher reference
@@ -1136,7 +1255,14 @@ func (rm *ResumableManager) recoverStaging() error {
 		}
 	}
 
-	// 2. Load all .meta files
+	// 2. Clean up any unrenamed orphaned temporary metadata (.meta.tmp) from pre-crash attempts
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".meta.tmp") {
+			_ = os.Remove(filepath.Join(rm.stagingDir, entry.Name()))
+		}
+	}
+
+	// 3. Load all canonical .meta files
 	for _, entry := range entries {
 		if !strings.HasSuffix(entry.Name(), ".meta") {
 			continue
