@@ -190,6 +190,7 @@ func (s *Services) EnsureResumable() *transfer.ResumableManager {
 		store := s.Transfers.Store()
 		quota := transfer.NewQuotaManager(store.Dir(), transfer.DefaultSafetyMargin, transfer.DefaultMaxConcurrentPerSession)
 		s.Resumable = transfer.NewResumableManager(store, quota)
+		s.Resumable.SetPipelineCheckpoints(true)
 		return s.Resumable
 	}
 	return nil
