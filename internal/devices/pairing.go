@@ -86,6 +86,17 @@ type PairingCoordinator struct {
 	failureTimestamps []time.Time
 	lockoutUntil      time.Time
 
+	// security is non-nil only after EnableDurableLockout wires the durable
+	// single-record store; nil keeps the legacy in-memory-only behaviour so
+	// existing tests and callers are unaffected.
+	security *pairingSecurityStore
+
+	// degraded records why durable pairing-security state cannot currently be
+	// trusted or written. While non-nil (and security is wired) pairing is
+	// refused fail-closed: an unverifiable or unwritable security record must
+	// never silently disable the lockout it protects.
+	degraded error
+
 	// OnPairingPrompt is an optional callback invoked when Bob's approval is requested.
 	OnPairingPrompt func(deviceName, clientID, sasCode string, decisionChan chan<- bool)
 }
@@ -114,6 +125,14 @@ func (c *PairingCoordinator) InitChallenge(sessionKeyHash []byte, clientPubKeyHe
 	defer c.mu.Unlock()
 
 	now := time.Now().UTC()
+
+	// 0. Durable-state gate: fail closed while the pairing security record is
+	// corrupt or unwritable (see pairing_security.go). This runs even when no
+	// lockout is currently active, because degraded state means the failure
+	// budget itself can no longer be trusted.
+	if c.persistenceBlockedLocked() {
+		return nil, ErrPairingLocked
+	}
 
 	// 1. Check Lockout
 	if now.Before(c.lockoutUntil) {
@@ -209,6 +228,9 @@ func (c *PairingCoordinator) Reveal(sessionKeyHash []byte, nonceHex, clientEphem
 	defer c.mu.Unlock()
 
 	now := time.Now().UTC()
+	if c.persistenceBlockedLocked() {
+		return nil, ErrPairingLocked
+	}
 	if now.Before(c.lockoutUntil) {
 		return nil, ErrPairingLocked
 	}
@@ -324,6 +346,9 @@ func (c *PairingCoordinator) PrepareApproval(sessionKeyHash []byte, deviceName, 
 	defer c.mu.Unlock()
 
 	now := time.Now().UTC()
+	if c.persistenceBlockedLocked() {
+		return "", nil, time.Time{}, ErrPairingLocked
+	}
 	if now.Before(c.lockoutUntil) {
 		return "", nil, time.Time{}, ErrPairingLocked
 	}
@@ -457,6 +482,11 @@ func (c *PairingCoordinator) CompleteEnrollment(requestID string, approved bool)
 	defer c.mu.Unlock()
 
 	now := time.Now().UTC()
+	// Fail closed on degraded durable state too: enrollment while the security
+	// record is unwritable could commit a device the lockout was meant to stop.
+	if c.persistenceBlockedLocked() {
+		return nil, ErrPairingLocked
+	}
 	p := c.active
 	if p == nil || p.RequestID != requestID {
 		return nil, ErrStaleRequest
@@ -532,6 +562,10 @@ func (c *PairingCoordinator) CancelActive(nonceHex string) {
 }
 
 // ReArmPairing manually clears lockout mode and flushes the 10-minute failure buffer.
+// When durable lockout is enabled it also rewrites the persisted record: the
+// degraded (fail-closed) state is lifted only if that write succeeds, so an
+// operator re-arm can never leave a security record on disk that disagrees
+// with the in-memory state.
 func (c *PairingCoordinator) ReArmPairing() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -539,6 +573,18 @@ func (c *PairingCoordinator) ReArmPairing() {
 	c.lockoutUntil = time.Time{}
 	c.failureTimestamps = c.failureTimestamps[:0]
 	c.active = nil
+	if c.security != nil {
+		// Rewrite the cleared record. On success the degraded (fail-closed)
+		// state is lifted; on failure it remains and pairing stays refused.
+		rec := PairingSecurityRecord{SchemaVersion: pairingSecuritySchema, UpdatedAt: time.Now().UTC()}
+		if err := c.security.save(rec); err != nil {
+			if c.degraded == nil {
+				c.degraded = err
+			}
+		} else {
+			c.degraded = nil
+		}
+	}
 }
 
 // IsLocked reports whether pairing is currently in lockout mode and the duration remaining.
@@ -627,12 +673,16 @@ func (c *PairingCoordinator) GetActiveSAS() (string, string, bool) {
 }
 
 // recordFailureLocked registers a pairing attempt failure in the sliding 10-minute window.
+// When durable lockout is enabled, the updated state is persisted after the
+// in-memory update; a persistence failure degrades the coordinator (fail
+// closed) but never rolls the enforcement back.
 func (c *PairingCoordinator) recordFailureLocked(now time.Time) {
 	c.pruneFailuresLocked(now)
 	c.failureTimestamps = append(c.failureTimestamps, now)
 	if len(c.failureTimestamps) >= MaxFailedAttempts {
 		c.lockoutUntil = now.Add(LockoutCooldown)
 	}
+	c.persistSecurityLocked(now)
 }
 
 // pruneFailuresLocked removes timestamps outside the rolling 10-minute window.

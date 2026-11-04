@@ -66,6 +66,8 @@ import (
 	"github.com/itsyamin/flitnix/internal/audit"
 	"github.com/itsyamin/flitnix/internal/devices"
 	"github.com/itsyamin/flitnix/internal/guest"
+	"github.com/itsyamin/flitnix/internal/power"
+	"github.com/itsyamin/flitnix/internal/recovery"
 	"github.com/itsyamin/flitnix/internal/session"
 	"github.com/itsyamin/flitnix/internal/textmsg"
 	"github.com/itsyamin/flitnix/internal/transfer"
@@ -130,6 +132,11 @@ type Config struct {
 	// /api/ endpoints. A nil Services keeps the server page-only: every
 	// /api/ path answers 404. It must be fully populated otherwise.
 	Services *Services
+
+	// RecoveryDir enables durable session and coordinator restoration. It is
+	// intentionally opt-in so embedded page-only and unit-test servers retain
+	// their existing in-memory behavior.
+	RecoveryDir string
 }
 
 // Services bundles the collaborators the API endpoints need. The desktop
@@ -147,6 +154,8 @@ type Services struct {
 	Devices        *devices.Store
 	HostIdentity   *devices.HostIdentity
 	Pairing        *devices.PairingCoordinator
+	Inhibitor      power.Inhibitor
+	Resumable      *transfer.ResumableManager
 	OnPhoneContact func(source string)
 
 	// OnBatchPending, when non-nil, receives notice of a newly declared batch
@@ -167,6 +176,23 @@ func (s *Services) RecordContact(source string) {
 	if s != nil && s.OnPhoneContact != nil {
 		s.OnPhoneContact(source)
 	}
+}
+
+// EnsureResumable ensures that ResumableManager is initialized if Transfers is configured.
+func (s *Services) EnsureResumable() *transfer.ResumableManager {
+	if s == nil {
+		return nil
+	}
+	if s.Resumable != nil {
+		return s.Resumable
+	}
+	if s.Transfers != nil && s.Transfers.Store() != nil {
+		store := s.Transfers.Store()
+		quota := transfer.NewQuotaManager(store.Dir(), transfer.DefaultSafetyMargin, transfer.DefaultMaxConcurrentPerSession)
+		s.Resumable = transfer.NewResumableManager(store, quota)
+		return s.Resumable
+	}
+	return nil
 }
 
 // normalize fills in zero-value defaults.
@@ -197,8 +223,11 @@ type Server struct {
 	handler http.Handler
 	grants  *DownloadGrantStore
 
-	once  sync.Once
-	ready chan struct{}
+	once       sync.Once
+	ready      chan struct{}
+	recoverOne sync.Once
+	recoverErr error
+	store      *recovery.Store
 
 	mu           sync.Mutex
 	listener     net.Listener
@@ -209,6 +238,10 @@ type Server struct {
 // construction cannot fail. A fully populated Services yields a server with
 // authenticated transfer endpoints; a nil Services keeps the page-only
 // behaviour (all /api/ paths 404).
+// New prepares a server. Recovery is NOT performed here: it is an explicit
+// operation (Recover) that returns errors, and Serve runs it before binding
+// the listener. Until every recovery phase has succeeded the Ready channel is
+// never closed and no HTTP request is accepted.
 func New(cfg Config) *Server {
 	cfg.normalize()
 	var downloads *transfer.DownloadRegistry
@@ -240,6 +273,9 @@ func New(cfg Config) *Server {
 // later integration into other infrastructure.
 func (s *Server) Handler() http.Handler { return s.handler }
 
+// Services exposes the configured Services bundle.
+func (s *Server) Services() *Services { return s.cfg.Services }
+
 // Serve binds the configured address, then serves HTTP until ctx is
 // cancelled (graceful drain) or the accept loop fails. It must be called at
 // most once per Server.
@@ -248,6 +284,11 @@ func (s *Server) Handler() http.Handler { return s.handler }
 // Config.ShutdownTimeout after which connections are force-closed; Serve
 // returns nil for a clean stop and an error for anything else.
 func (s *Server) Serve(ctx context.Context) error {
+	// Recovery is a hard gate: a failure here means global durable state is
+	// untrustworthy, so the listener is never bound and Ready never closes.
+	if err := s.Recover(); err != nil {
+		return err
+	}
 	ln, err := s.bind()
 	if err != nil {
 		return err
@@ -288,10 +329,15 @@ func (s *Server) bind() (net.Listener, error) {
 		close(s.ready)
 	})
 	if bindErr != nil {
-		if errors.Is(bindErr, syscall.EADDRINUSE) {
+		if addressInUse(bindErr) {
+			// Wrap the POSIX sentinel so callers classify a busy port with
+			// errors.Is on every platform: Windows reports Winsock's
+			// WSAEADDRINUSE, which is not the same value as
+			// syscall.EADDRINUSE. The platform error is kept as text so the
+			// message stays actionable.
 			return nil, fmt.Errorf(
-				"server: cannot listen on %s: address already in use; stop the program holding that port or choose a different address",
-				s.cfg.ListenAddr,
+				"server: cannot listen on %s: %w; stop the program holding that port or choose a different address (%v)",
+				s.cfg.ListenAddr, syscall.EADDRINUSE, bindErr,
 			)
 		}
 		return nil, fmt.Errorf("server: cannot listen on %s: %w", s.cfg.ListenAddr, bindErr)

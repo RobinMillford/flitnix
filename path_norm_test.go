@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -104,6 +105,20 @@ func TestNormalizePathArgument_SpacesAndUnicode(t *testing.T) {
 	}
 }
 
+// fileURI builds a syntactically valid file:// URI for p. The path component
+// always starts with exactly one slash, so a Windows drive letter stays in the
+// path (file:///C:/...) and never leaks into the authority. Concatenating
+// "file://" with a bare path does not have that property: on Windows,
+// url.URL{Path: "C:/..."}.String() prefixes "./" to avoid a scheme-looking
+// first segment, which turns the drive letter into a "." authority.
+func fileURI(host, p string) string {
+	return (&url.URL{
+		Scheme: "file",
+		Host:   host,
+		Path:   "/" + strings.TrimPrefix(filepath.ToSlash(p), "/"),
+	}).String()
+}
+
 func TestNormalizePathArgument_FileURI(t *testing.T) {
 	tmpDir := t.TempDir()
 	f := filepath.Join(tmpDir, "uri_file.txt")
@@ -112,46 +127,57 @@ func TestNormalizePathArgument_FileURI(t *testing.T) {
 	}
 	canonical, _ := filepath.EvalSymlinks(f)
 
-	// Standard file:///path
-	standardURI := "file://" + filepath.ToSlash(f)
-	got, err := NormalizePathArgument(standardURI, "")
-	if err != nil {
-		t.Fatalf("unexpected error for standard URI: %v", err)
-	}
-	if got != canonical {
-		t.Fatalf("expected %q, got %q", canonical, got)
+	// A local file URI resolves to the real filesystem path, whether the
+	// authority is empty or names the local host.
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{"empty authority", fileURI("", f)},
+		{"localhost authority", fileURI("localhost", f)},
+		{"localhost authority, mixed case", fileURI("LocalHost", f)},
+	} {
+		got, err := NormalizePathArgument(tc.raw, "")
+		if err != nil {
+			t.Fatalf("%s: unexpected error for %q: %v", tc.name, tc.raw, err)
+		}
+		if got != canonical {
+			t.Fatalf("%s: expected %q, got %q (uri %q)", tc.name, canonical, got, tc.raw)
+		}
 	}
 
-	// file://localhost/path
-	localhostURI := "file://localhost" + filepath.ToSlash(f)
-	gotLH, err := NormalizePathArgument(localhostURI, "")
-	if err != nil {
-		t.Fatalf("unexpected error for localhost URI: %v", err)
-	}
-	if gotLH != canonical {
-		t.Fatalf("expected %q, got %q", canonical, gotLH)
-	}
-
-	// Percent-encoded URI
-	spaceFile := filepath.Join(tmpDir, "space and unicode 報告.txt")
-	if err := os.WriteFile(spaceFile, []byte("space-uni"), 0o644); err != nil {
+	// Percent-encoded path: spaces, non-ASCII, and characters that need escaping.
+	// The name contains a literal "%41", so the URI carries "%2541"; decoding the
+	// path more than once would corrupt it and fail the path comparison below.
+	specialFile := filepath.Join(tmpDir, "space and unicode 報告 %41 (1).txt")
+	if err := os.WriteFile(specialFile, []byte("space-uni"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	expSpace, _ := filepath.EvalSymlinks(spaceFile)
-	encodedURI := "file://" + (&url.URL{Path: filepath.ToSlash(spaceFile)}).String()
+	expSpecial, _ := filepath.EvalSymlinks(specialFile)
+	encodedURI := fileURI("", specialFile)
+	for _, want := range []string{"%20", "%2541", "%28"} {
+		if !strings.Contains(encodedURI, want) {
+			t.Fatalf("test URI %q is not encoded as expected: missing %q", encodedURI, want)
+		}
+	}
 	gotEncoded, err := NormalizePathArgument(encodedURI, "")
 	if err != nil {
-		t.Fatalf("unexpected error for encoded URI: %v", err)
+		t.Fatalf("unexpected error for encoded URI %q: %v", encodedURI, err)
 	}
-	if gotEncoded != expSpace {
-		t.Fatalf("expected %q, got %q", expSpace, gotEncoded)
+	if gotEncoded != expSpecial {
+		t.Fatalf("encoded URI %q: expected %q, got %q", encodedURI, expSpecial, gotEncoded)
 	}
 
-	// Remote authority rejection
-	remoteURI := "file://remote-nas.lan/share/file.txt"
-	_, errRemote := NormalizePathArgument(remoteURI, "")
-	if !errors.Is(errRemote, ErrRemoteAuthority) {
-		t.Fatalf("expected ErrRemoteAuthority, got: %v", errRemote)
+	// Remote authorities are rejected, including a dot authority: "." is not a
+	// local host and must never be treated as one.
+	for _, remote := range []string{
+		"file://remote-nas.lan/share/file.txt",
+		"file://192.168.1.20/share/file.txt",
+		"file://./share/file.txt",
+	} {
+		if _, errRemote := NormalizePathArgument(remote, ""); !errors.Is(errRemote, ErrRemoteAuthority) {
+			t.Fatalf("expected ErrRemoteAuthority for %q, got: %v", remote, errRemote)
+		}
 	}
 
 	// Unsupported scheme rejection

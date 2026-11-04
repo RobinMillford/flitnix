@@ -54,9 +54,7 @@ func TestStoreOpenPartCreatesDirectoryOnFirstNeed(t *testing.T) {
 	if !info.IsDir() {
 		t.Fatal("receive path is not a directory")
 	}
-	if perm := info.Mode().Perm(); perm&0o077 != 0 {
-		t.Errorf("directory permissions %v allow group/others access", perm)
-	}
+	assertPrivatePath(t, st.Dir(), info)
 }
 
 func TestStoreOpenPartRejectsNonBareNames(t *testing.T) {
@@ -107,9 +105,7 @@ func TestStoreCommitPublishesFinalName(t *testing.T) {
 	if string(data) != "jpeg-data" {
 		t.Errorf("published content = %q, want %q", data, "jpeg-data")
 	}
-	if perm := filePerms(t, final); perm&0o077 != 0 {
-		t.Errorf("file permissions %v allow group/others access", perm)
-	}
+	assertPrivateFile(t, final)
 }
 
 func filePerms(t *testing.T, path string) os.FileMode {

@@ -14,7 +14,6 @@ import (
 	"runtime"
 	"sort"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -127,16 +126,6 @@ type Phase2ScenarioResult struct {
 	Median      Phase2Metrics   `json:"median"`
 }
 
-func getPhase2CPUTime() time.Duration {
-	var ru syscall.Rusage
-	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru); err == nil {
-		user := time.Duration(ru.Utime.Sec)*time.Second + time.Duration(ru.Utime.Usec)*time.Microsecond
-		sys := time.Duration(ru.Stime.Sec)*time.Second + time.Duration(ru.Stime.Usec)*time.Microsecond
-		return user + sys
-	}
-	return 0
-}
-
 func getPhase2Median(runs []Phase2Metrics) Phase2Metrics {
 	if len(runs) == 0 {
 		return Phase2Metrics{}
@@ -149,6 +138,13 @@ func getPhase2Median(runs []Phase2Metrics) Phase2Metrics {
 	return sorted[len(sorted)/2]
 }
 
+// createTestPayload materialises a payload of exactly the requested size.
+//
+// The benchmarks measure byte counts, streaming and hashing, none of which
+// depend on the *content* of the payload, so the file is created sparse. This
+// preserves the large-file coverage (including the 2 GiB case) without
+// consuming gigabytes of the test machine's disk quota, which previously
+// caused unrelated tests to fail with "disk quota exceeded".
 func createTestPayload(path string, size int64) {
 	if fi, err := os.Stat(path); err == nil && fi.Size() == size {
 		return
@@ -159,22 +155,8 @@ func createTestPayload(path string, size int64) {
 		panic(err)
 	}
 	defer f.Close()
-
-	chunk := make([]byte, 256*1024)
-	for i := range chunk {
-		chunk[i] = byte((i * 41) & 0xff)
-	}
-
-	var written int64
-	for written < size {
-		toWrite := int64(len(chunk))
-		if size-written < toWrite {
-			toWrite = size - written
-		}
-		if _, err := f.Write(chunk[:toWrite]); err != nil {
-			panic(err)
-		}
-		written += toWrite
+	if err := f.Truncate(size); err != nil {
+		panic(err)
 	}
 }
 
@@ -371,7 +353,7 @@ func runSingleFileBenchmark(client *http.Client, serverURL string, sessMgr *sess
 		runtime.GC()
 		var mBefore, mAfter runtime.MemStats
 		runtime.ReadMemStats(&mBefore)
-		cpuBefore := getPhase2CPUTime()
+		cpuBefore := processCPUTime()
 
 		sess, _ := sessMgr.Create()
 		token := sess.Token()
@@ -421,7 +403,7 @@ func runSingleFileBenchmark(client *http.Client, serverURL string, sessMgr *sess
 		}
 		streamDur := time.Since(t2)
 		totalDur := time.Since(t0)
-		cpuAfter := getPhase2CPUTime()
+		cpuAfter := processCPUTime()
 		runtime.ReadMemStats(&mAfter)
 
 		actualSHA := hex.EncodeToString(hasher.Sum(nil))
@@ -491,7 +473,7 @@ func runBatchBenchmark(client *http.Client, serverURL string, sessMgr *session.M
 		runtime.GC()
 		var mBefore, mAfter runtime.MemStats
 		runtime.ReadMemStats(&mBefore)
-		cpuBefore := getPhase2CPUTime()
+		cpuBefore := processCPUTime()
 
 		sess, _ := sessMgr.Create()
 		token := sess.Token()
@@ -545,7 +527,7 @@ func runBatchBenchmark(client *http.Client, serverURL string, sessMgr *session.M
 		}
 		streamDur := time.Since(t2)
 		totalDur := time.Since(t0)
-		cpuAfter := getPhase2CPUTime()
+		cpuAfter := processCPUTime()
 		runtime.ReadMemStats(&mAfter)
 
 		actualSHA := hex.EncodeToString(hasher.Sum(nil))
@@ -613,7 +595,7 @@ func runFolderBenchmark(client *http.Client, serverURL string, sessMgr *session.
 		runtime.GC()
 		var mBefore, mAfter runtime.MemStats
 		runtime.ReadMemStats(&mBefore)
-		cpuBefore := getPhase2CPUTime()
+		cpuBefore := processCPUTime()
 
 		sess, _ := sessMgr.Create()
 		token := sess.Token()
@@ -663,7 +645,7 @@ func runFolderBenchmark(client *http.Client, serverURL string, sessMgr *session.
 		}
 		streamDur := time.Since(t2)
 		totalDur := time.Since(t0)
-		cpuAfter := getPhase2CPUTime()
+		cpuAfter := processCPUTime()
 		runtime.ReadMemStats(&mAfter)
 
 		actualSHA := hex.EncodeToString(hasher.Sum(nil))
@@ -735,7 +717,7 @@ func runConcurrentBenchmark(client *http.Client, serverURL string, sessMgr *sess
 		runtime.GC()
 		var mBefore, mAfter runtime.MemStats
 		runtime.ReadMemStats(&mBefore)
-		cpuBefore := getPhase2CPUTime()
+		cpuBefore := processCPUTime()
 
 		// Each concurrent stream uses its own session to represent independent client streams
 		type task struct {
@@ -848,7 +830,7 @@ func runConcurrentBenchmark(client *http.Client, serverURL string, sessMgr *sess
 		wg.Wait()
 		totalDur := time.Since(t0)
 		streamDur := time.Since(t1)
-		cpuAfter := getPhase2CPUTime()
+		cpuAfter := processCPUTime()
 		runtime.ReadMemStats(&mAfter)
 
 		for i := 0; i < concurrency; i++ {

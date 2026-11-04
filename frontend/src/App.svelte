@@ -2,7 +2,7 @@
   import { onMount } from 'svelte'
   import { focusTrap } from './focusTrap'
   import { t, setLocale, tFn } from './i18n'
-  import type { main, netenv, doctor, guest, audit, devices } from '../wailsjs/go/models'
+  import type { main, netenv, doctor, guest, audit, devices, power } from '../wailsjs/go/models'
   import { OnFileDrop, OnFileDropOff } from '../wailsjs/runtime/runtime.js'
   import logoUrl from './assets/images/logo-universal.png'
   import { createRefreshScheduler } from './refreshScheduler'
@@ -25,7 +25,8 @@
     RunConnectionDiagnostics, SendTextMessage, ListTextMessages, ClearTextMessages,
     ListTrustedDevices, RemoveTrustedDevice, SetDeviceAutoApprove,
     ApprovePairing, DenyPairing, GetPairingStatus, ReArmPairing,
-    GetSettings, SaveSettings, ResetSettings, SelectDownloadDirectory, OpenDownloadFolder
+    GetSettings, SaveSettings, ResetSettings, SelectDownloadDirectory, OpenDownloadFolder,
+    SleepInhibition
   } from '../wailsjs/go/main/App.js'
 
   let activeTab: 'personal' | 'guest' | 'templates' | 'audit' | 'devices' | 'settings' = 'personal'
@@ -34,6 +35,7 @@
   let pairingStatus: devices.PairingStatusView | null = null
   let pairingActionLoading = false
   let rearmingLoading = false
+  let sleepInhibition: power.Status | null = null
 
   // Persistent Settings state
   let settingsState: main.SettingsView = {
@@ -192,15 +194,17 @@
     () => Promise.all([
       ListSessions(), ListPendingUploads(), RecentUploads(), RecentDownloads(),
       ListSharedFiles(), ListSharedSources(), ReceiveDirectory(), ServerAddress(),
-      ListPendingBatches(), ListBatches(), GetGuestRoomState(), GetPairingStatus()
+      ListPendingBatches(), ListBatches(), GetGuestRoomState(), GetPairingStatus(),
+      SleepInhibition()
     ]),
-    ([s, p, u, d, f, sourceList, dir, addr, b, allBatches, grState, pStatus]) => {
+    ([s, p, u, d, f, sourceList, dir, addr, b, allBatches, grState, pStatus, sleepStatus]) => {
       sessions = s ?? []; pending = p ?? []; uploads = u ?? []; downloads = d ?? []
       files = f ?? []; sources = sourceList ?? []; pendingBatches = b ?? []
       batches = allBatches ?? []
       receiveDir = dir; serverAddress = addr ?? ''
       guestRoomState = grState ?? null
       pairingStatus = pStatus ?? null
+      sleepInhibition = sleepStatus ?? null
       if (!guestDestDir && dir) guestDestDir = dir
 
       const currentPendingTotal = (pending?.length ?? 0) + (pendingBatches?.length ?? 0) + (guestRoomState?.pendingUploads?.length ?? 0)
@@ -1548,6 +1552,27 @@
     <!-- Live Telemetry -->
     <section class="panel">
       <div class="section-heading"><div><span class="eyebrow">{$t('telemetry.eyebrow')}</span><h2>{$t('telemetry.activeTransfers')}</h2></div><span class="pill">{$t('telemetry.activeCount', { count: uploads.filter(activeUpload).length + downloads.filter(activeDownload).length + batches.filter(activeBatch).length })}</span></div>
+
+      {#if uploads.some(activeUpload) || downloads.some(activeDownload) || batches.some(activeBatch)}
+        {#if sleepInhibition?.active}
+          <div class="sleep-inhibition-notice" role="status">
+            <div class="sleep-inhibition-head">
+              <span class="sleep-inhibition-badge active">● {$t('telemetry.desktopSleepActive')}</span>
+              {#if sleepInhibition.holders > 0}
+                <span class="sleep-inhibition-holders">{$t('telemetry.desktopSleepHolders', { count: sleepInhibition.holders })}</span>
+              {/if}
+            </div>
+            <p class="sleep-inhibition-desc">{$t('telemetry.desktopSleepActiveDesc')}</p>
+          </div>
+        {:else if sleepInhibition?.error}
+          <div class="sleep-inhibition-notice warning" role="alert">
+            <div class="sleep-inhibition-head">
+              <span class="sleep-inhibition-badge warning">▲ {$t('telemetry.desktopSleepWarning')}</span>
+            </div>
+            <p class="sleep-inhibition-desc">{$t('telemetry.desktopSleepWarningDesc', { error: sleepInhibition.error })}</p>
+          </div>
+        {/if}
+      {/if}
       {#each uploads.filter(activeUpload) as u (u.id)}
         <div class="transfer">
           <div class="transfer-head">

@@ -1084,3 +1084,49 @@ func (r *Room) ListUploads() []UploadRequest {
 	}
 	return res
 }
+
+// GuestDirectory returns the isolated directory path for a guest.
+func (r *Room) GuestDirectory(guestID, safeSlug string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return filepath.Join(r.RoomFolder, fmt.Sprintf("%s-%s", guestID, safeSlug))
+}
+
+// UpdateUploadProgress updates the transferred byte count for an upload request.
+func (r *Room) UpdateUploadProgress(uploadID string, current int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if u, ok := r.uploads[uploadID]; ok {
+		u.Transferred = current
+	}
+}
+
+// CancelUpload marks an upload request as canceled.
+func (r *Room) CancelUpload(uploadID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if u, ok := r.uploads[uploadID]; ok {
+		u.State = UploadCanceled
+		u.Error = "upload canceled"
+	}
+}
+
+// CompleteUpload marks an upload request as successfully completed with final details.
+func (r *Room) CompleteUpload(uploadID, sha256Str, publishedPath string, size int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if u, ok := r.uploads[uploadID]; ok {
+		u.State = UploadCompleted
+		u.CompletedAt = time.Now()
+		u.Transferred = size
+		u.SHA256 = sha256Str
+		u.PublishedPath = publishedPath
+		if u.ParticipantID != "" {
+			if p, ok := r.roster[u.ParticipantID]; ok {
+				p.SubmissionCount++
+				p.Status = StatusSubmitted
+				p.LastActivity = time.Now()
+			}
+		}
+	}
+}

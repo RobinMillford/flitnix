@@ -1132,3 +1132,27 @@ export namespace netenv {
 
 }
 
+export namespace power {
+
+	export class Status {
+	    supported: boolean;
+	    active: boolean;
+	    holders: number;
+	    reason?: string;
+	    error?: string;
+
+	    static createFrom(source: any = {}) {
+	        return new Status(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.supported = source["supported"];
+	        this.active = source["active"];
+	        this.holders = source["holders"];
+	        this.reason = source["reason"];
+	        this.error = source["error"];
+	    }
+	}
+
+}

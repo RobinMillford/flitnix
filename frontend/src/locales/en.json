@@ -110,7 +110,13 @@
     "reject": "Reject",
     "fromDevice": "From {device}",
     "batchSummary": "{count} files · {size} total",
-    "noActiveTransfers": "No active transfers. Start a download or approve an incoming file to see live progress."
+    "noActiveTransfers": "No active transfers. Start a download or approve an incoming file to see live progress.",
+    "desktopSleepActive": "Desktop sleep prevention active",
+    "desktopSleepActiveDesc": "System sleep is inhibited while transfers are in progress. Screen locking and display sleep remain permitted.",
+    "desktopSleepHolders_one": "1 active operation",
+    "desktopSleepHolders_other": "{count} active operations",
+    "desktopSleepWarning": "Desktop sleep prevention warning",
+    "desktopSleepWarningDesc": "Native sleep inhibition reported an issue: {error}. The desktop system may sleep while transfers are running."
   },
   "history": {
     "eyebrow": "Recent transfers",

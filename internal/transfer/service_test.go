@@ -117,9 +117,7 @@ func TestServiceFullLifecycleVerifiesDigest(t *testing.T) {
 	if !bytes.Equal(got, payload) {
 		t.Error("published content differs from the streamed payload")
 	}
-	if perm := filePerms(t, res.Path); perm&0o077 != 0 {
-		t.Errorf("published file permissions %v allow group/others access", perm)
-	}
+	assertPrivateFile(t, res.Path)
 
 	u, ok := svc.Get(up.ID)
 	if !ok {
