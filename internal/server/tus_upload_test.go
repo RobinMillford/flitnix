@@ -749,6 +749,33 @@ func (r *errAfterReader) Read(p []byte) (n int, err error) {
 	return 0, r.err
 }
 
+// waitUploadSettled waits until an interrupted PATCH has persisted its committed
+// offset and interrupted state and has released the upload's lifecycle lock.
+//
+// The committed offset becomes visible while the handler still holds the lock
+// (the checkpoint is written, then the state is stored, then the deferred unlock
+// runs), so polling the offset alone races the unlock. Polling the lock itself
+// synchronizes on handler completion instead of guessing at a delay; the state
+// guard keeps the wait from returning during the window before the handler has
+// acquired the lock at all.
+func waitUploadSettled(t *testing.T, upload *transfer.ResumableUpload, wantOffset int64) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		meta := upload.Meta()
+		if meta.State == transfer.ResumableInterrupted && meta.CommittedOffset == wantOffset {
+			if upload.TryLock() {
+				upload.Unlock()
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("upload did not settle after the interrupted PATCH: state=%q committed=%d", meta.State, meta.CommittedOffset)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // TestTusScenarios_1_2_3_InterruptionAndResume tests Scenarios 1, 2, 3:
 // Wi-Fi cut mid-stream preserves committed bytes in .part & .meta; client discovers offset via HEAD and resumes.
 func TestTusScenarios_1_2_3_InterruptionAndResume(t *testing.T) {
@@ -793,15 +820,14 @@ func TestTusScenarios_1_2_3_InterruptionAndResume(t *testing.T) {
 		}
 	}
 
-	// Wait for server to process and commit uncommitted bytes
-	for i := 0; i < 100; i++ {
-		if up, ok := env.srv.Services().EnsureResumable().GetUpload(personalTransferID(bID, itID)); ok {
-			if up.Meta().CommittedOffset == 10*1024 {
-				break
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
+	// Wait for the interrupted handler to commit its checkpoint AND release the
+	// upload lock. The resume below must see the released lock, not just the
+	// committed offset, or it is answered with 423 on a slow filesystem.
+	interrupted, ok := env.srv.Services().EnsureResumable().GetUpload(personalTransferID(bID, itID))
+	if !ok {
+		t.Fatal("upload not found after interrupted PATCH")
 	}
+	waitUploadSettled(t, interrupted, 10*1024)
 
 	// Client re-authenticates and queries HEAD (Discovery)
 	headReq, _ := http.NewRequest(http.MethodHead, tusURL, nil)
@@ -843,6 +869,114 @@ func TestTusScenarios_1_2_3_InterruptionAndResume(t *testing.T) {
 	}
 
 	// Complete upload
+	completeURL := fmt.Sprintf("%s/api/batches/%s/items/%s/complete", ts.URL, bID, itID)
+	cBody, _ := json.Marshal(map[string]string{"expectedSHA256": expectedHex})
+	compReq, _ := http.NewRequest(http.MethodPost, completeURL, bytes.NewReader(cBody))
+	compReq.Header.Set("Authorization", "Bearer "+token)
+	compReq.Header.Set("Content-Type", "application/json")
+	compRes, err := http.DefaultClient.Do(compReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compRes.Body.Close()
+	if compRes.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK on complete, got %d", compRes.StatusCode)
+	}
+}
+
+// TestTusScenario_InterruptedPatchReleasesLock is the regression test for the
+// interruption/resume lock lifecycle: an interrupted PATCH must release its
+// upload lock once the handler finishes, a later resume must be accepted and
+// complete with 204, and a genuinely concurrent request must still get 423.
+func TestTusScenario_InterruptedPatchReleasesLock(t *testing.T) {
+	env := newTestEnv(t)
+	token := env.token()
+	ts := httptest.NewServer(env.srv.Handler())
+	defer ts.Close()
+
+	payload := bytes.Repeat([]byte("Y"), 16*1024)
+	expectedDigest := sha256.Sum256(payload)
+	expectedHex := hex.EncodeToString(expectedDigest[:])
+
+	bID, itID := createTestBatch(t, env, ts, token, "resume-lock.bin", int64(len(payload)))
+	tusURL := fmt.Sprintf("%s/api/batches/%s/items/%s/tus", ts.URL, bID, itID)
+
+	postReq, _ := http.NewRequest(http.MethodPost, tusURL, nil)
+	postReq.Header.Set("Authorization", "Bearer "+token)
+	postReq.Header.Set("Tus-Resumable", "1.0.0")
+	postReq.Header.Set("Upload-Length", strconv.Itoa(len(payload)))
+	pR, err := http.DefaultClient.Do(postReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pR.Body.Close()
+
+	// Interrupt the stream after 8 KB.
+	dropReader := &errAfterReader{data: payload[:8*1024], err: io.ErrUnexpectedEOF}
+	patchReq1, _ := http.NewRequest(http.MethodPatch, tusURL, dropReader)
+	patchReq1.Header.Set("Authorization", "Bearer "+token)
+	patchReq1.Header.Set("Tus-Resumable", "1.0.0")
+	patchReq1.Header.Set("Upload-Offset", "0")
+	patchReq1.Header.Set("Content-Type", "application/offset+octet-stream")
+	// The aborted body can surface as a transport error on the client side; the
+	// handler still ran, which is what the assertions below rely on.
+	pRes1, _ := http.DefaultClient.Do(patchReq1)
+	if pRes1 != nil {
+		pRes1.Body.Close()
+		if pRes1.StatusCode == http.StatusNoContent {
+			t.Fatalf("unexpected 204 No Content on interrupted stream")
+		}
+	}
+
+	interrupted, ok := env.srv.Services().EnsureResumable().GetUpload(personalTransferID(bID, itID))
+	if !ok {
+		t.Fatal("upload not found after interrupted PATCH")
+	}
+	waitUploadSettled(t, interrupted, 8*1024)
+
+	// The lock is free, so a resume from the committed offset is accepted.
+	patchReq2, _ := http.NewRequest(http.MethodPatch, tusURL, bytes.NewReader(payload[8*1024:]))
+	patchReq2.Header.Set("Authorization", "Bearer "+token)
+	patchReq2.Header.Set("Tus-Resumable", "1.0.0")
+	patchReq2.Header.Set("Upload-Offset", strconv.Itoa(8*1024))
+	patchReq2.Header.Set("Content-Type", "application/offset+octet-stream")
+	pRes2, err := http.DefaultClient.Do(patchReq2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pRes2.Body.Close()
+	if pRes2.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204 on resumed PATCH, got %d", pRes2.StatusCode)
+	}
+	if off := pRes2.Header.Get("Upload-Offset"); off != strconv.Itoa(len(payload)) {
+		t.Fatalf("expected offset %d after resume, got %s", len(payload), off)
+	}
+	if state := pRes2.Header.Get("Upload-State"); state != "awaiting_digest" {
+		t.Fatalf("expected state awaiting_digest after resume, got %s", state)
+	}
+
+	// Concurrency protection is intact: while the lock is held, a PATCH is 423.
+	interrupted.Lock()
+	holdReq, _ := http.NewRequest(http.MethodPatch, tusURL, bytes.NewReader([]byte("x")))
+	holdReq.Header.Set("Authorization", "Bearer "+token)
+	holdReq.Header.Set("Tus-Resumable", "1.0.0")
+	holdReq.Header.Set("Upload-Offset", strconv.Itoa(len(payload)))
+	holdReq.Header.Set("Content-Type", "application/offset+octet-stream")
+	holdRes, err := http.DefaultClient.Do(holdReq)
+	if err != nil {
+		interrupted.Unlock()
+		t.Fatal(err)
+	}
+	holdRes.Body.Close()
+	interrupted.Unlock()
+	if holdRes.StatusCode != 423 {
+		t.Fatalf("expected 423 Locked for concurrent PATCH, got %d", holdRes.StatusCode)
+	}
+	if retry := holdRes.Header.Get("Retry-After"); retry != "1" {
+		t.Fatalf("expected Retry-After: 1 on 423, got %q", retry)
+	}
+
+	// The resumed upload still verifies and publishes.
 	completeURL := fmt.Sprintf("%s/api/batches/%s/items/%s/complete", ts.URL, bID, itID)
 	cBody, _ := json.Marshal(map[string]string{"expectedSHA256": expectedHex})
 	compReq, _ := http.NewRequest(http.MethodPost, completeURL, bytes.NewReader(cBody))
