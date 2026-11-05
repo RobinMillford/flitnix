@@ -261,7 +261,7 @@
     "sectionMain": "Transfer",
     "sectionSecurity": "Security & Logs",
     "sectionSystem": "System",
-    "version": "v1.0.0"
+    "version": "v2.5"
   },
   "settings": {
     "eyebrow": "Preferences",
@@ -288,6 +288,9 @@
     "sessionAutomation": "Session Automation",
     "autoStartSession": "Automatically start pairing session on launch",
     "autoStartSessionDesc": "When enabled, Flitnix prepares a connection immediately when opened so devices can pair right away.",
+    "aboutTitle": "About Flitnix",
+    "aboutDesc": "Fast, secure, local file transfer between your desktop and phone.",
+    "versionLabel": "Application Version",
     "savePreferences": "Save Preferences",
     "saving": "Saving…",
     "resetDefaults": "Reset to Defaults"
