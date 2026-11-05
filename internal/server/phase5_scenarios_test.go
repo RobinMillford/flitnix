@@ -873,27 +873,79 @@ func TestPhase5_Scenario19_DHCPAddressChanges(t *testing.T) {
 
 // Scenario 20: Desktop sleep and wake inhibition
 func TestPhase5_Scenario20_DesktopSleepAndWake(t *testing.T) {
-	inh := power.New()
+	// 1. Portable automated verification with deterministic fake inhibitor
+	inh := power.NewFake()
 	defer inh.Close()
 
 	initialStatus := inh.Status()
-	if initialStatus.Active {
-		t.Fatalf("expected sleep inhibitor initially inactive")
+	if initialStatus.Active || initialStatus.Holders != 0 {
+		t.Fatalf("expected sleep inhibitor initially inactive: %+v", initialStatus)
 	}
 
-	// Inhibit sleep during transfer
-	lease, err := inh.Acquire("Active Flitnix Transfer")
+	// Inhibit sleep during transfer (first acquire)
+	lease1, err := inh.Acquire("Active Flitnix Transfer 1")
 	if err != nil {
 		t.Fatalf("failed to inhibit sleep: %v", err)
 	}
-	if !inh.Status().Active {
-		t.Fatalf("sleep inhibitor should be active")
+	if !inh.Status().Active || inh.Status().Holders != 1 {
+		t.Fatalf("sleep inhibitor should be active with 1 holder: %+v", inh.Status())
 	}
 
-	// Release after transfer completion
-	lease.Release()
-	if inh.Status().Active {
-		t.Fatalf("sleep inhibitor should be inactive after release")
+	// Second concurrent transfer (reference counting)
+	lease2, err := inh.Acquire("Active Flitnix Transfer 2")
+	if err != nil {
+		t.Fatalf("failed to acquire second lease: %v", err)
+	}
+	if !inh.Status().Active || inh.Status().Holders != 2 {
+		t.Fatalf("sleep inhibitor should have 2 holders: %+v", inh.Status())
+	}
+
+	// Release first transfer - inhibitor must remain active because second transfer is running
+	lease1.Release()
+	if !inh.Status().Active || inh.Status().Holders != 1 {
+		t.Fatalf("sleep inhibitor should remain active with 1 holder after partial release")
+	}
+
+	// Release second transfer - inhibitor must become inactive
+	lease2.Release()
+	if inh.Status().Active || inh.Status().Holders != 0 {
+		t.Fatalf("sleep inhibitor should be inactive after all transfers complete")
+	}
+
+	// Idempotent release
+	lease2.Release()
+
+	// 2. Failure handling verification
+	simErr := errors.New("simulated D-Bus/kernel power failure")
+	failingInh := power.NewFakeWithConfig(true, simErr)
+	defer failingInh.Close()
+	failedLease, failErr := failingInh.Acquire("Transfer with failing power API")
+	if failErr == nil || !errors.Is(failErr, power.ErrInhibitionFailed) {
+		t.Fatalf("expected ErrInhibitionFailed, got %v", failErr)
+	}
+	if failedLease != nil {
+		t.Fatal("expected nil lease on failed inhibition")
+	}
+	failStatus := failingInh.Status()
+	if failStatus.Active || failStatus.Holders != 0 {
+		t.Fatalf("expected inactive status after failed acquire: %+v", failStatus)
+	}
+
+	// 3. Platform Native Power Inspection (opt-in / diagnostic reporting)
+	if os.Getenv("FLITNIX_POWER_NATIVE_TESTS") == "1" {
+		nativeInh := power.New()
+		defer nativeInh.Close()
+		nativeLease, nativeErr := nativeInh.Acquire("Native power test")
+		if nativeErr != nil {
+			t.Fatalf("native sleep inhibition failed: %v", nativeErr)
+		}
+		nativeLease.Release()
+	} else {
+		// Probe native power manager without failing if CI runner lacks desktop privileges
+		nativeInh := power.New()
+		defer nativeInh.Close()
+		st := nativeInh.Status()
+		t.Logf("Native power backend probed: supported=%v (login1 Inhibit requires desktop session privileges; set FLITNIX_POWER_NATIVE_TESTS=1 on desktop to test native D-Bus)", st.Supported)
 	}
 }
 
