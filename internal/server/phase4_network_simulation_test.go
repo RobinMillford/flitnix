@@ -320,6 +320,31 @@ func deterministicData(size int64, seed byte) []byte {
 	return buf
 }
 
+// waitForUploadSettled polls until the resumable upload transitions to wantState
+// and releases its exclusive lifecycle lock (TryLock succeeds), ensuring the
+// interrupted handler has fully committed its durable state and exited before resume.
+func waitForUploadSettled(t *testing.T, env *simTestEnv, transferID string, wantState transfer.ResumableState, timeout time.Duration) *transfer.ResumableUpload {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		up, ok := env.svcs.Resumable.GetUpload(transferID)
+		if ok && up.Meta().State == wantState {
+			if up.TryLock() {
+				up.Unlock()
+				return up
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	up, ok := env.svcs.Resumable.GetUpload(transferID)
+	var state transfer.ResumableState
+	if ok {
+		state = up.Meta().State
+	}
+	t.Fatalf("timeout waiting for upload %s to settle (want state=%q, got state=%q, found=%v)", transferID, wantState, state, ok)
+	return nil
+}
+
 // -----------------------------------------------------------------------------
 // Simulation Tests
 // -----------------------------------------------------------------------------
@@ -472,8 +497,13 @@ func TestPhase4NetSim_SuddenDropAndResume(t *testing.T) {
 		t.Fatal("expected connection drop error, but PATCH completed successfully")
 	}
 
-	// Step 2: Settle and query authoritative status via HEAD
-	time.Sleep(50 * time.Millisecond) // Allow server loop to commit interrupted state
+	// Step 2: Settle deterministically and query authoritative status via HEAD
+	transferID := personalTransferID(bID, itID)
+	waitForUploadSettled(t, env, transferID, transfer.ResumableInterrupted, 10*time.Second)
+
+	// Close idle client connections to discard broken/half-open sockets
+	dropClient.CloseIdleConnections()
+	http.DefaultClient.CloseIdleConnections()
 
 	headReq, _ := http.NewRequest(http.MethodHead, tusURL, nil)
 	headReq.Header.Set("Authorization", "Bearer "+env.token)
@@ -507,20 +537,41 @@ func TestPhase4NetSim_SuddenDropAndResume(t *testing.T) {
 
 	// Step 4: Resume from committedOffset to end on a fresh, healthy connection
 	resumePayload := payload[committedOffset:]
-	resumeReq, _ := http.NewRequest(http.MethodPatch, tusURL, bytes.NewReader(resumePayload))
-	resumeReq.Header.Set("Authorization", "Bearer "+env.token)
-	resumeReq.Header.Set("Tus-Resumable", "1.0.0")
-	resumeReq.Header.Set("Upload-Offset", strconv.FormatInt(committedOffset, 10))
-	resumeReq.Header.Set("Content-Type", "application/offset+octet-stream")
-	resumeReq.ContentLength = int64(len(resumePayload))
+	var rResp *http.Response
+	var rErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		resumeReq, _ := http.NewRequest(http.MethodPatch, tusURL, bytes.NewReader(resumePayload))
+		resumeReq.Header.Set("Authorization", "Bearer "+env.token)
+		resumeReq.Header.Set("Tus-Resumable", "1.0.0")
+		resumeReq.Header.Set("Upload-Offset", strconv.FormatInt(committedOffset, 10))
+		resumeReq.Header.Set("Content-Type", "application/offset+octet-stream")
+		resumeReq.ContentLength = int64(len(resumePayload))
 
-	rResp, err := http.DefaultClient.Do(resumeReq)
-	if err != nil {
-		t.Fatalf("resumed patch: %v", err)
+		rResp, rErr = http.DefaultClient.Do(resumeReq)
+		if rErr == nil {
+			if rResp.StatusCode == http.StatusNoContent {
+				rResp.Body.Close()
+				rErr = nil
+				break
+			}
+			if rResp.StatusCode == http.StatusLocked {
+				rResp.Body.Close()
+				// Verify committed offset has not unexpectedly advanced while locked
+				if up, ok := env.svcs.Resumable.GetUpload(transferID); ok {
+					if curOff := up.Meta().CommittedOffset; curOff != committedOffset {
+						t.Fatalf("committed offset shifted while locked: expected %d, got %d", committedOffset, curOff)
+					}
+				}
+				time.Sleep(50 * time.Millisecond)
+				continue
+			}
+			rResp.Body.Close()
+			t.Fatalf("resumed patch returned status %d", rResp.StatusCode)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	rResp.Body.Close()
-	if rResp.StatusCode != http.StatusNoContent {
-		t.Fatalf("resumed patch returned status %d", rResp.StatusCode)
+	if rErr != nil {
+		t.Fatalf("resumed patch: %v", rErr)
 	}
 
 	// Step 5: Complete transfer and verify published content
@@ -1430,22 +1481,7 @@ func TestPhase4NetSim_TCPProxy_ConnectionResetRSTAndResume(t *testing.T) {
 	// Wait deterministically for server-side settlement:
 	// IngestStream marks state as ResumableInterrupted and releases lifecycleMu.
 	transferID := personalTransferID(bID, itID)
-	settled := false
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		up, ok := env.svcs.Resumable.GetUpload(transferID)
-		if ok && up.Meta().State == transfer.ResumableInterrupted {
-			if up.TryLock() {
-				up.Unlock()
-				settled = true
-				break
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !settled {
-		t.Fatal("timeout waiting for server-side settlement after TCP RST")
-	}
+	waitForUploadSettled(t, env, transferID, transfer.ResumableInterrupted, 10*time.Second)
 
 	// Close idle client connections to discard broken sockets
 	http.DefaultClient.CloseIdleConnections()
@@ -1501,6 +1537,11 @@ func TestPhase4NetSim_TCPProxy_ConnectionResetRSTAndResume(t *testing.T) {
 			}
 			if resResp.StatusCode == 423 {
 				resResp.Body.Close()
+				if up, ok := env.svcs.Resumable.GetUpload(transferID); ok {
+					if curOff := up.Meta().CommittedOffset; curOff != committedOffset {
+						t.Fatalf("committed offset shifted while locked: expected %d, got %d", committedOffset, curOff)
+					}
+				}
 				time.Sleep(50 * time.Millisecond)
 				continue
 			}
