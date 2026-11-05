@@ -363,6 +363,12 @@ func (s *Service) declare(sessionKey, rawName, root, relativePath string, size i
 	if err != nil {
 		return Upload{}, err
 	}
+	if isWindowsReservedComponent(name) {
+		return Upload{}, fmt.Errorf("%w: %q uses a reserved Windows device name", ErrInvalidUpload, name)
+	}
+	if strings.HasSuffix(name, ".") || strings.HasSuffix(name, " ") {
+		return Upload{}, fmt.Errorf("%w: %q ends with a space or dot", ErrInvalidUpload, name)
+	}
 	if size < 0 {
 		return Upload{}, fmt.Errorf("%w: size must not be negative", ErrInvalidUpload)
 	}
