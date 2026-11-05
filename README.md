@@ -34,36 +34,37 @@ Flitnix combines the performance and concurrency safety of Go with a modern Svel
 
 ---
 
-## Key Features
+## Key Features & What's New in v2.5
 
+Flitnix provides high-speed, private local file transfers between desktop computers and phones. Version **v2.5** brings major reliability, security, and recovery improvements across the transfer engine:
+
+- **Resumable Transfers & Interruption Recovery (Tus 1.0.0)**:
+  - If Wi-Fi drops, connections reset, or browser tabs close mid-stream, transfers resume seamlessly from the last verified checkpoint without re-uploading completed data.
+  - Asynchronous metadata checkpoint pipelining on Linux for maximum throughput; synchronous checkpoint fallback on Windows and macOS for durable safety.
+  - Incremental single-pass SHA-256 integrity verification hashes data on the fly without holding whole files in memory.
 - **Guest Drop Box (Multi-Device Upload Room)**:
   - Collect photos, videos, and documents from an entire group, classroom, or meeting without requiring anyone to install an app.
   - Guests scan a single QR code with their phone camera to request entry.
-  - Dual host-approval gates: approve guests to join, then approve incoming files before they download.
+  - Dual host-approval gates: approve guests to join, then approve incoming files before they are accepted.
   - Strict destination isolation: each guest's uploads are placed in their own private subfolder (`Flitnix Guest Drop/<Room>/<Guest>/`).
   - Upload-only security: guests cannot see or download files shared by the host or other guests.
-- **Connection Doctor**:
+- **Hardened Pairing & Device Security**:
+  - Ephemeral token exchange and local pairing verification with exponential lockout backoff after repeated failed attempts.
+  - Device name sanitization strips ANSI escape sequences, control characters, and Unicode bidi overrides.
+  - Path traversal protection and Windows reserved device name rejection (`CON`, `PRN`, `AUX`, `NUL`, `COM1..9`, `LPT1..9`, and trailing dots/spaces).
+- **Safe File Publication & Collision Handling**:
+  - Two-phase staging with atomic publication ensures incomplete, cancelled, or corrupted streams never leave phantom or corrupted files.
+  - Automatic collision-avoidance numbering preserves existing destination files without accidental overwrites.
+- **Smoothed, Efficient Progress Reporting**:
+  - Time-throttled progress updates (~50 ms interval) reduce UI event overhead by over 99% during gigabyte-scale transfers while ensuring immediate 100% completion delivery.
+  - Rolling delta Exponential Moving Average (EMA) speed calculation eliminates erratic Wi-Fi throughput spikes with real-time ETA estimates.
+- **Connection Doctor & Quick Text**:
   - One-click desktop diagnostics resolving connectivity issues between mobile devices and your computer.
   - Runs 7 automated checks: network adapter presence, IPv4 address validation, port 43821 availability, `/healthz` HTTP loopback probe, Wi-Fi client isolation warnings, host binding reachability, and multi-homed routing guidance.
-  - Human-readable remediation advice with instant **Recheck** and **Regenerate QR** shortcuts.
-- **Quick Text & Link Transfer**:
-  - Instant, bidirectional note and URL sharing between desktop and phone.
-  - Strictly bounded to 64 KiB with UTF-8 validation and HTML-neutralized plain text rendering.
-  - Protocol-safe link detection (`http://` and `https://` only) with one-click safe link opening (`noopener,noreferrer`) and clipboard copying.
-- **Smoothed Progress & Safe Transfer Recovery**:
-  - Rolling delta Exponential Moving Average (EMA) speed calculation eliminates erratic Wi-Fi throughput spikes.
-  - Real-time ETA estimation for active uploads and downloads.
-  - Safe zero-byte retry cleanly resets failed transfers without partial byte corruption.
-- **No Mobile App Required**:
+  - Instant, bidirectional note and URL sharing strictly bounded to 64 KiB with UTF-8 validation, HTML neutralization, and protocol guards (`http://` and `https://` only).
+- **No Mobile App Required & Zero Cloud**:
   - The mobile interface runs in any modern browser (Safari, Chrome, Firefox) without App Store downloads or user accounts.
-- **Pure Local Network (Zero Cloud)**:
   - All transfers stream directly over your local Wi-Fi or mobile hotspot. No external cloud relays or tracking.
-- **Rock-Solid Reliability**:
-  - Tus 1.0.0 resumable transfer protocol with pipelined metadata checkpointing and single-pass write-and-hash integrity.
-  - Comprehensive 25-scenario reliability suite covering network dropouts, host sleep/wake, app restarts, disk limits, and cross-platform filename conflicts.
-  - Two-phase publication reservation ensures cancellation requests and successful disk commits never produce corrupted or ghost files.
-  - Safe session teardown prevents revoked sessions or network drops from leaving dangling locks or orphaned temporary files.
-  - Native Wi-Fi SSID identification on Linux, Windows, and macOS.
 
 ---
 
@@ -117,14 +118,17 @@ Every release includes a verified `SHA256SUMS.txt` manifest.
 
 ---
 
-## Platform Compatibility
+## Platform Compatibility & Project Status
 
-| Platform | Minimum Version | Runtime Requirements |
-| :--- | :--- | :--- |
-| **Linux** | Fedora 39+, Ubuntu 22.04+, Debian 12+, Arch Linux | `libwebkit2gtk-4.1` (or `4.0`) and `libgtk-3-0` |
-| **Windows** | Windows 10 (1809+) / Windows 11 (64-bit) | Microsoft Edge WebView2 Runtime (included in Windows 10/11) |
-| **macOS** | macOS 11.0 Big Sur or later | Universal binary (native on Apple Silicon M-series and Intel) |
-| **Phone** | iOS 14+ (Safari), Android 8+ (Chrome, Firefox, etc.) | Any browser supporting Fetch API and WebSockets on the same Wi-Fi |
+### Flitnix v2.5 Project & Release Status
+
+| Platform / Target | Minimum Version | Status | Verification & Readiness Notes |
+| :--- | :--- | :--- | :--- |
+| **Linux (Desktop)** | Fedora 39+, Ubuntu 22.04+, Debian 12+, Arch Linux | **Locally Verified** | Full test suite and race detector clean; native packaging (`.deb`, `.rpm`, `.tar.gz`) locally built and verified; Linux asynchronous metadata checkpoint pipelining active. |
+| **Windows (Desktop)** | Windows 10 (1809+) / Windows 11 (64-bit) | **CI Pending** | Source-level implementation and synchronous checkpoint fallback complete; local repeated tests pass (20/20); remote Windows GitHub Actions CI confirmation pending. Authenticode code signing pending. |
+| **macOS (Desktop)** | macOS 11.0 Big Sur or later | **Native Validation Pending** | Universal binary configuration present (`.dmg` / `.zip`); synchronous checkpoint fallback implemented and cross-compiled; native hardware execution, code signing, and notarization pending. |
+| **Mobile Browsers** | iOS 14+ (Safari), Android 8+ (Chrome, Firefox, etc.) | **Automated Tests Passed** | Automated browser runtime, worker SHA-256 streaming, and wake-lock test suites pass; physical mobile device validation across diverse hardware pending. |
+| **Physical RF Wi-Fi & Power Loss** | All Platforms | **Deferred** | Physical multi-room RF Wi-Fi roaming, AP handoff, and hardware sudden power-loss testing are explicitly deferred to post-v2.5 evaluation tracks. |
 
 ---
 
