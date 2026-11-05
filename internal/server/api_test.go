@@ -63,6 +63,7 @@ type testEnv struct {
 	store *transfer.Store
 	clock *fakeClock
 	srv   *Server
+	svcs  *Services
 
 	// diag captures the server's transfer diagnostics (the Services
 	// Diagnose hook below) for tests that assert line volume, reasons
@@ -91,14 +92,15 @@ func newTestEnv(t *testing.T) *testEnv {
 	env.coord = transfer.NewCoordinator(transfer.CoordinatorConfig{})
 	env.reg = transfer.NewRegistry()
 	env.dls = transfer.NewDownloadRegistry()
-	env.srv = New(Config{Services: &Services{
+	env.svcs = &Services{
 		Sessions:    env.sess,
 		Transfers:   env.trans,
 		Coordinator: env.coord,
 		Registry:    env.reg,
 		Downloads:   env.dls,
 		Diagnose:    env.diagSink,
-	}})
+	}
+	env.srv = New(Config{Services: env.svcs})
 	return env
 }
 

@@ -66,6 +66,21 @@ func TestStoreOpenPartRejectsNonBareNames(t *testing.T) {
 	}
 }
 
+func TestStoreOpenPartRejectsWindowsReservedAndTrailingDot(t *testing.T) {
+	st := newTestStore(t)
+	rejected := []string{
+		"CON", "con", "prn", "PRN", "aux", "AUX", "nul", "NUL",
+		"com1", "COM1", "com9", "COM9", "lpt1", "LPT1", "lpt9", "LPT9",
+		"CON.txt", "nul.tar.gz", "aux.png",
+		"file.", "report.pdf.", "trailing.dot.",
+	}
+	for _, name := range rejected {
+		if _, err := st.OpenPart(name); !errors.Is(err, ErrInvalidFilename) {
+			t.Errorf("OpenPart(%q) err = %v, want ErrInvalidFilename", name, err)
+		}
+	}
+}
+
 func TestStorePartFilePathIsInsideDir(t *testing.T) {
 	st := newTestStore(t)
 	p := mustOpenPart(t, st, "photo.jpg")

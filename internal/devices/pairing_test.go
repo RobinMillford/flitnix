@@ -387,3 +387,27 @@ func sha256Hash(b []byte) []byte {
 	h := sha256.Sum256(b)
 	return h[:]
 }
+
+func TestSanitizeDeviceName(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "empty input", in: "", want: "Unnamed Device"},
+		{name: "only whitespace", in: "   \t\n  ", want: "Unnamed Device"},
+		{name: "clean name", in: "Pixel 8 Pro", want: "Pixel 8 Pro"},
+		{name: "surrounding whitespace trimmed", in: "  iPhone 15 Pro Max  ", want: "iPhone 15 Pro Max"},
+		{name: "control characters stripped", in: "My\x00Phone\r\n\x1b[31mRed\x1b[0m", want: "MyPhoneRed"},
+		{name: "excess length truncated", in: "A very long device name that exceeds the maximum permitted limit of sixty-four characters and should be truncated safely", want: "A very long device name that exceeds the maximum permitted limit"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := SanitizeDeviceName(tc.in)
+			if got != tc.want {
+				t.Errorf("SanitizeDeviceName(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}

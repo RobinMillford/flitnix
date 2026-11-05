@@ -343,14 +343,15 @@ func newTestEnvWithSessionIdle(t *testing.T, idle time.Duration) *testEnv {
 	env.coord = transfer.NewCoordinator(transfer.CoordinatorConfig{})
 	env.reg = transfer.NewRegistry()
 	env.dls = transfer.NewDownloadRegistry()
-	env.srv = New(Config{Services: &Services{
+	env.svcs = &Services{
 		Sessions:    env.sess,
 		Transfers:   env.trans,
 		Coordinator: env.coord,
 		Registry:    env.reg,
 		Downloads:   env.dls,
 		Diagnose:    env.diagSink,
-	}})
+	}
+	env.srv = New(Config{Services: env.svcs})
 	return env
 }
 

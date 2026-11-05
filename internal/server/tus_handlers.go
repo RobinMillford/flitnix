@@ -272,11 +272,11 @@ func handleBatchTusPatch(svcs *Services, stall time.Duration) http.HandlerFunc {
 			lease, _ = svcs.Coordinator.ClaimItem(sessKey, batchID, itemID)
 		}
 		var lastProgressOffset int64 = clientOffset
-		var lastProgressTime = time.Now()
+		var lastProgressTime = svcs.now()
 		const progressInterval = 50 * time.Millisecond
 		useLegacyProgressThrottle := os.Getenv("FLITNIX_LEGACY_PROGRESS_THROTTLE") == "1"
 		committedOffset, state, streamErr := resumable.IngestStream(transferID, clientOffset, body, func(current int64) {
-			now := time.Now()
+			now := svcs.now()
 			shouldUpdate := false
 			if useLegacyProgressThrottle {
 				if current-lastProgressOffset >= 256*1024 || now.Sub(lastProgressTime) >= 100*time.Millisecond {
@@ -783,11 +783,11 @@ func handleGuestTusPatch(svcs *Services, stall time.Duration) http.HandlerFunc {
 		}
 
 		var lastGuestProgressOffset int64 = clientOffset
-		var lastGuestProgressTime = time.Now()
+		var lastGuestProgressTime = svcs.now()
 		const guestProgressInterval = 50 * time.Millisecond
 		useLegacyGuestThrottle := os.Getenv("FLITNIX_LEGACY_PROGRESS_THROTTLE") == "1"
 		committedOffset, state, streamErr := resumable.IngestStream(transferID, clientOffset, body, func(current int64) {
-			now := time.Now()
+			now := svcs.now()
 			shouldUpdate := false
 			if useLegacyGuestThrottle {
 				if current-lastGuestProgressOffset >= 256*1024 || now.Sub(lastGuestProgressTime) >= 100*time.Millisecond {
