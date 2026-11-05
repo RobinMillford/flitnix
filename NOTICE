@@ -4,9 +4,27 @@ Copyright 2026 RobinMillford <RobinMillford@users.noreply.github.com>
 This product includes software developed by RobinMillford (https://github.com/RobinMillford/flitnix).
 
 ========================================================================
+Licensing Transition & Historical Release Notices
+========================================================================
+
+Flitnix has officially transitioned its project distribution to the
+GNU Affero General Public License, Version 3 only (SPDX: AGPL-3.0-only).
+
+Historical releases (versions v0.1.0 through v0.2.5) remain licensed
+under the Apache License, Version 2.0. Previously granted Apache 2.0
+rights are preserved and not revoked.
+
+For the full Apache License 2.0 text governing historical releases and
+applicable components, see LICENSES/Apache-2.0.txt.
+
+========================================================================
 Third-Party Software and Font Notices
 ========================================================================
 
 This product bundles the Nunito font:
 - Nunito Font: Copyright 2016 The Nunito Project Authors (contact@sansoxygen.com)
   Licensed under the SIL Open Font License, Version 1.1 (see frontend/src/assets/fonts/OFL.txt)
+
+This product bundles js-sha256:
+- js-sha256: Copyright 2014-2026 Chen, Yi-Cyuan (emn178@gmail.com)
+  Licensed under the MIT License (see internal/server/assets/sha256.min.js)
