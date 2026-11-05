@@ -171,6 +171,17 @@ type Services struct {
 	// no session keys beyond a bounded prefix, no paths or file names.
 	// A nil hook disables diagnostics (page-only and test servers).
 	Diagnose func(format string, args ...any)
+
+	// Now, when non-nil, provides current time for time-sensitive logic
+	// such as progress throttling. Defaults to time.Now.
+	Now func() time.Time
+}
+
+func (s *Services) now() time.Time {
+	if s != nil && s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
 }
 
 func (s *Services) RecordContact(source string) {

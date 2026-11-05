@@ -78,6 +78,65 @@ func NewWithBackend(b backend) *Manager {
 	}
 }
 
+// FakeBackend provides an in-memory backend for testing without OS privileges.
+type FakeBackend struct {
+	mu             sync.Mutex
+	supported      bool
+	inhibitErr     error
+	uninhibitErr   error
+	closeErr       error
+	inhibitCalls   int
+	uninhibitCalls int
+	closeCalls     int
+	lastReason     string
+}
+
+// NewFakeBackend creates a FakeBackend with configured support and error behavior.
+func NewFakeBackend(supported bool, inhibitErr error) *FakeBackend {
+	return &FakeBackend{
+		supported:  supported,
+		inhibitErr: inhibitErr,
+	}
+}
+
+func (b *FakeBackend) Supported() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.supported
+}
+
+func (b *FakeBackend) Inhibit(reason string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.inhibitCalls++
+	b.lastReason = reason
+	return b.inhibitErr
+}
+
+func (b *FakeBackend) Uninhibit() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.uninhibitCalls++
+	return b.uninhibitErr
+}
+
+func (b *FakeBackend) Close() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.closeCalls++
+	return b.closeErr
+}
+
+// NewFake returns a fully functional in-memory sleep inhibitor for testing.
+func NewFake() *Manager {
+	return NewWithBackend(NewFakeBackend(true, nil))
+}
+
+// NewFakeWithConfig constructs an in-memory inhibitor with specific support and error behavior.
+func NewFakeWithConfig(supported bool, inhibitErr error) *Manager {
+	return NewWithBackend(NewFakeBackend(supported, inhibitErr))
+}
+
 // Acquire requests a sleep inhibition lease for a transfer.
 // If this is the first active lease, native sleep inhibition is activated.
 // Returns an error if the manager is closed or if the native API call fails.

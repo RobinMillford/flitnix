@@ -1004,6 +1004,7 @@ type TCPProxyConfig struct {
 	DropWriteAt    int64         // Force close / reset connection after client sends N bytes
 	ResetWithRST   bool          // If true, sets SO_LINGER=0 to send TCP RST packet on close
 	DelayRead      time.Duration // Backpressure delay for reads from server
+	OnReset        func()        // Optional notification invoked when reset triggers
 }
 
 type TCPProxy struct {
@@ -1120,6 +1121,9 @@ func (p *TCPProxy) handleConn(clientConn net.Conn) {
 						}
 					}
 					_ = clientConn.Close()
+					if c.OnReset != nil {
+						c.OnReset()
+					}
 					return
 				}
 				if int64(toRead) > remaining {
@@ -1161,6 +1165,9 @@ func (p *TCPProxy) handleConn(clientConn net.Conn) {
 						}
 					}
 					_ = clientConn.Close()
+					if c.OnReset != nil {
+						c.OnReset()
+					}
 					return
 				}
 			}
@@ -1362,10 +1369,18 @@ func TestPhase4NetSim_TCPProxy_ConnectionResetRSTAndResume(t *testing.T) {
 	// Drop and send TCP RST at exactly 2.2 MB (after 2nd 1MB checkpoint)
 	const dropAt = 2200 * 1024
 
+	resetDone := make(chan struct{})
+	var resetOnce sync.Once
+
 	proxy := startTCPProxy(t, TCPProxyConfig{
 		TargetAddr:   serverAddr,
 		DropWriteAt:  dropAt,
 		ResetWithRST: true, // Send real TCP RST segment via SO_LINGER=0
+		OnReset: func() {
+			resetOnce.Do(func() {
+				close(resetDone)
+			})
+		},
 	})
 
 	payload := deterministicData(payloadSize, 0x83)
@@ -1400,15 +1415,40 @@ func TestPhase4NetSim_TCPProxy_ConnectionResetRSTAndResume(t *testing.T) {
 			t.Fatal("expected TCP RST interruption, but patch claimed NoContent")
 		}
 	}
-	// Connection was reset!
+	// Wait for the proxy reset event
+	select {
+	case <-resetDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for TCP RST event")
+	}
 
 	// Reconfigure proxy to allow uninterrupted resumption
 	proxy.SetConfig(TCPProxyConfig{
 		TargetAddr: serverAddr,
 	})
 
-	// Wait for server-side settlement
-	time.Sleep(50 * time.Millisecond)
+	// Wait deterministically for server-side settlement:
+	// IngestStream marks state as ResumableInterrupted and releases lifecycleMu.
+	transferID := personalTransferID(bID, itID)
+	settled := false
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		up, ok := env.svcs.Resumable.GetUpload(transferID)
+		if ok && up.Meta().State == transfer.ResumableInterrupted {
+			if up.TryLock() {
+				up.Unlock()
+				settled = true
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !settled {
+		t.Fatal("timeout waiting for server-side settlement after TCP RST")
+	}
+
+	// Close idle client connections to discard broken sockets
+	http.DefaultClient.CloseIdleConnections()
 
 	// Step 2: Query HEAD to discover committed offset
 	headReq, _ := http.NewRequest(http.MethodHead, tusURL, nil)
@@ -1442,20 +1482,35 @@ func TestPhase4NetSim_TCPProxy_ConnectionResetRSTAndResume(t *testing.T) {
 
 	// Step 3: Resume transfer from committed offset
 	remainingPayload := payload[committedOffset:]
-	resPatchReq, _ := http.NewRequest(http.MethodPatch, tusURL, bytes.NewReader(remainingPayload))
-	resPatchReq.Header.Set("Authorization", "Bearer "+env.token)
-	resPatchReq.Header.Set("Tus-Resumable", "1.0.0")
-	resPatchReq.Header.Set("Upload-Offset", strconv.FormatInt(committedOffset, 10))
-	resPatchReq.Header.Set("Content-Type", "application/offset+octet-stream")
-	resPatchReq.ContentLength = int64(len(remainingPayload))
+	var resResp *http.Response
+	var resErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		resPatchReq, _ := http.NewRequest(http.MethodPatch, tusURL, bytes.NewReader(remainingPayload))
+		resPatchReq.Header.Set("Authorization", "Bearer "+env.token)
+		resPatchReq.Header.Set("Tus-Resumable", "1.0.0")
+		resPatchReq.Header.Set("Upload-Offset", strconv.FormatInt(committedOffset, 10))
+		resPatchReq.Header.Set("Content-Type", "application/offset+octet-stream")
+		resPatchReq.ContentLength = int64(len(remainingPayload))
 
-	resResp, err := http.DefaultClient.Do(resPatchReq)
-	if err != nil {
-		t.Fatalf("resume patch: %v", err)
+		resResp, resErr = http.DefaultClient.Do(resPatchReq)
+		if resErr == nil {
+			if resResp.StatusCode == http.StatusNoContent {
+				resResp.Body.Close()
+				resErr = nil
+				break
+			}
+			if resResp.StatusCode == 423 {
+				resResp.Body.Close()
+				time.Sleep(50 * time.Millisecond)
+				continue
+			}
+			resResp.Body.Close()
+			t.Fatalf("resume patch status: %d", resResp.StatusCode)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	resResp.Body.Close()
-	if resResp.StatusCode != http.StatusNoContent {
-		t.Fatalf("resume patch status: %d", resResp.StatusCode)
+	if resErr != nil {
+		t.Fatalf("resume patch: %v", resErr)
 	}
 
 	// Step 4: Complete

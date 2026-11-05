@@ -212,50 +212,61 @@ func TestProgressThrottle_LargeTransferCallbackFrequency(t *testing.T) {
 	_ = lease
 }
 
-// pacedStreamReader emits a specified total byte stream paced at targetBytesPerSec.
-type pacedStreamReader struct {
+// simulatedPacedReader emits a byte stream paced along a simulated timeline at targetBytesPerSec.
+// It directly advances virtual time proportional to bytes read without introducing wall-clock sleeps,
+// decoupling throttle assertions from physical disk I/O latency on virtualized CI runners.
+type simulatedPacedReader struct {
 	totalBytes        int64
 	chunkSize         int
 	targetBytesPerSec int64
-	sentBytes         int64
-	startTime         time.Time
+	sentBytes         atomic.Int64
+	baseTime          time.Time
+	virtualNano       atomic.Int64
 }
 
-func (pr *pacedStreamReader) Read(p []byte) (int, error) {
-	if pr.sentBytes >= pr.totalBytes {
-		return 0, io.EOF
+func newSimulatedPacedReader(totalBytes int64, chunkSize int, targetBytesPerSec int64, baseTime time.Time) *simulatedPacedReader {
+	r := &simulatedPacedReader{
+		totalBytes:        totalBytes,
+		chunkSize:         chunkSize,
+		targetBytesPerSec: targetBytesPerSec,
+		baseTime:          baseTime,
 	}
-	if pr.startTime.IsZero() {
-		pr.startTime = time.Now()
+	r.virtualNano.Store(baseTime.UnixNano())
+	return r
+}
+
+func (pr *simulatedPacedReader) Now() time.Time {
+	return time.Unix(0, pr.virtualNano.Load())
+}
+
+func (pr *simulatedPacedReader) Read(p []byte) (int, error) {
+	sent := pr.sentBytes.Load()
+	if sent >= pr.totalBytes {
+		return 0, io.EOF
 	}
 
 	toSend := pr.chunkSize
-	if int64(toSend) > pr.totalBytes-pr.sentBytes {
-		toSend = int(pr.totalBytes - pr.sentBytes)
+	if int64(toSend) > pr.totalBytes-sent {
+		toSend = int(pr.totalBytes - sent)
 	}
 	if toSend > len(p) {
 		toSend = len(p)
 	}
 
-	// Fill buffer with deterministic dummy data
 	for i := 0; i < toSend; i++ {
 		p[i] = 0xAA
 	}
-	pr.sentBytes += int64(toSend)
 
-	// Calculate target elapsed time at targetBytesPerSec
-	targetElapsed := time.Duration(float64(pr.sentBytes) / float64(pr.targetBytesPerSec) * float64(time.Second))
-	actualElapsed := time.Since(pr.startTime)
-	if sleep := targetElapsed - actualElapsed; sleep > 0 {
-		time.Sleep(sleep)
-	}
+	newSent := pr.sentBytes.Add(int64(toSend))
+	elapsedNano := int64(float64(newSent) / float64(pr.targetBytesPerSec) * float64(time.Second))
+	pr.virtualNano.Store(pr.baseTime.Add(time.Duration(elapsedNano)).UnixNano())
 
 	return toSend, nil
 }
 
 // TestProgressThrottle_SimulatedSchedule_1GiB empirically verifies the progress callback
 // count over a defined 1 GiB schedule transferring at 800 MB/s (~1.34s duration).
-// It directly measures the elapsed time and callback count, demonstrating the 99.3%+ reduction
+// It directly measures the virtual schedule time and callback count, demonstrating the 99.3%+ reduction
 // vs legacy per-chunk or 256KB-threshold callbacks.
 func TestProgressThrottle_SimulatedSchedule_1GiB(t *testing.T) {
 	env := newTestEnv(t)
@@ -266,6 +277,10 @@ func TestProgressThrottle_SimulatedSchedule_1GiB(t *testing.T) {
 	const totalSize = 1024 * 1024 * 1024 // 1 GiB = 1,073,741,824 bytes
 	const chunkSize = 1024 * 1024        // 1 MiB chunks
 	const targetMBs = 800 * 1000 * 1000  // 800 MB/s target schedule
+
+	baseTime := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	reader := newSimulatedPacedReader(totalSize, chunkSize, targetMBs, baseTime)
+	env.svcs.Now = reader.Now
 
 	bID, itID := createTestBatch(t, env, ts, token, "schedule_1gib.bin", totalSize)
 	key := env.tokenKey(token)
@@ -289,20 +304,17 @@ func TestProgressThrottle_SimulatedSchedule_1GiB(t *testing.T) {
 
 	var callbackCount atomic.Int64
 	var callbackOffsets []int64
+	var callbackVirtualTimes []time.Time
 	var callbackMu sync.Mutex
 
 	env.coord.SetProgressHook(func(sessionKey string, lease transfer.TransferLease, transferred int64) {
 		callbackCount.Add(1)
+		now := env.svcs.now()
 		callbackMu.Lock()
 		callbackOffsets = append(callbackOffsets, transferred)
+		callbackVirtualTimes = append(callbackVirtualTimes, now)
 		callbackMu.Unlock()
 	})
-
-	reader := &pacedStreamReader{
-		totalBytes:        totalSize,
-		chunkSize:         chunkSize,
-		targetBytesPerSec: targetMBs,
-	}
 
 	start := time.Now()
 	patchReq, _ := http.NewRequest(http.MethodPatch, tusURL, reader)
@@ -323,23 +335,22 @@ func TestProgressThrottle_SimulatedSchedule_1GiB(t *testing.T) {
 	}
 
 	count := callbackCount.Load()
-	measuredMBs := float64(totalSize) / elapsed.Seconds() / (1000 * 1000)
+	nominalDuration := time.Duration(float64(totalSize) / float64(targetMBs) * float64(time.Second))
+	expectedIntervals := int64(nominalDuration / (50 * time.Millisecond)) // 26
+	expectedTotalCallbacks := expectedIntervals + 1                       // 27 (including EOF final update)
+
 	t.Logf("=== 1 GiB Schedule Result ===")
-	t.Logf("Elapsed Time: %v | Average Throughput: %.2f MB/s", elapsed, measuredMBs)
-	t.Logf("Total Callbacks Counted: %d (Expected at 50ms over %.2fs = ~25-30)", count, elapsed.Seconds())
+	t.Logf("Simulated Schedule Duration: %v at 800 MB/s | Wall Clock Elapsed: %v", nominalDuration, elapsed)
+	t.Logf("Total Callbacks Counted: %d (Expected at 50ms over %v = ~%d-%d)", count, nominalDuration, expectedTotalCallbacks-1, expectedTotalCallbacks+1)
 
-	// Expected callbacks at 50ms interval: elapsed / 50ms (+/- 15% margin for thread scheduling)
-	expectedIntervals := int64(elapsed / (50 * time.Millisecond))
-	minExpected := expectedIntervals - 5
-	if minExpected < 1 {
-		minExpected = 1
-	}
-	maxExpected := expectedIntervals + 6
+	// Range assertion: nominal 27 callbacks (+/- 2 callbacks for boundary rounding)
+	minExpected := expectedTotalCallbacks - 2 // 25
+	maxExpected := expectedTotalCallbacks + 2 // 29
 	if count < minExpected || count > maxExpected {
-		t.Fatalf("unexpected callback count %d for 1 GiB schedule over %v (expected ~%d, range %d..%d)", count, elapsed, expectedIntervals, minExpected, maxExpected)
+		t.Fatalf("unexpected callback count %d for 1 GiB schedule over simulated %v (expected ~%d, range %d..%d)", count, nominalDuration, expectedTotalCallbacks, minExpected, maxExpected)
 	}
 
-	// Verify monotonic progress
+	// Verify monotonic progress offsets
 	callbackMu.Lock()
 	defer callbackMu.Unlock()
 	if len(callbackOffsets) == 0 {
@@ -348,6 +359,14 @@ func TestProgressThrottle_SimulatedSchedule_1GiB(t *testing.T) {
 	for i := 1; i < len(callbackOffsets); i++ {
 		if callbackOffsets[i] < callbackOffsets[i-1] {
 			t.Fatalf("non-monotonic progress: offset %d followed by %d", callbackOffsets[i-1], callbackOffsets[i])
+		}
+	}
+
+	// Verify minimum ~50ms interval between periodic updates in virtual time (allowing for chunk boundary quantization)
+	for i := 1; i < len(callbackVirtualTimes)-1; i++ {
+		interval := callbackVirtualTimes[i].Sub(callbackVirtualTimes[i-1])
+		if interval < 48*time.Millisecond {
+			t.Errorf("periodic progress interval %v < 48ms at step %d", interval, i)
 		}
 	}
 
