@@ -2487,6 +2487,22 @@
           </label>
         </div>
 
+        <!-- About & Version Card -->
+        <div class="settings-card">
+          <div class="settings-card-header">
+            <h4>{$t('settings.aboutTitle')}</h4>
+            <p>{$t('settings.aboutDesc')}</p>
+          </div>
+          <div style="display: flex; justify-content: space-between; align-items: center; padding: 4px 0;">
+            <span style="font-size: 13.5px; color: var(--text-secondary); font-weight: 500;">
+              {$t('settings.versionLabel')}
+            </span>
+            <span class="status-tag ready" style="font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; font-weight: 600;">
+              {$t('sidebar.version')}
+            </span>
+          </div>
+        </div>
+
         <!-- Settings Actions Bar -->
         <div class="card" style="display: flex; justify-content: space-between; align-items: center; padding: 18px 24px;">
           <button
@@ -2511,8 +2527,9 @@
   {/if}
 
         {#if receiveDir}
-          <div style="margin-top: 24px; padding: 12px 16px; border-radius: 10px; background: var(--surface-secondary); border: 1px solid var(--border); font-size: 12.5px; color: var(--text-tertiary);">
-            {$t('footer.savedPath', { path: receiveDir })}
+          <div style="margin-top: 24px; padding: 12px 16px; border-radius: 10px; background: var(--surface-secondary); border: 1px solid var(--border); font-size: 12.5px; color: var(--text-tertiary); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+            <span>{$t('footer.savedPath', { path: receiveDir })}</span>
+            <span style="font-weight: 500;">Flitnix {$t('sidebar.version')}</span>
           </div>
         {/if}
       </div>
