@@ -17,7 +17,7 @@
     <img src="https://img.shields.io/github/v/release/RobinMillford/flitnix?cacheSeconds=300&color=0ea5e9" alt="Latest Release">
   </a>
   <a href="LICENSE">
-    <img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0">
+    <img src="https://img.shields.io/badge/license-AGPL--3.0--only-blue.svg" alt="License: AGPL-3.0-only">
   </a>
   <img src="https://img.shields.io/badge/go-1.27+-00ADD8?logo=go&logoColor=white" alt="Go Version">
   <img src="https://img.shields.io/badge/wails-v2-DF1E59?logo=wails&logoColor=white" alt="Wails v2">
@@ -223,5 +223,12 @@ For detailed test coverage information and subsystem test layouts, see the [Test
 
 ## License
 
-Flitnix is licensed under the [Apache License, Version 2.0](LICENSE).
-See the [`LICENSE`](LICENSE) file for the full license text and [`NOTICE`](NOTICE) for third-party font and software notices.
+Flitnix is free software licensed under the [GNU Affero General Public License v3.0 only](LICENSE) (`SPDX: AGPL-3.0-only`). You can redistribute it and/or modify it under the terms of the GNU Affero General Public License as published by the Free Software Foundation, version 3 of the License. See the [`LICENSE`](LICENSE) file for the full license text and official terms, or visit <https://www.gnu.org/licenses/agpl-3.0.html>.
+
+### Historical Releases & Apache 2.0 Compatibility
+
+Historical releases of Flitnix (versions v0.1.0 through v0.2.5) were distributed under the [Apache License, Version 2.0](LICENSES/Apache-2.0.txt) and remain available under those terms. Rights previously granted under Apache 2.0 are preserved and not revoked. Components and contributions originating under Apache 2.0 remain governed by their applicable notices. The complete Apache 2.0 license text is preserved in [`LICENSES/Apache-2.0.txt`](LICENSES/Apache-2.0.txt).
+
+### Third-Party Software & Font Notices
+
+See the [`NOTICE`](NOTICE) file for third-party software, libraries, and font notices (including the Nunito font under the SIL Open Font License 1.1 and bundled libraries under permissive licenses).

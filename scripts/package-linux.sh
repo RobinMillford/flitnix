@@ -61,6 +61,9 @@ fi
 if [ -f LICENSE ]; then
     cp LICENSE "${TAR_STAGE}/flitnix/"
 fi
+if [ -d LICENSES ]; then
+    cp -r LICENSES "${TAR_STAGE}/flitnix/"
+fi
 if [ -f NOTICE ]; then
     cp NOTICE "${TAR_STAGE}/flitnix/"
 fi

@@ -8,7 +8,7 @@ maintainer: "RobinMillford <RobinMillford@users.noreply.github.com>"
 description: "Fast, private local file transfer between desktop and phone"
 vendor: "Flitnix"
 homepage: "https://github.com/RobinMillford/flitnix"
-license: "Apache-2.0"
+license: "AGPL-3.0-only"
 
 contents:
   - src: ./build/bin/flitnix
@@ -49,6 +49,10 @@ contents:
     dst: /usr/share/icons/hicolor/512x512/apps/flitnix.png
   - src: ./LICENSE
     dst: /usr/share/doc/flitnix/LICENSE
+    file_info:
+      mode: 0644
+  - src: ./LICENSES/Apache-2.0.txt
+    dst: /usr/share/doc/flitnix/LICENSES/Apache-2.0.txt
     file_info:
       mode: 0644
   - src: ./NOTICE

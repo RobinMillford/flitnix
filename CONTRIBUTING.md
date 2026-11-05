@@ -94,6 +94,15 @@ sh -n install.sh
 
 ---
 
-## Licensing Terms
+## Licensing Terms & Contributor Rights
 
-By contributing to Flitnix, you agree that your contributions will be licensed under the [Apache License, Version 2.0](LICENSE) in accordance with Section 5 of the Apache-2.0 license terms.
+Flitnix is free software distributed under the GNU Affero General Public License v3.0 only (`AGPL-3.0-only`).
+
+By submitting a pull request, issue, or other contribution to Flitnix:
+
+- **Inbound Licensing**: Contributions are accepted under the GNU Affero General Public License, Version 3 (`AGPL-3.0-only`), unless explicitly agreed otherwise in writing.
+- **Copyright Retention**: You retain copyright ownership of your original contributions. Submitting a pull request or patch does not transfer or assign copyright ownership to Flitnix or the repository maintainer. No mandatory Contributor License Agreement (CLA) or copyright assignment is required.
+- **Right to Contribute**: You represent and warrant that you have the full legal right to submit the contribution, and that doing so does not violate any third-party agreements, patents, or intellectual property rights.
+- **Third-Party Code**: If your contribution includes or is based on third-party code, assets, or libraries, you must clearly identify the original copyright holder and verify that the third-party license is compatible with GNU AGPLv3 (e.g., MIT, BSD-2-Clause, BSD-3-Clause, Apache-2.0). All existing copyright and license notices must be preserved.
+- **Upstream Collaboration**: Upstream pull requests, bug fixes, and improvements are strongly encouraged to benefit the wider user community. Independent developers and downstream forks are not legally obligated to submit all private improvements upstream, but contributing back helps maintain an open, robust ecosystem.
+- **Issue & Security Reporting**: Bug reports, feature suggestions, and general issues should be submitted through the official [GitHub Issues](https://github.com/RobinMillford/flitnix/issues) tracker. For security vulnerabilities, please refer to our [Security Policy](SECURITY.md) for private reporting procedures.
