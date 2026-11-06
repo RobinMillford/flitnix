@@ -1,14 +1,24 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { focusTrap } from './focusTrap'
   import { t, setLocale, tFn } from './i18n'
-  import type { main, netenv, doctor, guest, audit, devices, power } from '../wailsjs/go/models'
+  import type { main, netenv, doctor, guest, audit, devices, power, version, update } from '../wailsjs/go/models'
   import { OnFileDrop, OnFileDropOff } from '../wailsjs/runtime/runtime.js'
   import logoUrl from './assets/images/logo-universal.png'
   import { createRefreshScheduler } from './refreshScheduler'
-  import {
-    formatBytes, percent, speed, formatEta, calcEta, fmtTime, fmtRemaining
-  } from './utils'
+  import ConnectionDoctorModal from './components/ConnectionDoctorModal.svelte'
+  import UpdateModal from './components/UpdateModal.svelte'
+  import Toast from './components/Toast.svelte'
+  import { formatBytes } from './utils'
+
+  // Dedicated Views
+  import PersonalTransferView from './views/PersonalTransferView.svelte'
+  import GuestDropBoxView from './views/GuestDropBoxView.svelte'
+  import TemplatesView from './views/TemplatesView.svelte'
+  import TrustedDevicesView from './views/TrustedDevicesView.svelte'
+  import TransferHistoryView from './views/TransferHistoryView.svelte'
+  import AuditHistoryView from './views/AuditHistoryView.svelte'
+  import SettingsView from './views/SettingsView.svelte'
+
   import {
     StartSession, EndSession, ListSessions, ListPendingUploads, RecentUploads,
     RecentDownloads, ApproveUpload, RejectUpload, CancelUpload,
@@ -16,20 +26,52 @@
     PickFilesForSharing, PickFolderForSharing, AddDroppedSources,
     ListSharedFiles, ListSharedSources, RevokeSharedFile, RevokeSharedSource, ReceiveDirectory,
     ListNetworkInterfaces, SessionQR, ServerAddress,
-    StartGuestRoom, StartGuestRoomWithConfig, GetGuestRoomState, ApproveGuest, RejectGuest, RevokeGuest,
+    StartGuestRoomWithConfig, GetGuestRoomState, ApproveGuest, RejectGuest, RevokeGuest,
     ApproveGuestUpload, RejectGuestUpload, EndGuestRoom, PickGuestDestination, OpenGuestFolder,
     PickExportDestination, ExportGuestCollection,
     ListGuestPresets, ListGuestTemplates, SaveGuestTemplate, DeleteGuestTemplate, DuplicateGuestTemplate, StartGuestRoomFromTemplate,
-    AddExpectedParticipant, RemoveExpectedParticipant, UpdateExpectedParticipant,
     ListAuditEvents, ClearAuditHistory,
     RunConnectionDiagnostics, SendTextMessage, ListTextMessages, ClearTextMessages,
     ListTrustedDevices, RemoveTrustedDevice, SetDeviceAutoApprove,
     ApprovePairing, DenyPairing, GetPairingStatus, ReArmPairing,
     GetSettings, SaveSettings, ResetSettings, SelectDownloadDirectory, OpenDownloadFolder,
-    SleepInhibition
+    SleepInhibition, GetAppVersion, CheckForUpdates
   } from '../wailsjs/go/main/App.js'
 
-  let activeTab: 'personal' | 'guest' | 'templates' | 'audit' | 'devices' | 'settings' = 'personal'
+  const validTabs = ['personal', 'guest', 'templates', 'devices', 'history', 'audit', 'settings'] as const
+  type TabName = typeof validTabs[number]
+
+  function getInitialTab(): TabName {
+    if (typeof window !== 'undefined') {
+      const q = new URLSearchParams(window.location.search).get('tab') as TabName
+      if (q && validTabs.includes(q)) return q
+    }
+    return 'personal'
+  }
+
+  function getInitialTheme(): string {
+    if (typeof window !== 'undefined') {
+      const t = new URLSearchParams(window.location.search).get('theme')
+      if (t === 'dark' || t === 'light') return t
+    }
+    return 'system'
+  }
+
+  function applyTheme(theme: string): void {
+    if (typeof document !== 'undefined') {
+      if (theme === 'dark' || theme === 'light') {
+        document.documentElement.setAttribute('data-theme', theme)
+      } else {
+        document.documentElement.removeAttribute('data-theme')
+      }
+    }
+  }
+
+  if (typeof document !== 'undefined') {
+    applyTheme(getInitialTheme())
+  }
+
+  let activeTab: TabName = getInitialTab()
   let trustedDevices: devices.Device[] = []
   let loadingDevices = false
   let pairingStatus: devices.PairingStatusView | null = null
@@ -40,7 +82,7 @@
   // Persistent Settings state
   let settingsState: main.SettingsView = {
     version: 1,
-    theme: 'system',
+    theme: getInitialTheme(),
     locale: 'system',
     downloadDir: '',
     effectiveDir: '',
@@ -51,15 +93,34 @@
   let settingsError = ''
   let savingSettings = false
 
+  // Update & App Version state
+  let appVersionInfo: version.Info | null = null
+  let updateModalOpen = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('modal') === 'update'
+  let updateAvailableBadge = false
+  let updateCheckResult: update.CheckResult | null = null
+
+  // Toast Notification state
+  let toastMessage = ''
+  let toastType: 'info' | 'success' | 'warning' | 'error' = 'info'
+
+  function showToast(msg: string, type: 'info' | 'success' | 'warning' | 'error' = 'info'): void {
+    toastMessage = msg
+    toastType = type
+  }
+
+  function dismissToast(): void {
+    toastMessage = ''
+  }
+
   // Accessibility & live announcements
   let liveAnnouncement = ''
   let previousPendingTotal = -1
 
-  const tabOrder: Array<'personal' | 'guest' | 'templates' | 'audit' | 'devices' | 'settings'> = [
-    'personal', 'guest', 'templates', 'audit', 'devices', 'settings'
+  const tabOrder: Array<'personal' | 'guest' | 'templates' | 'devices' | 'history' | 'audit' | 'settings'> = [
+    'personal', 'guest', 'templates', 'devices', 'history', 'audit', 'settings'
   ]
 
-  function switchTab(target: 'personal' | 'guest' | 'templates' | 'audit' | 'devices' | 'settings'): void {
+  function switchTab(target: 'personal' | 'guest' | 'templates' | 'devices' | 'history' | 'audit' | 'settings'): void {
     activeTab = target
     if (target === 'templates') loadTemplates()
     else if (target === 'audit') loadAuditLogs()
@@ -120,7 +181,6 @@
   let qrKey = ''
   let activeInterfaceName = ''
   let activeAddress = ''
-  let networkChooserOpen = false
   let networkRefreshGeneration = 0
   let disposed = false
   const SESSION_PORT = '43821'
@@ -130,7 +190,7 @@
   let textInput = ''
   let sendingText = false
 
-  // Guest Drop Box & Event Collection state
+  // Guest Drop Box state
   let guestRoomState: main.GuestRoomStateView | null = null
   let guestStarting = false
   let guestDestDir = ''
@@ -142,9 +202,6 @@
   let guestDescription = 'Submit your assignment files. Provide your student ID and notes.'
   let guestCollisionPolicy: 'preserve_both' | 'reject' = 'preserve_both'
   let guestFormSchema: guest.FormField[] = []
-  let newParticipantName = ''
-  let newParticipantIdentifier = ''
-  let addingParticipant = false
   let exporting = false
   let exportSuccessMsg = ''
 
@@ -160,7 +217,7 @@
   let auditFilterOutcome = ''
 
   // Connection Doctor state
-  let doctorOpen = false
+  let doctorOpen = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('modal') === 'doctor'
   let doctorLoading = false
   let doctorReport: doctor.DiagnosticReport | null = null
   let doctorError = ''
@@ -180,14 +237,6 @@
   function report(err: unknown, key = '') {
     errorText = stringOfError(err)
     if (key) setBusy(key, false)
-  }
-  function hostPort(): string {
-    if (serverAddress) return serverAddress
-    if (!activeAddress) return `…:${SESSION_PORT}`
-    if (activeAddress.includes(':') && !activeAddress.startsWith('[')) {
-      return `[${activeAddress}]:${SESSION_PORT}`
-    }
-    return `${activeAddress}:${SESSION_PORT}`
   }
 
   const refresh = createRefreshScheduler(
@@ -249,7 +298,6 @@
       interfaces = next ?? []
       if (next.length === 1) {
         selectedIp = next[0].ip
-        networkChooserOpen = false
       } else if (settingsState.preferredInterface && next.some((item) => item.name === settingsState.preferredInterface)) {
         const prefMatch = next.find((item) => item.name === settingsState.preferredInterface && (item.family === 'IPv4' || !item.family)) ?? next.find((item) => item.name === settingsState.preferredInterface)
         if (prefMatch) {
@@ -257,7 +305,6 @@
         }
       } else if (!next.some((item) => item.ip === selectedIp)) {
         selectedIp = ''
-        networkChooserOpen = false
       }
     } catch (err) {
       if (generation !== networkRefreshGeneration) return
@@ -369,26 +416,21 @@
     setBusy(k, true); RevokeSharedFile(id).then(refresh).catch((e) => report(e, k)).finally(() => setBusy(k, false))
   }
 
-  function activeUpload(u: main.UploadView): boolean {
-    return ['pending', 'approved', 'uploading'].includes(u.state)
-  }
-  function activeDownload(d: main.DownloadView): boolean {
-    return ['starting', 'transferring', 'finalizing'].includes(d.state)
-  }
-  function activeBatch(b: main.BatchView): boolean {
-    return b.approvalState === 'approved' && ['queued', 'transferring'].includes(b.state)
-  }
-  function finishedBatch(b: main.BatchView): boolean {
-    return ['completed', 'failed', 'canceled', 'rejected'].includes(b.state)
-  }
-  function batchName(b: main.BatchView): string {
-    return b.rootName || `${b.totalItemCount} ${b.totalItemCount === 1 ? 'file' : 'files'}`
-  }
-  function doneItems(b: main.BatchView): number {
-    return b.items.filter((item) => item.state === 'completed').length
-  }
-  function currentItem(b: main.BatchView): main.BatchItemView | undefined {
-    return b.items.find((item) => item.state === 'transferring')
+  async function clearAllShared(): Promise<void> {
+    const revokes: Promise<any>[] = []
+    for (const f of files) {
+      revokes.push(RevokeSharedFile(f.id))
+    }
+    for (const s of sources) {
+      revokes.push(RevokeSharedSource(s.id))
+    }
+    try {
+      await Promise.all(revokes)
+      showToast('Cleared all shared items', 'info')
+      refresh()
+    } catch (e) {
+      report(e)
+    }
   }
 
   // Quick Text actions
@@ -498,31 +540,7 @@
     }
   }
 
-  async function addParticipantAction(): Promise<void> {
-    if (!newParticipantName.trim() || addingParticipant) return
-    addingParticipant = true
-    try {
-      await AddExpectedParticipant(newParticipantName.trim(), '', newParticipantIdentifier.trim())
-      newParticipantName = ''
-      newParticipantIdentifier = ''
-      refresh()
-    } catch (err) {
-      report(err)
-    } finally {
-      addingParticipant = false
-    }
-  }
-
-  async function removeParticipantAction(id: string): Promise<void> {
-    try {
-      await RemoveExpectedParticipant(id)
-      refresh()
-    } catch (err) {
-      report(err)
-    }
-  }
-
-  async function exportCollectionAction(): Promise<void> {
+  async function exportCollectionAction(_roomId?: string): Promise<void> {
     if (exporting) return
     try {
       const targetPath = await PickExportDestination()
@@ -554,17 +572,21 @@
     try {
       await StartGuestRoomFromTemplate(tplId, guestDestDir)
       activeTab = 'guest'
+      showToast('Started room from template', 'success')
       refresh()
     } catch (err) {
       report(err)
     }
   }
 
-  async function duplicateTemplateAction(tplId: string, currentName: string): Promise<void> {
+  async function duplicateTemplateAction(tplId: string): Promise<void> {
+    const match = templates.find(t => t.id === tplId)
+    const currentName = match?.name || 'Template'
     const newName = prompt('Enter a name for the duplicated template:', `${currentName} (Copy)`)
     if (!newName) return
     try {
       await DuplicateGuestTemplate(tplId, newName)
+      showToast('Template duplicated', 'success')
       await loadTemplates()
     } catch (err) {
       report(err)
@@ -572,9 +594,9 @@
   }
 
   async function deleteTemplateAction(tplId: string): Promise<void> {
-    if (!confirm('Are you sure you want to delete this template?')) return
     try {
       await DeleteGuestTemplate(tplId)
+      showToast('Template deleted', 'info')
       await loadTemplates()
     } catch (err) {
       report(err)
@@ -598,9 +620,9 @@
   }
 
   async function clearAuditAction(): Promise<void> {
-    if (!confirm('Are you sure you want to clear the local audit log history? This cannot be undone.')) return
     try {
       await ClearAuditHistory()
+      showToast('Audit history cleared', 'info')
       await loadAuditLogs()
     } catch (err) {
       report(err)
@@ -623,15 +645,16 @@
     }
   }
 
-  async function handleApprovePairing(reqId: string): Promise<void> {
-    if (!reqId || pairingActionLoading) return
+  async function handleApprovePairing(clientIP: string): Promise<void> {
+    if (!clientIP || pairingActionLoading) return
     pairingActionLoading = true
     try {
-      await ApprovePairing(reqId)
+      await ApprovePairing(clientIP)
       pairingStatus = await GetPairingStatus()
       if (activeTab === 'devices') {
         await loadTrustedDevices()
       }
+      showToast('Pairing request approved', 'success')
     } catch (err) {
       report(err)
     } finally {
@@ -639,12 +662,13 @@
     }
   }
 
-  async function handleDenyPairing(reqId: string): Promise<void> {
-    if (!reqId || pairingActionLoading) return
+  async function handleDenyPairing(clientIP: string): Promise<void> {
+    if (!clientIP || pairingActionLoading) return
     pairingActionLoading = true
     try {
-      await DenyPairing(reqId)
+      await DenyPairing(clientIP)
       pairingStatus = await GetPairingStatus()
+      showToast('Pairing request denied', 'info')
     } catch (err) {
       report(err)
     } finally {
@@ -658,6 +682,7 @@
     try {
       await ReArmPairing()
       pairingStatus = await GetPairingStatus()
+      showToast('Pairing re-armed successfully', 'success')
     } catch (err) {
       report(err)
     } finally {
@@ -669,38 +694,20 @@
     try {
       await SetDeviceAutoApprove(id, !currentVal)
       await loadTrustedDevices()
+      showToast(currentVal ? 'Auto-approve disabled' : 'Auto-approve enabled', 'info')
     } catch (err) {
       report(err)
     }
   }
 
-  let deviceToRevoke: devices.Device | null = null
-  let revokingDevice = false
-  let personalCopiedLink = false
-
-  function askRevokeDevice(dev: devices.Device): void {
-    deviceToRevoke = dev
-  }
-
-  async function confirmRevokeDevice(): Promise<void> {
-    if (!deviceToRevoke) return
-    revokingDevice = true
+  async function removeDeviceAction(id: string): Promise<void> {
     try {
-      await RemoveTrustedDevice(deviceToRevoke.id)
+      await RemoveTrustedDevice(id)
       await loadTrustedDevices()
-      deviceToRevoke = null
+      showToast('Device removed from trusted list', 'info')
     } catch (err) {
       report(err)
-    } finally {
-      revokingDevice = false
     }
-  }
-
-  function copyPersonalLink(): void {
-    const url = `http://${hostPort()}`
-    copyTextToClipboard(url)
-    personalCopiedLink = true
-    setTimeout(() => { personalCopiedLink = false }, 2500)
   }
 
   function pageTitle(tab: string): string {
@@ -708,8 +715,9 @@
       case 'personal': return tFn('nav.personal')
       case 'guest': return tFn('nav.guest')
       case 'templates': return tFn('nav.templates')
-      case 'audit': return tFn('nav.audit')
       case 'devices': return tFn('nav.devices')
+      case 'history': return tFn('nav.history')
+      case 'audit': return tFn('nav.audit')
       case 'settings': return tFn('nav.settings')
       default: return tFn('app.title')
     }
@@ -720,41 +728,35 @@
       case 'personal': return tFn('header.personalDesc')
       case 'guest': return tFn('header.guestDesc')
       case 'templates': return tFn('header.templatesDesc')
-      case 'audit': return tFn('header.auditDesc')
       case 'devices': return tFn('header.devicesDesc')
+      case 'history': return tFn('header.historyDesc')
+      case 'audit': return tFn('header.auditDesc')
       case 'settings': return tFn('header.settingsDesc')
       default: return tFn('app.tagline')
     }
   }
 
-  async function removeDeviceAction(id: string): Promise<void> {
-    try {
-      await RemoveTrustedDevice(id)
-      await loadTrustedDevices()
-    } catch (err) {
-      report(err)
-    }
-  }
-
-  function applyTheme(theme: string): void {
-    if (theme === 'dark' || theme === 'light') {
-      document.documentElement.setAttribute('data-theme', theme)
-    } else {
-      document.documentElement.removeAttribute('data-theme')
-    }
+  function toggleThemeQuick(): void {
+    const current = document.documentElement.getAttribute('data-theme')
+    const nextTheme = current === 'dark' ? 'light' : 'dark'
+    settingsState.theme = nextTheme
+    applyTheme(nextTheme)
+    SaveSettings(settingsState).catch(() => {})
   }
 
   async function loadSettings(): Promise<void> {
+    const urlTheme = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('theme') : null
     try {
       const s = await GetSettings()
       settingsState = s
-      applyTheme(s.theme)
+      applyTheme(urlTheme || s.theme)
       if (s.locale) setLocale(s.locale)
       if (s.preferredInterface && interfaces.length > 0 && !selectedIp) {
         const match = interfaces.find((item) => item.name === s.preferredInterface && (item.family === 'IPv4' || !item.family)) ?? interfaces.find((item) => item.name === s.preferredInterface)
         if (match) selectedIp = match.ip
       }
     } catch (err) {
+      if (urlTheme) applyTheme(urlTheme)
       settingsError = stringOfError(err)
     }
   }
@@ -815,7 +817,7 @@
     }
   }
 
-  async function endGuestRoomAction(): Promise<void> {
+  async function endGuestRoomAction(_id?: string): Promise<void> {
     const k = 'end-guest-room'
     if (isBusy(k)) return
     setBusy(k, true)
@@ -921,13 +923,9 @@
 
   $: currentNetwork = interfaces.length === 1
     ? interfaces[0]
-    : interfaces.find((item) => item.ip === selectedIp) ?? null
+    : interfaces.find((item) => item.ip === selectedIp) ?? (interfaces[0] || null)
 
   $: guestPendingCount = (guestRoomState?.pendingGuests?.length ?? 0) + (guestRoomState?.pendingUploads?.length ?? 0)
-
-  $: uniqueInterfaces = interfaces.filter((item, index, self) =>
-    index === self.findIndex((t) => t.name === item.name)
-  )
 
   onMount(() => {
     loadSettings()
@@ -935,6 +933,15 @@
     refreshNetwork()
     loadPresets()
     loadTemplates()
+    GetAppVersion().then((v) => {
+      appVersionInfo = v
+    }).catch(report)
+    CheckForUpdates(false).then((res) => {
+      if (res && res.updateAvailable) {
+        updateAvailableBadge = true
+        updateCheckResult = res
+      }
+    }).catch(() => {})
     const id = setInterval(refresh, 800)
     OnFileDrop(handleDrop, true)
     return () => {
@@ -952,151 +959,181 @@
       <img class="brand-logo-img" src={logoUrl} alt="Flitnix" />
       <div class="brand-info">
         <h1>{$t('app.title')}</h1>
-        <span>{$t('sidebar.sectionMain')}</span>
+        <span class="brand-badge">LAN Transfer</span>
       </div>
     </div>
 
     <!-- Navigation Tab List -->
     <nav class="sidebar-nav-container" aria-label={$t('nav.tabsLabel')}>
       <div class="sidebar-nav" role="tablist" aria-label={$t('nav.tabsLabel')} aria-orientation="vertical" tabindex="-1" on:keydown={handleTabKeydown}>
-        <div class="sidebar-section-title">{$t('sidebar.sectionMain')}</div>
+        <!-- TRANSFER SECTION -->
+        <div class="sidebar-section-title">{$t('sidebar.sectionTransfer')}</div>
 
-      <button
-        type="button"
-        id="tab-personal"
-        role="tab"
-        aria-selected={activeTab === 'personal'}
-        aria-controls="panel-personal"
-        tabindex={activeTab === 'personal' ? 0 : -1}
-        class="nav-tab-btn"
-        class:active={activeTab === 'personal'}
-        on:click={() => switchTab('personal')}
-      >
-        <span class="nav-tab-icon" aria-hidden="true">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="17 1 21 5 17 9"></polyline>
-            <path d="M3 11V9a4 4 0 0 1 4-4h14"></path>
-            <polyline points="7 23 3 19 7 15"></polyline>
-            <path d="M21 13v2a4 4 0 0 1-4 4H3"></path>
-          </svg>
-        </span>
-        <span class="nav-tab-label">{$t('nav.personal')}</span>
-        {#if pending.length + pendingBatches.length > 0}
-          <span class="tab-badge">{pending.length + pendingBatches.length}</span>
-        {/if}
-      </button>
+        <button
+          type="button"
+          id="tab-personal"
+          role="tab"
+          aria-selected={activeTab === 'personal'}
+          aria-controls="panel-personal"
+          tabindex={activeTab === 'personal' ? 0 : -1}
+          class="nav-tab-btn"
+          class:active={activeTab === 'personal'}
+          on:click={() => switchTab('personal')}
+        >
+          <span class="nav-tab-icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="17 1 21 5 17 9"></polyline>
+              <path d="M3 11V9a4 4 0 0 1 4-4h14"></path>
+              <polyline points="7 23 3 19 7 15"></polyline>
+              <path d="M21 13v2a4 4 0 0 1-4 4H3"></path>
+            </svg>
+          </span>
+          <span class="nav-tab-label">{$t('nav.personal')}</span>
+          {#if (pending.length + pendingBatches.length) > 0}
+            <span class="tab-badge pulse-green">{pending.length + pendingBatches.length}</span>
+          {:else if sessions.length > 0}
+            <span class="tab-dot-online" title="Session active"></span>
+          {/if}
+        </button>
 
-      <button
-        type="button"
-        id="tab-guest"
-        role="tab"
-        aria-selected={activeTab === 'guest'}
-        aria-controls="panel-guest"
-        tabindex={activeTab === 'guest' ? 0 : -1}
-        class="nav-tab-btn"
-        class:active={activeTab === 'guest'}
-        on:click={() => switchTab('guest')}
-      >
-        <span class="nav-tab-icon" aria-hidden="true">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-            <polyline points="7 10 12 15 17 10"></polyline>
-            <line x1="12" y1="15" x2="12" y2="3"></line>
-          </svg>
-        </span>
-        <span class="nav-tab-label">{$t('nav.guest')}</span>
-        {#if guestPendingCount > 0}
-          <span class="tab-badge">{guestPendingCount}</span>
-        {/if}
-      </button>
+        <button
+          type="button"
+          id="tab-guest"
+          role="tab"
+          aria-selected={activeTab === 'guest'}
+          aria-controls="panel-guest"
+          tabindex={activeTab === 'guest' ? 0 : -1}
+          class="nav-tab-btn"
+          class:active={activeTab === 'guest'}
+          on:click={() => switchTab('guest')}
+        >
+          <span class="nav-tab-icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="7 10 12 15 17 10"></polyline>
+              <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+          </span>
+          <span class="nav-tab-label">{$t('nav.guest')}</span>
+          {#if guestPendingCount > 0}
+            <span class="tab-badge pulse-green">{guestPendingCount}</span>
+          {:else if guestRoomState?.room && guestRoomState.room.state !== 'ended'}
+            <span class="tab-badge warm">LIVE</span>
+          {/if}
+        </button>
 
-      <button
-        type="button"
-        id="tab-templates"
-        role="tab"
-        aria-selected={activeTab === 'templates'}
-        aria-controls="panel-templates"
-        tabindex={activeTab === 'templates' ? 0 : -1}
-        class="nav-tab-btn"
-        class:active={activeTab === 'templates'}
-        on:click={() => switchTab('templates')}
-      >
-        <span class="nav-tab-icon" aria-hidden="true">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-            <line x1="3" y1="9" x2="21" y2="9"></line>
-            <line x1="9" y1="21" x2="9" y2="9"></line>
-          </svg>
-        </span>
-        <span class="nav-tab-label">{$t('nav.templates')}</span>
-      </button>
+        <button
+          type="button"
+          id="tab-templates"
+          role="tab"
+          aria-selected={activeTab === 'templates'}
+          aria-controls="panel-templates"
+          tabindex={activeTab === 'templates' ? 0 : -1}
+          class="nav-tab-btn"
+          class:active={activeTab === 'templates'}
+          on:click={() => switchTab('templates')}
+        >
+          <span class="nav-tab-icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+              <line x1="3" y1="9" x2="21" y2="9"></line>
+              <line x1="9" y1="21" x2="9" y2="9"></line>
+            </svg>
+          </span>
+          <span class="nav-tab-label">{$t('nav.templates')}</span>
+          {#if templates.length > 0}
+            <span class="tab-badge muted-count">{templates.length}</span>
+          {/if}
+        </button>
 
-      <div class="sidebar-section-title">{$t('sidebar.sectionSecurity')}</div>
+        <!-- MANAGEMENT SECTION -->
+        <div class="sidebar-section-title">{$t('sidebar.sectionManagement')}</div>
 
-      <button
-        type="button"
-        id="tab-audit"
-        role="tab"
-        aria-selected={activeTab === 'audit'}
-        aria-controls="panel-audit"
-        tabindex={activeTab === 'audit' ? 0 : -1}
-        class="nav-tab-btn"
-        class:active={activeTab === 'audit'}
-        on:click={() => switchTab('audit')}
-      >
-        <span class="nav-tab-icon" aria-hidden="true">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
-          </svg>
-        </span>
-        <span class="nav-tab-label">{$t('nav.audit')}</span>
-      </button>
+        <button
+          type="button"
+          id="tab-devices"
+          role="tab"
+          aria-selected={activeTab === 'devices'}
+          aria-controls="panel-devices"
+          tabindex={activeTab === 'devices' ? 0 : -1}
+          class="nav-tab-btn"
+          class:active={activeTab === 'devices'}
+          on:click={() => switchTab('devices')}
+        >
+          <span class="nav-tab-icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+              <line x1="8" y1="21" x2="16" y2="21"></line>
+              <line x1="12" y1="17" x2="12" y2="21"></line>
+            </svg>
+          </span>
+          <span class="nav-tab-label">{$t('nav.devices')}</span>
+          {#if pairingStatus?.requiresApproval}
+            <span class="tab-badge alert-amber">1</span>
+          {/if}
+        </button>
 
-      <button
-        type="button"
-        id="tab-devices"
-        role="tab"
-        aria-selected={activeTab === 'devices'}
-        aria-controls="panel-devices"
-        tabindex={activeTab === 'devices' ? 0 : -1}
-        class="nav-tab-btn"
-        class:active={activeTab === 'devices'}
-        on:click={() => switchTab('devices')}
-      >
-        <span class="nav-tab-icon" aria-hidden="true">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
-            <line x1="8" y1="21" x2="16" y2="21"></line>
-            <line x1="12" y1="17" x2="12" y2="21"></line>
-          </svg>
-        </span>
-        <span class="nav-tab-label">{$t('nav.devices')}</span>
-        {#if pairingStatus?.requiresApproval}
-          <span class="tab-badge" style="background: var(--warning); color: #000;">1</span>
-        {/if}
-      </button>
+        <button
+          type="button"
+          id="tab-history"
+          role="tab"
+          aria-selected={activeTab === 'history'}
+          aria-controls="panel-history"
+          tabindex={activeTab === 'history' ? 0 : -1}
+          class="nav-tab-btn"
+          class:active={activeTab === 'history'}
+          on:click={() => switchTab('history')}
+        >
+          <span class="nav-tab-icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"></circle>
+              <polyline points="12 6 12 12 16 14"></polyline>
+            </svg>
+          </span>
+          <span class="nav-tab-label">{$t('nav.history')}</span>
+        </button>
 
-      <div class="sidebar-section-title">{$t('sidebar.sectionSystem')}</div>
+        <button
+          type="button"
+          id="tab-audit"
+          role="tab"
+          aria-selected={activeTab === 'audit'}
+          aria-controls="panel-audit"
+          tabindex={activeTab === 'audit' ? 0 : -1}
+          class="nav-tab-btn"
+          class:active={activeTab === 'audit'}
+          on:click={() => switchTab('audit')}
+        >
+          <span class="nav-tab-icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+            </svg>
+          </span>
+          <span class="nav-tab-label">{$t('nav.audit')}</span>
+        </button>
 
-      <button
-        type="button"
-        id="tab-settings"
-        role="tab"
-        aria-selected={activeTab === 'settings'}
-        aria-controls="panel-settings"
-        tabindex={activeTab === 'settings' ? 0 : -1}
-        class="nav-tab-btn"
-        class:active={activeTab === 'settings'}
-        on:click={() => switchTab('settings')}
-      >
-        <span class="nav-tab-icon" aria-hidden="true">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="3"></circle>
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-          </svg>
-        </span>
-        <span class="nav-tab-label">{$t('nav.settings')}</span>
-      </button>
+        <!-- SYSTEM SECTION -->
+        <div class="sidebar-section-title">{$t('sidebar.sectionSystem')}</div>
+
+        <button
+          type="button"
+          id="tab-settings"
+          role="tab"
+          aria-selected={activeTab === 'settings'}
+          aria-controls="panel-settings"
+          tabindex={activeTab === 'settings' ? 0 : -1}
+          class="nav-tab-btn"
+          class:active={activeTab === 'settings'}
+          on:click={() => switchTab('settings')}
+        >
+          <span class="nav-tab-icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="3"></circle>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+            </svg>
+          </span>
+          <span class="nav-tab-label">{$t('nav.settings')}</span>
+        </button>
       </div>
     </nav>
 
@@ -1116,8 +1153,19 @@
           {doctorReport?.overallStatus || 'Ready'}
         </span>
       </button>
+
       <div class="sidebar-app-version">
-        Flitnix {$t('sidebar.version')}
+        <span>Flitnix {appVersionInfo ? `v${appVersionInfo.version}` : $t('sidebar.version')}</span>
+        {#if updateAvailableBadge}
+          <button
+            type="button"
+            class="update-pill-badge"
+            on:click={() => { updateModalOpen = true }}
+            title="Update available"
+          >
+            Update
+          </button>
+        {/if}
       </div>
     </div>
   </aside>
@@ -1142,6 +1190,32 @@
           <span class="pulse-dot"></span>
           <span>{sessions.length > 0 ? $t('app.sessionActive') : $t('app.sessionInactive')}</span>
         </div>
+
+        <button
+          type="button"
+          class="theme-toggle-header-btn"
+          on:click={toggleThemeQuick}
+          title={settingsState.theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+          aria-label="Toggle light/dark theme"
+        >
+          {#if settingsState.theme === 'dark'}
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="5"></circle>
+              <line x1="12" y1="1" x2="12" y2="3"></line>
+              <line x1="12" y1="21" x2="12" y2="23"></line>
+              <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+              <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+              <line x1="1" y1="12" x2="3" y2="12"></line>
+              <line x1="21" y1="12" x2="23" y2="12"></line>
+              <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+              <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+            </svg>
+          {:else}
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+            </svg>
+          {/if}
+        </button>
       </div>
 
       <div class="sr-only" role="status" aria-live="polite" aria-atomic="true">
@@ -1150,7 +1224,7 @@
     </header>
 
     <div class="main-content-scroll">
-      <div class="main-content-inner">
+      <div class="main-content-inner content-limit-wrap">
         {#if errorText}
           <div class="alert danger" role="alert">
             <span>{errorText}</span>
@@ -1158,1381 +1232,175 @@
           </div>
         {/if}
 
+        {#if activeTab === 'personal'}
+          <div id="panel-personal" role="tabpanel" aria-labelledby="tab-personal" tabindex="0">
+            <PersonalTransferView
+              {sessions}
+              {pending}
+              {pendingBatches}
+              {batches}
+              {uploads}
+              {downloads}
+              {files}
+              {sources}
+              {interfaces}
+              {selectedIp}
+              {serverAddress}
+              {qrUrl}
+              {qrError}
+              {qrKey}
+              {starting}
+              {picking}
+              {pickingFolder}
+              {textMessages}
+              bind:textInput
+              {sendingText}
+              {isBusy}
+              {startSession}
+              {endSession}
+              {fetchQR}
+              {pickFiles}
+              {pickFolder}
+              {revoke}
+              {revokeSource}
+              {clearAllShared}
+              {decide}
+              {decideBatch}
+              {cancelUpload}
+              {cancelBatch}
+              {sendTextAction}
+              {clearTextAction}
+              {copyTextToClipboard}
+              {showToast}
+              {handleOpenDownloadFolder}
+              goToHistory={() => switchTab('history')}
+            />
+          </div>
+        {:else if activeTab === 'guest'}
+          <div id="panel-guest" role="tabpanel" aria-labelledby="tab-guest" tabindex="0">
+            <GuestDropBoxView
+              {guestRoomState}
+              {presets}
+              bind:selectedPresetId
+              bind:guestTitle
+              bind:guestDescription
+              bind:guestCollisionPolicy
+              bind:guestFormSchema
+              bind:guestDestDir
+              bind:guestDurationMinutes
+              {guestStarting}
+              {guestCopiedLink}
+              {exporting}
+              {exportSuccessMsg}
+              startRoom={startGuestRoomAction}
+              endRoom={endGuestRoomAction}
+              approveGuest={approveGuestAction}
+              rejectGuest={rejectGuestAction}
+              revokeGuest={revokeGuestAction}
+              approveUpload={approveGuestUploadAction}
+              rejectUpload={rejectGuestUploadAction}
+              pickDestination={chooseGuestDestination}
+              openFolder={openGuestFolderAction}
+              exportCollection={exportCollectionAction}
+              copyGuestLink={copyGuestLink}
+              {copyTextToClipboard}
+              {showToast}
+            />
+          </div>
+        {:else if activeTab === 'templates'}
+          <div id="panel-templates" role="tabpanel" aria-labelledby="tab-templates" tabindex="0">
+            <TemplatesView
+              {templates}
+              loading={loadingTemplates}
+              startFromTemplate={startFromTemplateAction}
+              duplicateTemplate={duplicateTemplateAction}
+              deleteTemplate={deleteTemplateAction}
+              {showToast}
+            />
+          </div>
+        {:else if activeTab === 'devices'}
+          <div id="panel-devices" role="tabpanel" aria-labelledby="tab-devices" tabindex="0">
+            <TrustedDevicesView
+              {trustedDevices}
+              {loadingDevices}
+              {pairingStatus}
+              {pairingActionLoading}
+              {rearmingLoading}
+              loadTrustedDevices={loadTrustedDevices}
+              removeDeviceAction={removeDeviceAction}
+              setDeviceAutoApproveAction={toggleDeviceAutoApprove}
+              approvePairingAction={handleApprovePairing}
+              denyPairingAction={handleDenyPairing}
+              reArmPairingAction={handleReArmPairing}
+              {showToast}
+            />
+          </div>
+        {:else if activeTab === 'history'}
+          <div id="panel-history" role="tabpanel" aria-labelledby="tab-history" tabindex="0">
+            <TransferHistoryView
+              {uploads}
+              {downloads}
+              {batches}
+              {handleOpenDownloadFolder}
+              {copyTextToClipboard}
+              {showToast}
+            />
+          </div>
+        {:else if activeTab === 'audit'}
+          <div id="panel-audit" role="tabpanel" aria-labelledby="tab-audit" tabindex="0">
+            <AuditHistoryView
+              {auditEntries}
+              totalEntries={auditTotal}
+              loading={auditLoading}
+              bind:filterType={auditFilterType}
+              bind:filterOutcome={auditFilterOutcome}
+              loadAuditLogs={loadAuditLogs}
+              clearAuditLogsAction={clearAuditAction}
+              {copyTextToClipboard}
+              {showToast}
+            />
+          </div>
+        {:else if activeTab === 'settings'}
+          <div id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" tabindex="0">
+            <SettingsView
+              bind:settingsState
+              {interfaces}
+              {appVersionInfo}
+              {updateAvailableBadge}
+              {savingSettings}
+              {settingsSavedAlert}
+              {settingsError}
+              {sleepInhibition}
+              {handleSelectDownloadDir}
+              {handleOpenDownloadFolder}
+              {handleSaveSettings}
+              {handleResetSettings}
+              {applyTheme}
+              openUpdateModal={() => { updateModalOpen = true }}
+            />
+          </div>
+        {/if}
+      </div>
+    </div>
+  </div>
+
   <!-- Connection Doctor Modal -->
-  {#if doctorOpen}
-    <div
-      class="modal-overlay"
-      role="presentation"
-      on:click|self={() => doctorOpen = false}
-    >
-      <div
-        class="doctor-dialog"
-        role="dialog"
-        aria-labelledby="doctor-title"
-        aria-modal="true"
-        use:focusTrap={{ onEscape: () => doctorOpen = false }}
-      >
-        <div class="doctor-header">
-          <div style="display: flex; align-items: center; gap: 10px;">
-            <span class="doctor-dot" class:warn={doctorReport?.overallStatus === 'WARNING'} class:fail={doctorReport?.overallStatus === 'FAIL'}></span>
-            <h2 id="doctor-title">{$t('doctor.title')}</h2>
-          </div>
-          <button class="button ghost small" on:click={() => doctorOpen = false} aria-label={$t('app.close')}>✕</button>
-        </div>
-
-        <div class="doctor-body">
-          {#if doctorLoading}
-            <div class="empty" style="text-align: center;">{$t('doctor.scanning')}</div>
-          {:else if doctorError}
-            <div class="alert"><span>{doctorError}</span></div>
-          {:else if doctorReport}
-            <div class="doctor-banner {doctorReport.overallStatus.toLowerCase()}">
-              <strong>Network Diagnostic: {doctorReport.overallStatus}</strong>
-              <p>{doctorReport.summary}</p>
-            </div>
-
-            {#each doctorReport.items as item (item.id)}
-              <div class="doctor-check-item {item.status.toLowerCase()}">
-                <div class="doctor-check-head">
-                  <strong>{item.title}</strong>
-                  <span class="badge {item.status.toLowerCase()}">{item.status}</span>
-                </div>
-                <p class="doctor-check-msg">{item.message}</p>
-                {#if item.remediation}
-                  <div class="doctor-remediation">
-                    <strong>{$t('doctor.recommendedAction')}</strong> {item.remediation}
-                  </div>
-                {/if}
-              </div>
-            {/each}
-          {/if}
-        </div>
-
-        <div class="doctor-footer">
-          <div style="display: flex; gap: 8px;">
-            <button class="button secondary small" on:click={runDoctor} disabled={doctorLoading}>
-              {doctorLoading ? $t('doctor.checking') : $t('doctor.runDiagnostics')}
-            </button>
-            <button class="button ghost small" on:click={regenerateQRAction} disabled={!sessions.length && (!guestRoomState || !guestRoomState.room)}>
-              {$t('doctor.regenerateQR')}
-            </button>
-          </div>
-          <button class="button ghost small" on:click={() => doctorOpen = false}>{$t('app.close')}</button>
-        </div>
-      </div>
-    </div>
-  {/if}
-
-  <!-- Incoming Pairing Modal -->
-  {#if pairingStatus?.requiresApproval && pairingStatus?.requestId}
-    <div
-      class="modal-overlay"
-      role="presentation"
-      on:click|self={() => pairingStatus?.requestId && handleDenyPairing(pairingStatus.requestId)}
-    >
-      <div
-        class="pairing-dialog"
-        role="dialog"
-        aria-labelledby="pairing-title"
-        aria-modal="true"
-        use:focusTrap={{ onEscape: () => pairingStatus?.requestId && handleDenyPairing(pairingStatus.requestId) }}
-      >
-        <div class="pairing-header">
-          <div style="display: flex; align-items: center; gap: 10px;">
-            <span class="doctor-dot" style="background: var(--primary);"></span>
-            <h2 id="pairing-title">{$t('devices.pairingModalTitle')}</h2>
-          </div>
-          <button
-            type="button"
-            class="button ghost small"
-            on:click={() => pairingStatus?.requestId && handleDenyPairing(pairingStatus.requestId)}
-            disabled={pairingActionLoading}
-            aria-label={$t('app.close')}
-          >✕</button>
-        </div>
-
-        <div class="pairing-body">
-          <p class="muted" style="margin: 0;">
-            {$t('devices.pairingModalDesc')}
-          </p>
-
-          <div class="pairing-sas-card">
-            <span class="pairing-sas-label">{$t('devices.pairingSasLabel')}</span>
-            <span class="pairing-sas-value">{pairingStatus.sas || '------'}</span>
-            <span style="font-size: 12px; color: var(--text-tertiary); margin-top: 6px;">
-              {$t('devices.pairingSasHelp')}
-            </span>
-          </div>
-
-          <table class="pairing-details-table">
-            <tbody>
-              <tr>
-                <td>{$t('devices.deviceName')}:</td>
-                <td><strong>{pairingStatus.deviceName || 'Unknown Device'}</strong></td>
-              </tr>
-              <tr>
-                <td>{$t('devices.fingerprint')}:</td>
-                <td><code>{pairingStatus.clientId ? pairingStatus.clientId.slice(0, 16) + '…' : '—'}</code></td>
-              </tr>
-              {#if pairingStatus.remainingSeconds !== undefined}
-                <tr>
-                  <td>Expires in:</td>
-                  <td><span class="badge warning">{$t('devices.pairingExpiresIn', { seconds: pairingStatus.remainingSeconds })}</span></td>
-                </tr>
-              {/if}
-            </tbody>
-          </table>
-
-          <div class="pairing-notice">
-            {$t('devices.autoApproveNotice')}
-          </div>
-        </div>
-
-        <div class="pairing-footer">
-          <button
-            type="button"
-            class="button ghost"
-            on:click={() => pairingStatus?.requestId && handleDenyPairing(pairingStatus.requestId)}
-            disabled={pairingActionLoading}
-          >
-            {$t('devices.deny')}
-          </button>
-          <button
-            type="button"
-            class="button primary"
-            on:click={() => pairingStatus?.requestId && handleApprovePairing(pairingStatus.requestId)}
-            disabled={pairingActionLoading}
-          >
-            {pairingActionLoading ? $t('devices.processing') : $t('devices.allowAndPair')}
-          </button>
-        </div>
-      </div>
-    </div>
-  {/if}
-
-  <!-- Device Revocation Confirmation Modal -->
-  {#if deviceToRevoke}
-    <div
-      class="modal-overlay"
-      role="presentation"
-      on:click|self={() => deviceToRevoke = null}
-    >
-      <div
-        class="confirm-dialog"
-        role="dialog"
-        aria-labelledby="revoke-modal-title"
-        aria-modal="true"
-        use:focusTrap={{ onEscape: () => deviceToRevoke = null }}
-      >
-        <div class="confirm-header">
-          <div style="display: flex; align-items: center; gap: 10px;">
-            <div class="confirm-icon danger">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
-              </svg>
-            </div>
-            <h3 id="revoke-modal-title">{$t('devices.revokeConfirmTitle')}</h3>
-          </div>
-          <button type="button" class="button ghost small" on:click={() => deviceToRevoke = null} aria-label={$t('app.close')}>✕</button>
-        </div>
-        <div class="confirm-body">
-          <p class="muted" style="margin: 0; font-size: 14px;">
-            {$t('devices.revokeConfirmMsg', { name: deviceToRevoke.name })}
-          </p>
-          <div class="confirm-device-preview">
-            <strong>{deviceToRevoke.name}</strong>
-            <code>{deviceToRevoke.id}</code>
-          </div>
-        </div>
-        <div class="confirm-footer">
-          <button type="button" class="button ghost" on:click={() => deviceToRevoke = null} disabled={revokingDevice}>
-            {$t('devices.cancel')}
-          </button>
-          <button type="button" class="button danger" on:click={confirmRevokeDevice} disabled={revokingDevice}>
-            {revokingDevice ? $t('devices.processing') : $t('devices.confirmRevoke')}
-          </button>
-        </div>
-      </div>
-    </div>
-  {/if}
-
-  <!-- TAB 1: PERSONAL TRANSFER -->
-  {#if activeTab === 'personal'}
-    <div id="panel-personal" role="tabpanel" aria-labelledby="tab-personal" tabindex="0">
-      <section class="connection panel">
-      <div class="section-heading"><div><span class="eyebrow connection-eyebrow"><span class="network-glyph" aria-hidden="true">⌁</span> {$t('connection.eyebrow')}</span><h2>{$t('connection.readyToPair')}</h2></div><span class="pill">{sessions.length ? $t('app.sessionActive') : $t('connection.ready')}</span></div>
-      <div class="connection-grid">
-        <div>
-          <span class="connection-label">{$t('connection.currentNetwork')}</span>
-          {#if currentNetwork}
-            <div class="network-identity">
-              <span class="network-dot" aria-hidden="true"></span>
-              <div><strong>{currentNetwork.friendlyName || `${currentNetwork.type || 'Network'} · Name unavailable`}</strong><span>{currentNetwork.type || 'Network'} · Connected{currentNetwork.friendlyNameSource === 'Connection profile' ? ' · Profile name' : ''}</span></div>
-            </div>
-            <button class="button ghost change-network" on:click={() => networkChooserOpen = !networkChooserOpen}>
-              {networkChooserOpen ? $t('connection.hideNetworks') : $t('connection.changeNetwork')}
-            </button>
-          {:else if loadingIfaces}
-            <div class="network-identity"><span class="network-dot unavailable"></span><div><strong>{$t('connection.scanning')}</strong><span>{$t('connection.scanningSub')}</span></div></div>
-          {:else if interfaces.length > 1}
-            <div class="network-identity"><span class="network-dot unavailable"></span><div><strong>{$t('connection.chooseNetwork')}</strong><span>{$t('connection.multipleConnections')}</span></div></div>
-            <button class="button ghost change-network" on:click={() => networkChooserOpen = true}>{$t('connection.changeNetwork')}</button>
-          {:else}
-            <div class="network-identity"><span class="network-dot unavailable"></span><div><strong>{$t('connection.noNetwork')}</strong><span>{$t('connection.connectPrompt')}</span></div></div>
-          {/if}
-          {#if networkChooserOpen || interfaces.length > 1}
-            <div class="network-picker">
-              <label for="interface">{$t('connection.chooseNetwork')}</label>
-              <select id="interface" bind:value={selectedIp} aria-label={$t('connection.chooseNetwork')}>
-                <option value="" disabled>{$t('connection.selectNetworkPlaceholder')}</option>
-                {#each interfaces as itf (itf.ip)}
-                  <option value={itf.ip} disabled={itf.suitableForQR === false}>
-                    {itf.friendlyName || `${itf.type || 'Network'} · Name unavailable`} · {itf.family || 'IPv4'} ({itf.ip})
-                    {#if itf.suitableForQR === false} — {itf.warning || 'Not suitable for phone QR'}{/if}
-                  </option>
-                {/each}
-              </select>
-              <button class="button ghost" on:click={refreshNetwork} disabled={loadingIfaces}>{loadingIfaces ? $t('connection.refreshing') : $t('connection.rescan')}</button>
-            </div>
-          {/if}
-          {#if currentNetwork}
-            <details class="network-details">
-              <summary>{$t('connection.details')}</summary>
-              <dl>
-                <div><dt>{$t('connection.interface')}</dt><dd>{currentNetwork.name || 'Unavailable'}</dd></div>
-                <div><dt>{$t('connection.addressFamily')}</dt><dd>{currentNetwork.family || 'IPv4'}</dd></div>
-                <div><dt>{$t('connection.ipAddress')}</dt><dd>{currentNetwork.ip || 'Unavailable'}</dd></div>
-                <div><dt>{$t('connection.prefixCidr')}</dt><dd>{currentNetwork.cidr || 'Unavailable'}</dd></div>
-                <div><dt>{$t('connection.connectionType')}</dt><dd>{currentNetwork.type || 'Network'}</dd></div>
-                <div><dt>{$t('connection.profileName')}</dt><dd>{currentNetwork.connectionName || 'Unavailable'}</dd></div>
-                <div><dt>{$t('connection.suitableForQR')}</dt><dd>{currentNetwork.suitableForQR !== false ? $t('connection.suitableYes') : $t('connection.suitableNo')}</dd></div>
-                {#if currentNetwork.warning}<div><dt>{$t('connection.notice')}</dt><dd>{currentNetwork.warning}</dd></div>{/if}
-                <div><dt>{$t('connection.nameSource')}</dt><dd>{currentNetwork.friendlyNameSource || 'Unavailable'}</dd></div>
-                <div><dt>{$t('connection.metadata')}</dt><dd>{currentNetwork.metadataAvailable ? 'Available' : 'Name unavailable'}</dd></div>
-              </dl>
-            </details>
-          {/if}
-          {#if ifaceError}<p class="error-text">{ifaceError}</p>{/if}
-        </div>
-        {#if sessions.length && qrUrl}
-          <div class="pairing">
-            <img class="qr" src={qrUrl} alt="Pairing QR code" />
-            <div style="flex: 1; min-width: 0;">
-              <strong>{$t('connection.scanToConnect')}</strong>
-              <p class="muted" style="margin: 4px 0 8px;">{$t('connection.incomingApprovalNotice')}</p>
-              <div class="pairing-url-box">
-                <span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                  http://{hostPort()}
-                </span>
-                <button
-                  type="button"
-                  class="button ghost small"
-                  style="padding: 3px 8px; font-size: 11px;"
-                  on:click={copyPersonalLink}
-                >
-                  {personalCopiedLink ? '✓ Copied' : 'Copy'}
-                </button>
-              </div>
-              <div class="button-row">
-                <button class="button ghost small" on:click={() => fetchQR(qrKey)}>{$t('connection.regenerate')}</button>
-                <button class="button danger small" on:click={() => endSession(qrKey)} disabled={isBusy(`end:${qrKey}`)}>{$t('connection.stopSession')}</button>
-              </div>
-            </div>
-          </div>
-        {:else if sessions.length}
-          <div class="empty">{qrError || $t('connection.preparingQR')}</div>
-        {:else}
-          <div class="empty-state">
-            <div class="empty-state-icon">📡</div>
-            <div class="empty-state-title">{$t('connection.readyToPair')}</div>
-            <div class="empty-state-desc">{$t('connection.chooseInterfacePrompt')}</div>
-            <div style="margin-top: 14px;">
-              <button
-                class="button primary large"
-                on:click={startSession}
-                disabled={starting || (interfaces.length > 1 && !selectedIp)}
-              >
-                {starting ? $t('connection.starting') : $t('connection.startSession')}
-              </button>
-            </div>
-          </div>
-        {/if}
-      </div>
-      {#if sessions.length}
-        <div class="notice">{$t('connection.plainHttpNotice')}</div>
-      {/if}
-    </section>
-
-    <div class="workflow-grid">
-      <section class="panel workflow drop-target">
-        <div class="section-heading"><div><span class="eyebrow accent">{$t('workflow.eyebrow')}</span><h2>{$t('workflow.sharedFiles')}</h2></div><span class="count">{files.length}</span></div>
-        <p class="muted">{$t('workflow.sharedFilesDesc')}</p>
-        {#each files as f (f.id)}
-          <div class="file-row"><div class="file-icon">↗</div><div class="grow"><strong>{f.name}</strong><span>{formatBytes(f.size)}</span></div><button class="button danger small" on:click={() => revoke(f.id)} disabled={isBusy(`revoke:${f.id}`)}>{$t('workflow.remove')}</button></div>
-        {:else}<div class="empty">{$t('workflow.noSharedFiles')}</div>{/each}
-        <div class="button-row"><button class="button secondary" on:click={pickFiles} disabled={picking || pickingFolder}>{picking ? $t('workflow.openingPicker') : $t('workflow.chooseFiles')}</button><button class="button ghost" on:click={pickFolder} disabled={picking || pickingFolder}>{pickingFolder ? $t('workflow.readingFolder') : $t('workflow.chooseFolder')}</button></div>
-        <div class="drop-hint">{$t('workflow.dropHint')}</div>
-        {#each sources.filter((source) => source.kind === 'folder') as source (source.id)}
-          <div class="file-row source-row"><div class="file-icon">▣</div><div class="grow"><strong>{source.rootName || source.name}</strong><span>{$t('workflow.folderItemSummary', { count: source.itemCount, size: formatBytes(source.totalBytes) })}</span></div><button class="button danger small" on:click={() => revokeSource(source.id)} disabled={isBusy(`revoke-source:${source.id}`)}>{$t('workflow.remove')}</button></div>
-        {/each}
-      </section>
-
-      <section class="panel workflow">
-        <div class="section-heading"><div><span class="eyebrow blue">{$t('workflow.receiveEyebrow')}</span><h2>{$t('workflow.inboxTitle')}</h2></div><span class="count">{pending.length + pendingBatches.length}</span></div>
-        <p class="muted">{$t('workflow.inboxDesc')}</p>
-        {#each pending as u (u.id)}
-          <div class="request-row"><div class="file-icon">↙</div><div class="grow"><strong>{u.name}</strong><span>{formatBytes(u.size)} · {$t('workflow.waitingApproval')}</span></div><div class="button-row"><button class="button primary small" on:click={() => decide(u, true)} disabled={isBusy(`approve:${u.id}`)}>{$t('workflow.allow')}</button><button class="button danger small" on:click={() => decide(u, false)} disabled={isBusy(`reject:${u.id}`)}>{$t('workflow.deny')}</button></div></div>
-        {/each}
-        {#each pendingBatches as b (b.id)}
-          <div class="request-row"><div class="file-icon">↙</div><div class="grow"><strong>Batch · {batchName(b)}</strong><span>{formatBytes(b.declaredTotalBytes)} · {$t('workflow.waitingApproval')}</span><small>{b.items.map((item) => item.relativePath || item.displayName).join(', ')}</small></div><div class="button-row"><button class="button primary small" on:click={() => decideBatch(b, true)} disabled={isBusy(`approve-batch:${b.id}`)}>{$t('workflow.allowBatch')}</button><button class="button danger small" on:click={() => decideBatch(b, false)} disabled={isBusy(`reject-batch:${b.id}`)}>{$t('workflow.deny')}</button><button class="text-button" on:click={() => cancelBatch(b)} disabled={isBusy(`cancel-batch:${b.id}`)}>{$t('workflow.cancel')}</button></div></div>
-        {/each}
-        {#if !pending.length && !pendingBatches.length}<div class="empty">{$t('workflow.noPending')}</div>{/if}
-      </section>
-    </div>
-
-    <!-- Quick Text & Link Sharing Panel -->
-    <section class="panel">
-      <div class="section-heading">
-        <div>
-          <span class="eyebrow">{$t('quickText.eyebrow')}</span>
-          <h2>{$t('quickText.notesTitle')}</h2>
-        </div>
-        {#if textMessages.length > 0}
-          <button class="button ghost small" on:click={clearTextAction}>{$t('quickText.clearHistory')}</button>
-        {/if}
-      </div>
-
-      <div class="text-transfer-panel">
-        <div class="text-compose-row">
-          <textarea
-            class="text-textarea"
-            placeholder={$t('quickText.placeholder')}
-            bind:value={textInput}
-            maxlength="65536"
-            disabled={!sessions.length}
-          ></textarea>
-          <div class="text-compose-footer">
-            <span class="muted" style="font-size: 12.5px;">{$t('quickText.charsLimit', { count: textInput.length })}</span>
-            <button
-              class="button primary small"
-              on:click={sendTextAction}
-              disabled={!textInput.trim() || sendingText || !sessions.length}
-            >
-              {sendingText ? $t('quickText.sending') : $t('quickText.send')}
-            </button>
-          </div>
-        </div>
-
-        {#if !sessions.length}
-          <div class="empty compact">{$t('quickText.noSessionHint')}</div>
-        {:else if textMessages.length === 0}
-          <div class="empty compact">{$t('quickText.noMessages')}</div>
-        {:else}
-          <div class="text-feed">
-            {#each textMessages as msg (msg.id)}
-              <div class="text-card">
-                <div class="text-card-head">
-                  <span class="text-sender-badge {msg.sender}">{msg.sender}</span>
-                  <span>{fmtTime(msg.createdAt)}</span>
-                </div>
-                <div class="text-content-body">{msg.content}</div>
-                <div class="text-card-actions">
-                  <button class="button ghost small" on:click={() => copyTextToClipboard(msg.content)}>{$t('quickText.copy')}</button>
-                  {#if msg.isLink && msg.url}
-                    <button class="button secondary small" on:click={() => window.open(msg.url, '_blank', 'noopener,noreferrer')}>{$t('quickText.openLink')}</button>
-                  {/if}
-                </div>
-              </div>
-            {/each}
-          </div>
-        {/if}
-      </div>
-    </section>
-
-    <!-- Live Telemetry -->
-    <section class="panel">
-      <div class="section-heading"><div><span class="eyebrow">{$t('telemetry.eyebrow')}</span><h2>{$t('telemetry.activeTransfers')}</h2></div><span class="pill">{$t('telemetry.activeCount', { count: uploads.filter(activeUpload).length + downloads.filter(activeDownload).length + batches.filter(activeBatch).length })}</span></div>
-
-      {#if uploads.some(activeUpload) || downloads.some(activeDownload) || batches.some(activeBatch)}
-        {#if sleepInhibition?.active}
-          <div class="sleep-inhibition-notice" role="status">
-            <div class="sleep-inhibition-head">
-              <span class="sleep-inhibition-badge active">● {$t('telemetry.desktopSleepActive')}</span>
-              {#if sleepInhibition.holders > 0}
-                <span class="sleep-inhibition-holders">{$t('telemetry.desktopSleepHolders', { count: sleepInhibition.holders })}</span>
-              {/if}
-            </div>
-            <p class="sleep-inhibition-desc">{$t('telemetry.desktopSleepActiveDesc')}</p>
-          </div>
-        {:else if sleepInhibition?.error}
-          <div class="sleep-inhibition-notice warning" role="alert">
-            <div class="sleep-inhibition-head">
-              <span class="sleep-inhibition-badge warning">▲ {$t('telemetry.desktopSleepWarning')}</span>
-            </div>
-            <p class="sleep-inhibition-desc">{$t('telemetry.desktopSleepWarningDesc', { error: sleepInhibition.error })}</p>
-          </div>
-        {/if}
-      {/if}
-      {#each uploads.filter(activeUpload) as u (u.id)}
-        <div class="transfer">
-          <div class="transfer-head">
-            <div>
-              <strong>↙ {u.name}</strong>
-              <span>
-                Phone → computer · {formatBytes(u.uploaded)} of {formatBytes(u.size)}
-                {#if u.state === 'uploading'}
-                  · {speed(u.speed)}
-                  {#if calcEta(u.uploaded, u.size, u.speed)}
-                    · ETA {calcEta(u.uploaded, u.size, u.speed)}
-                  {/if}
-                {/if}
-              </span>
-            </div>
-            <b>{u.state === 'uploading' ? `${percent(u.uploaded, u.size)}%` : u.state}</b>
-          </div>
-          {#if u.state === 'uploading'}<div class="bar"><i style={`width:${percent(u.uploaded, u.size)}%`}></i></div>{/if}
-          <div class="transfer-foot">
-            <span>{u.state === 'approved' ? 'Approved — waiting for phone' : u.state === 'pending' ? 'Awaiting approval' : 'Receiving bytes'}</span>
-            {#if ['approved', 'uploading'].includes(u.state)}<button class="text-button" on:click={() => cancelUpload(u.id)}>{$t('telemetry.cancel')}</button>{/if}
-          </div>
-        </div>
-      {/each}
-
-      {#each batches.filter(activeBatch) as b (b.id)}
-        <div class="transfer">
-          <div class="transfer-head">
-            <div><strong>↙ Batch · {batchName(b)}</strong><span>Phone → computer · {doneItems(b)} of {b.totalItemCount} files · {formatBytes(b.transferredBytes)} of {formatBytes(b.declaredTotalBytes)}</span></div>
-            <b>{percent(b.transferredBytes, b.declaredTotalBytes)}%</b>
-          </div>
-          <div class="bar"><i style={`width:${percent(b.transferredBytes, b.declaredTotalBytes)}%`}></i></div>
-          <div class="transfer-foot">
-            <span>{currentItem(b) ? `Receiving ${currentItem(b)?.relativePath || currentItem(b)?.displayName}` : 'Approved — waiting for the phone to send the next file'}</span>
-            <button class="text-button" on:click={() => cancelBatch(b)} disabled={isBusy(`cancel-batch:${b.id}`)}>{$t('telemetry.cancel')}</button>
-          </div>
-        </div>
-      {/each}
-
-      {#each downloads.filter(activeDownload) as d (d.id)}
-        <div class="transfer">
-          <div class="transfer-head">
-            <div>
-              <strong>↗ {d.name}</strong>
-              <span>
-                Computer → phone · {d.kind === 'archive' ? 'ZIP archive' : 'Individual file'} · {formatBytes(d.written)} of {formatBytes(d.size)} · {speed(d.speed)}
-                {#if calcEta(d.written, d.size, d.speed)}
-                  · ETA {calcEta(d.written, d.size, d.speed)}
-                {/if}
-              </span>
-            </div>
-            <b>{d.state === 'starting' || d.state === 'finalizing' ? d.state : `${percent(d.written, d.size)}%`}</b>
-          </div>
-          <div class="bar"><i style={`width:${percent(d.written, d.size)}%`}></i></div>
-          <div class="transfer-foot">
-            <span>{d.state === 'starting' ? 'Preparing server-side transfer' : d.state === 'finalizing' ? 'Finalizing server-side transfer' : 'Sending to the phone browser'}</span>
-            <span>Browser save completion is not confirmed by the desktop.</span>
-          </div>
-        </div>
-      {/each}
-
-      {#if !uploads.some(activeUpload) && !downloads.some(activeDownload) && !batches.some(activeBatch)}
-        <div class="empty">{$t('telemetry.noActiveTransfers')}</div>
-      {/if}
-    </section>
-
-    <!-- History -->
-    <section class="panel history">
-      <div class="section-heading"><div><span class="eyebrow">{$t('history.eyebrow')}</span><h2>{$t('history.title')}</h2></div><span class="muted">{$t('history.sessionHistory')}</span></div>
-      {#each batches.filter(finishedBatch).slice(-12).reverse() as b (b.id)}
-        <div class="history-row">
-          <span class="history-icon">↙</span>
-          <div class="grow">
-            <strong>Batch · {batchName(b)}</strong>
-            <span>{doneItems(b)} of {b.totalItemCount} files · {formatBytes(b.transferredBytes)} of {formatBytes(b.declaredTotalBytes)} · {fmtTime(b.createdAt)}</span>
-            {#if b.items && b.items.some(i => i.sha256)}
-              <div style="margin-top: 4px; display: flex; flex-wrap: wrap; gap: 4px;">
-                {#each b.items.filter(i => i.sha256) as it}
-                  <button
-                    type="button"
-                    class="button ghost small"
-                    style="padding: 2px 4px; font-size: 10px; font-family: monospace; color: var(--text-muted);"
-                    title="Click to copy SHA256 for {it.displayName}"
-                    on:click={() => copyTextToClipboard(it.sha256 || '')}
-                  >
-                    {it.displayName}: {(it.sha256 || '').slice(0, 8)}…
-                  </button>
-                {/each}
-              </div>
-            {/if}
-            {#if b.error}<small class="error-text" style="display:block; margin-top:2px;">{b.error}</small>{/if}
-          </div>
-          <span class="badge {b.state}">{b.state}</span>
-        </div>
-      {/each}
-
-      {#each [...uploads.filter((u) => !activeUpload(u)), ...downloads.filter((d) => !activeDownload(d))].slice(-12).reverse() as item (item.id)}
-        <div class="history-row">
-          <span class="history-icon">{'fileId' in item ? '↗' : '↙'}</span>
-          <div class="grow">
-            <strong>{item.name}</strong>
-            <span>{'fileId' in item ? `${item.kind === 'archive' ? 'ZIP archive' : 'Individual file'} · ` : ''}{formatBytes('fileId' in item ? item.written : item.uploaded)} of {formatBytes(item.size)} · {fmtTime(item.created)}</span>
-            {#if 'sha256' in item && item.sha256}
-              <div style="margin-top: 2px;">
-                <button
-                  type="button"
-                  class="button ghost small"
-                  style="padding: 2px 4px; font-size: 11px; font-family: monospace; color: var(--text-muted);"
-                  title="Click to copy SHA256 hash"
-                  on:click={() => copyTextToClipboard(item.sha256 || '')}
-                >
-                  SHA256: {item.sha256.slice(0, 12)}…
-                </button>
-              </div>
-            {/if}
-            {#if 'reason' in item && item.reason}<small class="error-text" style="display:block; margin-top:2px;">{item.reason}</small>{/if}
-          </div>
-          <span class="badge {item.state}">{item.state === 'sent' ? 'sent to browser' : item.state}</span>
-        </div>
-      {/each}
-
-      {#if !batches.some(finishedBatch) && !uploads.some((u) => !activeUpload(u)) && !downloads.some((d) => !activeDownload(d))}
-        <div class="empty">{$t('history.noCompleted')}</div>
-      {/if}
-      </section>
-    </div>
-
-  <!-- TAB 2: GUEST DROP BOX -->
-  {:else if activeTab === 'guest'}
-    <div id="panel-guest" role="tabpanel" aria-labelledby="tab-guest" tabindex="0">
-    {#if !guestRoomState?.room || guestRoomState.room.state === 'ended' || guestRoomState.room.state === 'expired' || guestRoomState.room.state === 'Ended'}
-      <!-- Room Setup Card -->
-      <section class="panel">
-        <div class="section-heading">
-          <div>
-            <span class="eyebrow accent">Guest Drop Box</span>
-            <h2>Collect files from any phone</h2>
-          </div>
-          <span class="pill">Inactive</span>
-        </div>
-        <p class="muted">
-          Start a temporary drop box room. Anyone in the room scans the QR code with their phone camera to upload files without installing an app. Files are saved in isolated guest subfolders.
-        </p>
-
-        <div style="margin-top: 18px; display: grid; gap: 16px;">
-          <!-- Presets -->
-          <div>
-            <span class="connection-label">Collection Presets</span>
-            <div class="guest-presets" style="margin-top: 6px;">
-              {#each presets as p (p.id)}
-                <button
-                  class="guest-preset-btn"
-                  class:active={selectedPresetId === p.id}
-                  on:click={() => applyPreset(p)}
-                >
-                  {p.name}
-                </button>
-              {/each}
-            </div>
-          </div>
-
-          <!-- Title and Description -->
-          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
-            <div>
-              <label for="room-title-input" class="connection-label">Collection Title</label>
-              <input
-                id="room-title-input"
-                type="text"
-                class="text-input"
-                style="width: 100%; margin-top: 4px;"
-                bind:value={guestTitle}
-                placeholder="e.g. Classroom Assignment Submission"
-              />
-            </div>
-            <div>
-              <label for="room-policy-select" class="connection-label">Collision Policy</label>
-              <select
-                id="room-policy-select"
-                class="text-input"
-                style="width: 100%; margin-top: 4px;"
-                bind:value={guestCollisionPolicy}
-              >
-                <option value="preserve_both">Preserve Both (auto-number variants: file (1).ext)</option>
-                <option value="reject">Strict Reject (reject duplicate file names)</option>
-              </select>
-            </div>
-          </div>
-
-          <div>
-            <label for="room-desc-input" class="connection-label">Instructions / Guidelines for Guests</label>
-            <textarea
-              id="room-desc-input"
-              class="text-input"
-              style="width: 100%; margin-top: 4px; resize: vertical;"
-              rows="2"
-              bind:value={guestDescription}
-              placeholder="Instructions displayed on guest phones..."
-            ></textarea>
-          </div>
-
-          {#if guestFormSchema && guestFormSchema.length > 0}
-            <div class="meta-chip">
-              <span>Configured Submission Fields: <strong>{guestFormSchema.map(f => f.label + (f.required ? ' *' : '')).join(', ')}</strong></span>
-            </div>
-          {/if}
-
-          <div>
-            <span class="connection-label">Destination Folder</span>
-            <div style="display: flex; align-items: center; gap: 12px; margin-top: 6px;">
-              <span class="guest-dest-path">{guestDestDir || receiveDir || 'Downloads/Flitnix'}</span>
-              <button class="button ghost small" on:click={chooseGuestDestination}>Change Folder</button>
-            </div>
-            <p class="muted" style="margin-top: 4px; font-size: 12.5px;">
-              Files will be stored under <code>&lt;Folder&gt;/Flitnix Guest Drop/&lt;Room&gt;/&lt;Guest&gt;/</code>.
-            </p>
-          </div>
-
-          <div>
-            <span class="connection-label">Room Duration Presets</span>
-            <div class="guest-presets" style="margin-top: 6px;">
-              <button class="guest-preset-btn" class:active={guestDurationMinutes === 15} on:click={() => guestDurationMinutes = 15}>15 Minutes</button>
-              <button class="guest-preset-btn" class:active={guestDurationMinutes === 30} on:click={() => guestDurationMinutes = 30}>30 Minutes</button>
-              <button class="guest-preset-btn" class:active={guestDurationMinutes === 60} on:click={() => guestDurationMinutes = 60}>1 Hour</button>
-              <button class="guest-preset-btn" class:active={guestDurationMinutes === 120} on:click={() => guestDurationMinutes = 120}>2 Hours</button>
-              <button class="guest-preset-btn" class:active={guestDurationMinutes === 240} on:click={() => guestDurationMinutes = 240}>4 Hours</button>
-            </div>
-          </div>
-
-          <div class="button-row">
-            <button class="button primary" on:click={startGuestRoomAction} disabled={guestStarting}>
-              {guestStarting ? 'Creating Room…' : 'Start Guest Drop Box Room'}
-            </button>
-          </div>
-        </div>
-      </section>
-    {:else}
-      <!-- Active Room Dashboard -->
-      <section class="panel">
-        <div class="section-heading">
-          <div>
-            <span class="eyebrow accent">Active Room · {guestRoomState.room.id}</span>
-            <h2>{guestRoomState.room.title || 'Guest Drop Box'}</h2>
-          </div>
-          <div style="display: flex; align-items: center; gap: 10px;">
-            <span class="pill" style="border-color: var(--teal); color: #7ff0df;">
-              {guestRoomState.room.state} · {fmtRemaining(guestRoomState.room.expiresAt)}
-            </span>
-            <button class="button danger small" on:click={endGuestRoomAction} disabled={isBusy('end-guest-room')}>
-              End Room
-            </button>
-          </div>
-        </div>
-
-        {#if guestRoomState.room.description}
-          <p class="muted" style="margin-top: 4px;">{guestRoomState.room.description}</p>
-        {/if}
-
-        <div class="collection-meta-bar">
-          <span class="meta-chip">Collision Policy: <strong>{guestRoomState.room.collisionPolicy === 'reject' ? 'Strict Reject' : 'Preserve Both'}</strong></span>
-          {#if guestRoomState.room.deadline}
-            <span class="meta-chip">Deadline: <strong>{fmtTime(guestRoomState.room.deadline)}</strong></span>
-          {/if}
-          <div style="margin-left: auto; display: flex; align-items: center; gap: 10px;">
-            <button class="button primary small" on:click={exportCollectionAction} disabled={exporting}>
-              {exporting ? 'Exporting ZIP…' : 'Export Collection (ZIP)'}
-            </button>
-            {#if exportSuccessMsg}
-              <span style="color: #34d399; font-size: 12px; font-weight: 600;">{exportSuccessMsg}</span>
-            {/if}
-          </div>
-        </div>
-
-        <div class="guest-room-active-grid" style="margin-top: 14px;">
-          <div class="guest-qr-card">
-            {#if guestRoomState.room.qrDataUrl}
-              <img class="guest-qr-img" src={guestRoomState.room.qrDataUrl} alt="Guest Drop Box QR Code" />
-            {/if}
-            <div>
-              <strong>Scan to Drop Files</strong>
-              <p class="muted" style="margin: 4px 0 8px;">Upload directly from phone browser.</p>
-              <button class="button secondary small" on:click={() => copyGuestLink(guestRoomState?.room?.inviteUrl)}>
-                {guestCopiedLink ? 'Copied Link!' : 'Copy Invite Link'}
-              </button>
-            </div>
-          </div>
-
-          <div>
-            <span class="connection-label">Storage Destination</span>
-            <div style="display: flex; align-items: center; gap: 10px; margin-top: 6px;">
-              <span class="guest-dest-path">{guestRoomState.room.roomFolder}</span>
-              <button class="button ghost small" on:click={openGuestFolderAction}>Open Folder</button>
-            </div>
-            <p class="muted" style="margin-top: 6px; font-size: 12.5px;">
-              Each guest is isolated to their own named subfolder. Host approval is required for all uploads.
-            </p>
-          </div>
-        </div>
-      </section>
-
-      <!-- Roster / Expected Participants Section -->
-      <section class="panel workflow" style="margin-top: 14px;">
-        <div class="section-heading">
-          <div>
-            <span class="eyebrow blue">Submission Tracking</span>
-            <h2>Expected Participants Roster</h2>
-          </div>
-          <span class="count">{guestRoomState.roster?.length ?? 0}</span>
-        </div>
-
-        <!-- Add Participant Row -->
-        <div class="form-input-row" style="margin: 10px 0 14px;">
-          <input
-            type="text"
-            class="text-input"
-            bind:value={newParticipantName}
-            placeholder="Participant Name (e.g. John Doe)"
-          />
-          <input
-            type="text"
-            class="text-input"
-            bind:value={newParticipantIdentifier}
-            placeholder="Identifier / Email (e.g. CS101-042)"
-          />
-          <button
-            class="button secondary small"
-            on:click={addParticipantAction}
-            disabled={!newParticipantName.trim() || addingParticipant}
-          >
-            {addingParticipant ? 'Adding…' : 'Add to Roster'}
-          </button>
-        </div>
-
-        {#if guestRoomState.roster && guestRoomState.roster.length > 0}
-          <div class="table-wrap">
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th>Participant</th>
-                  <th>Identifier</th>
-                  <th>Status</th>
-                  <th>Files Submitted</th>
-                  <th>Action</th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each guestRoomState.roster as p (p.id)}
-                  <tr>
-                    <td><strong>{p.name}</strong></td>
-                    <td><code>{p.identifier || '—'}</code></td>
-                    <td>
-                      <span class="status-pill {p.status}">
-                        {p.status.replace(/_/g, ' ')}
-                      </span>
-                    </td>
-                    <td>{p.submissionCount} file{p.submissionCount === 1 ? '' : 's'}</td>
-                    <td>
-                      <button
-                        class="button ghost small"
-                        style="color: var(--danger); padding: 2px 6px;"
-                        on:click={() => removeParticipantAction(p.id)}
-                        aria-label="Remove participant"
-                      >
-                        Remove
-                      </button>
-                    </td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          </div>
-        {:else}
-          <div class="empty compact">
-            No expected participants pre-loaded. Guests can still join anonymously or with custom nicknames.
-          </div>
-        {/if}
-      </section>
-
-      <!-- Guest Approval Queues Grid -->
-      <div class="guest-subsections" style="margin-top: 14px;">
-        <!-- Section 1: Guest Requests -->
-        <section class="panel workflow">
-          <div class="section-heading">
-            <div>
-              <span class="eyebrow accent">Access Control</span>
-              <h2>Guest Requests</h2>
-            </div>
-            <span class="count">{guestRoomState.pendingGuests?.length ?? 0}</span>
-          </div>
-
-          {#if guestRoomState.pendingGuests && guestRoomState.pendingGuests.length > 0}
-            {#each guestRoomState.pendingGuests as g (g.id)}
-              <div class="guest-item-card">
-                <div>
-                  <strong>{g.nickname || 'Guest'}</strong>
-                  <span>Requested {fmtTime(g.createdAt)}</span>
-                </div>
-                <div class="button-row" style="margin-top: 0;">
-                  <button class="button primary small" on:click={() => approveGuestAction(g.id)} disabled={isBusy(`approve-guest:${g.id}`)}>Approve</button>
-                  <button class="button danger small" on:click={() => rejectGuestAction(g.id)} disabled={isBusy(`reject-guest:${g.id}`)}>Decline</button>
-                </div>
-              </div>
-            {/each}
-          {:else}
-            <div class="empty">No guests are waiting to join.</div>
-          {/if}
-
-          <!-- Approved Guests List -->
-          <div style="margin-top: 18px; border-top: 1px solid var(--line); padding-top: 14px;">
-            <div class="section-heading" style="margin-bottom: 10px;">
-              <span class="eyebrow">Approved Guests</span>
-              <span class="count">{guestRoomState.approvedGuests?.length ?? 0}</span>
-            </div>
-            {#if guestRoomState.approvedGuests && guestRoomState.approvedGuests.length > 0}
-              {#each guestRoomState.approvedGuests as g (g.id)}
-                <div class="guest-item-card">
-                  <div>
-                    <strong>{g.nickname || 'Guest'}</strong>
-                    <span>Connected since {fmtTime(g.createdAt)}</span>
-                  </div>
-                  <button class="button danger small" on:click={() => revokeGuestAction(g.id)} disabled={isBusy(`revoke-guest:${g.id}`)}>
-                    Revoke
-                  </button>
-                </div>
-              {/each}
-            {:else}
-              <div class="empty compact">No active guests yet.</div>
-            {/if}
-          </div>
-        </section>
-
-        <!-- Section 2: Upload Requests & Progress -->
-        <section class="panel workflow">
-          <div class="section-heading">
-            <div>
-              <span class="eyebrow blue">Upload Inbox</span>
-              <h2>File Requests</h2>
-            </div>
-            <span class="count">{guestRoomState.pendingUploads?.length ?? 0}</span>
-          </div>
-
-          {#if guestRoomState.pendingUploads && guestRoomState.pendingUploads.length > 0}
-            {#each guestRoomState.pendingUploads as up (up.id)}
-              <div class="guest-item-card">
-                <div>
-                  <strong>{up.fileName}</strong>
-                  <span>{formatBytes(up.size)} · from {up.guestName || 'Guest'} · {fmtTime(up.createdAt)}</span>
-                  {#if up.formValues && Object.keys(up.formValues).length > 0}
-                    <div style="margin-top: 4px; font-size: 11.5px; color: var(--accent);">
-                      {#each Object.entries(up.formValues) as [k, v]}
-                        <span style="margin-right: 8px;">{k}: <strong>{v}</strong></span>
-                      {/each}
-                    </div>
-                  {/if}
-                </div>
-                <div class="button-row" style="margin-top: 0;">
-                  <button class="button primary small" on:click={() => approveGuestUploadAction(up.id)} disabled={isBusy(`approve-guest-upload:${up.id}`)}>Accept</button>
-                  <button class="button danger small" on:click={() => rejectGuestUploadAction(up.id)} disabled={isBusy(`reject-guest-upload:${up.id}`)}>Reject</button>
-                </div>
-              </div>
-            {/each}
-          {:else}
-            <div class="empty">No incoming files waiting for approval.</div>
-          {/if}
-
-          <!-- Active & Completed Uploads -->
-          <div style="margin-top: 18px; border-top: 1px solid var(--line); padding-top: 14px;">
-            <div class="section-heading" style="margin-bottom: 10px;">
-              <span class="eyebrow">Transfers</span>
-              <span class="count">{guestRoomState.recentUploads?.length ?? 0}</span>
-            </div>
-            {#if guestRoomState.recentUploads && guestRoomState.recentUploads.length > 0}
-              {#each guestRoomState.recentUploads as up (up.id)}
-                <div class="transfer" style="padding: 10px 0;">
-                  <div class="transfer-head">
-                    <div>
-                      <strong>↙ {up.fileName}</strong>
-                      <span>
-                        {up.guestName || 'Guest'} · {formatBytes(up.transferred)} of {formatBytes(up.size)}
-                        {#if up.state === 'uploading' && up.speed > 0} · {speed(up.speed)}{/if}
-                      </span>
-                      {#if up.sha256}
-                        <div style="margin-top: 2px;">
-                          <button
-                            type="button"
-                            class="button ghost small"
-                            style="padding: 2px 4px; font-size: 11px; font-family: monospace; color: var(--text-muted);"
-                            title="Click to copy SHA256 hash"
-                            on:click={() => copyTextToClipboard(up.sha256 || '')}
-                          >
-                            SHA256: {up.sha256.slice(0, 12)}…
-                          </button>
-                        </div>
-                      {/if}
-                    </div>
-                    <span class="badge {up.state}">{up.state}</span>
-                  </div>
-                  {#if up.state === 'uploading'}
-                    <div class="bar"><i style={`width:${percent(up.transferred, up.size)}%`}></i></div>
-                  {/if}
-                  {#if up.error}
-                    <small class="error-text" style="display:block; margin-top:2px;">{up.error}</small>
-                  {/if}
-                </div>
-              {/each}
-            {:else}
-              <div class="empty compact">No active or recent guest uploads.</div>
-            {/if}
-          </div>
-        </section>
-      </div>
-    {/if}
-    </div>
-
-  <!-- TAB 3: TEMPLATES -->
-  {:else if activeTab === 'templates'}
-    <div class="panel" id="panel-templates" role="tabpanel" aria-labelledby="tab-templates" tabindex="0">
-      <div class="section-heading">
-        <div>
-          <span class="eyebrow accent">{$t('templates.eyebrow')}</span>
-          <h2>{$t('templates.title')}</h2>
-        </div>
-        <span class="count">{templates.length}</span>
-      </div>
-      <p class="muted">
-        {$t('templates.desc')}
-      </p>
-
-      {#if loadingTemplates}
-        <div class="empty">{$t('templates.loading')}</div>
-      {:else if templates.length > 0}
-        <div class="template-grid">
-          {#each templates as tpl (tpl.id)}
-            <div class="template-card">
-              <div>
-                <h3>{tpl.name}</h3>
-                <p>{tpl.description || 'No description provided.'}</p>
-                <div style="margin-top: 10px; display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-secondary);">
-                  <span>{$t('templates.duration', { duration: tpl.durationMinutes })}</span>
-                  <span>{$t('templates.collision', { policy: tpl.collisionPolicy === 'reject' ? 'Strict Reject' : 'Preserve Both' })}</span>
-                  {#if tpl.formSchema && tpl.formSchema.length > 0}
-                    <span>{$t('templates.fieldsCount', { count: tpl.formSchema.length })}</span>
-                  {/if}
-                  {#if tpl.expectedParticipants && tpl.expectedParticipants.length > 0}
-                    <span>{$t('templates.rosterCount', { count: tpl.expectedParticipants.length })}</span>
-                  {/if}
-                </div>
-              </div>
-              <div class="button-row" style="margin-top: 12px;">
-                <button class="button primary small" on:click={() => startFromTemplateAction(tpl.id)}>
-                  {$t('templates.startRoom')}
-                </button>
-                <button class="button secondary small" on:click={() => duplicateTemplateAction(tpl.id, tpl.name)}>
-                  {$t('templates.duplicate')}
-                </button>
-                <button class="button ghost small" style="color: var(--danger);" on:click={() => deleteTemplateAction(tpl.id)}>
-                  {$t('templates.delete')}
-                </button>
-              </div>
-            </div>
-          {/each}
-        </div>
-      {:else}
-        <div class="empty">{$t('templates.noTemplates')}</div>
-      {/if}
-    </div>
-
-  <!-- TAB 4: AUDIT HISTORY -->
-  {:else if activeTab === 'audit'}
-    <div class="panel" id="panel-audit" role="tabpanel" aria-labelledby="tab-audit" tabindex="0">
-      <div class="section-heading">
-        <div>
-          <span class="eyebrow accent">{$t('audit.eyebrow')}</span>
-          <h2>{$t('audit.title')}</h2>
-        </div>
-        <div style="display: flex; gap: 10px; align-items: center;">
-          <button class="button secondary small" on:click={loadAuditLogs} disabled={auditLoading}>
-            {auditLoading ? $t('audit.loading') : $t('audit.refresh')}
-          </button>
-          <button class="button danger small" on:click={clearAuditAction}>
-            {$t('audit.clearHistory')}
-          </button>
-        </div>
-      </div>
-      <p class="muted">
-        {$t('audit.desc')}
-      </p>
-
-      <div style="display: flex; gap: 12px; margin: 14px 0;" class="form-input-row">
-        <select class="text-input" bind:value={auditFilterType} on:change={loadAuditLogs} style="max-width: 200px;">
-          <option value="">{$t('audit.allEvents')}</option>
-          <option value="room_created">Room Created</option>
-          <option value="room_ended">Room Ended</option>
-          <option value="guest_joined">Guest Joined</option>
-          <option value="guest_approved">Guest Approved</option>
-          <option value="upload_declared">Upload Declared</option>
-          <option value="upload_approved">Upload Approved</option>
-          <option value="upload_completed">Upload Completed</option>
-          <option value="export_completed">Export Completed</option>
-        </select>
-
-        <select class="text-input" bind:value={auditFilterOutcome} on:change={loadAuditLogs} style="max-width: 160px;">
-          <option value="">All Outcomes</option>
-          <option value="success">Success</option>
-          <option value="rejected">Rejected</option>
-          <option value="failed">Failed</option>
-          <option value="info">Info</option>
-        </select>
-        <span class="muted" style="margin-left: auto; font-size: 13px;">Showing {auditEntries.length} of {auditTotal} total events</span>
-      </div>
-
-      {#if auditLoading}
-        <div class="empty">{$t('audit.loading')}</div>
-      {:else if auditEntries.length > 0}
-        <div class="table-wrap">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>Timestamp</th>
-                <th>Event Type</th>
-                <th>Room ID</th>
-                <th>Guest</th>
-                <th>Outcome</th>
-                <th>Details</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each auditEntries as entry (entry.id)}
-                <tr>
-                  <td style="white-space: nowrap; font-size: 12px; color: var(--text-muted);">{fmtTime(entry.timestamp)}</td>
-                  <td><strong>{entry.eventType}</strong></td>
-                  <td><code>{entry.roomId || '—'}</code></td>
-                  <td>{entry.guestName || entry.guestId || '—'}</td>
-                  <td>
-                    <span class="status-pill {entry.outcome}">
-                      {entry.outcome}
-                    </span>
-                  </td>
-                  <td style="font-size: 12px; word-break: break-all;">
-                    {entry.fileName ? `${entry.fileName} (${formatBytes(entry.fileSize || 0)}) ` : ''}
-                    {entry.details || ''}
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
-      {:else}
-        <div class="empty">{$t('audit.noEvents')}</div>
-      {/if}
-    </div>
-
-  <!-- TAB 5: TRUSTED DEVICES -->
-  {:else if activeTab === 'devices'}
-    <div class="panel" id="panel-devices" role="tabpanel" aria-labelledby="tab-devices" tabindex="0">
-      <div class="section-heading">
-        <div>
-          <span class="eyebrow">{$t('devices.eyebrow')}</span>
-          <h2>{$t('devices.title')}</h2>
-        </div>
-        <button
-          type="button"
-          class="button secondary small"
-          on:click={loadTrustedDevices}
-          disabled={loadingDevices}
-        >
-          {loadingDevices ? $t('devices.refreshing') : $t('devices.refresh')}
-        </button>
-      </div>
-      <p class="muted">
-        {$t('devices.desc')}
-      </p>
-
-      {#if pairingStatus?.locked}
-        <div class="alert danger" style="margin: 16px 0; display: flex; align-items: center; justify-content: space-between; gap: 16px;" role="alert">
-          <div>
-            <strong>{$t('devices.lockoutTitle')}</strong>
-            <p style="margin: 4px 0 0 0; font-size: 13px;">
-              {$t('devices.lockoutDesc')} {pairingStatus.lockoutDuration ? `(${pairingStatus.lockoutDuration})` : ''}
-            </p>
-          </div>
-          <button
-            type="button"
-            class="button danger small"
-            on:click={handleReArmPairing}
-            disabled={rearmingLoading}
-          >
-            {rearmingLoading ? $t('devices.rearming') : $t('devices.rearmAction')}
-          </button>
-        </div>
-      {/if}
-
-      {#if loadingDevices}
-        <div class="empty">{$t('devices.refreshing')}</div>
-      {:else if trustedDevices.length > 0}
-        <div class="table-wrap" style="margin-top: 16px;">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>{$t('devices.deviceName')}</th>
-                <th>{$t('devices.fingerprint')}</th>
-                <th>{$t('devices.pairedAt')}</th>
-                <th>{$t('devices.lastSeen')}</th>
-                <th>{$t('devices.autoApprove')}</th>
-                <th style="text-align: right;">{$t('devices.actions')}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each trustedDevices as dev (dev.id)}
-                <tr>
-                  <td><strong>{dev.name}</strong></td>
-                  <td><code>{dev.id.slice(0, 16)}…</code></td>
-                  <td style="font-size: 12px; color: var(--text-muted);">{fmtTime(dev.pairedAt)}</td>
-                  <td style="font-size: 12px; color: var(--text-muted);">{fmtTime(dev.lastSeen)}</td>
-                  <td>
-                    <button
-                      type="button"
-                      class="button ghost small"
-                      style="font-size: 11px; padding: 2px 8px;"
-                      on:click={() => toggleDeviceAutoApprove(dev.id, dev.autoApprove)}
-                    >
-                      {dev.autoApprove ? $t('devices.enabled') : $t('devices.disabled')}
-                    </button>
-                  </td>
-                  <td style="text-align: right;">
-                    <button
-                      type="button"
-                      class="button danger small"
-                      on:click={() => askRevokeDevice(dev)}
-                    >
-                      {$t('devices.revoke')}
-                    </button>
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
-      {:else}
-        <div class="empty">{$t('devices.noDevices')}</div>
-      {/if}
-    </div>
-
-  <!-- TAB 6: SETTINGS -->
-  {:else if activeTab === 'settings'}
-    <div id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" tabindex="0">
-      <div class="section-heading">
-        <div>
-          <span class="eyebrow accent">{$t('settings.eyebrow')}</span>
-          <h2>{$t('settings.title')}</h2>
-        </div>
-      </div>
-
-      {#if settingsSavedAlert}
-        <div class="alert success" role="status">
-          <span>{settingsSavedAlert}</span>
-        </div>
-      {/if}
-
-      {#if settingsError}
-        <div class="alert danger" role="alert">
-          <span>{settingsError}</span>
-          <button type="button" class="alert-dismiss" on:click={() => settingsError = ''} aria-label={$t('app.dismiss')}>×</button>
-        </div>
-      {/if}
-
-      <div style="display: flex; flex-direction: column; gap: 18px;">
-        <!-- Download Directory Card -->
-        <div class="settings-card">
-          <div class="settings-card-header">
-            <h4>{$t('settings.receiveDir')}</h4>
-            <p>{$t('settings.receiveDirDesc')}</p>
-          </div>
-          <div class="form-input-row" style="margin-bottom: 10px;">
-            <input
-              id="download-dir-input"
-              type="text"
-              class="text-input"
-              bind:value={settingsState.downloadDir}
-              placeholder={settingsState.effectiveDir || 'Default: ~/Downloads/Flitnix'}
-              style="font-family: ui-monospace, SFMono-Regular, monospace; font-size: 13px;"
-            />
-            <button type="button" class="button" on:click={handleSelectDownloadDir}>
-              {$t('settings.browse')}
-            </button>
-            <button type="button" class="button ghost" on:click={handleOpenDownloadFolder}>
-              {$t('settings.openFolder')}
-            </button>
-          </div>
-          <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
-            <span style="font-size: 12.5px; color: var(--text-tertiary);">
-              {$t('settings.currentPath', { path: settingsState.effectiveDir || receiveDir })}
-            </span>
-            {#if settingsState.downloadDir}
-              <button
-                type="button"
-                class="button ghost small"
-                style="padding: 2px 8px; font-size: 11px;"
-                on:click={() => settingsState.downloadDir = ''}
-              >
-                {$t('settings.resetDefault')}
-              </button>
-            {/if}
-          </div>
-        </div>
-
-        <!-- Appearance / Theme Card -->
-        <div class="settings-card">
-          <div class="settings-card-header">
-            <h4>{$t('settings.appearance')}</h4>
-            <p>{$t('settings.appearanceDesc')}</p>
-          </div>
-          <div class="segmented-control" role="radiogroup" aria-label={$t('settings.appearance')}>
-            <button
-              type="button"
-              class="segment-btn"
-              class:active={settingsState.theme === 'system'}
-              role="radio"
-              aria-checked={settingsState.theme === 'system'}
-              on:click={() => { settingsState.theme = 'system'; applyTheme('system'); }}
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
-              </svg>
-              <span>{$t('settings.themeSystem')}</span>
-            </button>
-            <button
-              type="button"
-              class="segment-btn"
-              class:active={settingsState.theme === 'light'}
-              role="radio"
-              aria-checked={settingsState.theme === 'light'}
-              on:click={() => { settingsState.theme = 'light'; applyTheme('light'); }}
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
-              </svg>
-              <span>{$t('settings.themeLight')}</span>
-            </button>
-            <button
-              type="button"
-              class="segment-btn"
-              class:active={settingsState.theme === 'dark'}
-              role="radio"
-              aria-checked={settingsState.theme === 'dark'}
-              on:click={() => { settingsState.theme = 'dark'; applyTheme('dark'); }}
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
-              </svg>
-              <span>{$t('settings.themeDark')}</span>
-            </button>
-          </div>
-        </div>
-
-        <!-- Language / Locale Card -->
-        <div class="settings-card">
-          <div class="settings-card-header">
-            <h4>{$t('settings.language')}</h4>
-            <p>{$t('settings.languageDesc')}</p>
-          </div>
-          <div style="max-width: 320px;">
-            <select
-              id="language-select"
-              class="text-input"
-              bind:value={settingsState.locale}
-              on:change={() => setLocale(settingsState.locale)}
-            >
-              <option value="system">{$t('settings.langSystem')}</option>
-              <option value="en">{$t('settings.langEn')}</option>
-            </select>
-          </div>
-        </div>
-
-        <!-- Preferred Network Interface Card -->
-        <div class="settings-card">
-          <div class="settings-card-header">
-            <h4>{$t('settings.preferredInterface')}</h4>
-            <p>{$t('settings.preferredInterfaceDesc')}</p>
-          </div>
-          <div style="max-width: 420px;">
-            <select id="iface-select" class="text-input" bind:value={settingsState.preferredInterface}>
-              <option value="">{$t('settings.autoInterface')}</option>
-              {#each uniqueInterfaces as iface (iface.name)}
-                <option value={iface.name}>
-                  {iface.name} ({iface.ip}{iface.family ? ` · ${iface.family}` : ''})
-                </option>
-              {/each}
-              {#if settingsState.preferredInterface && !uniqueInterfaces.some(i => i.name === settingsState.preferredInterface)}
-                <option value={settingsState.preferredInterface}>
-                  {$t('settings.ifaceUnavailable', { name: settingsState.preferredInterface })}
-                </option>
-              {/if}
-            </select>
-          </div>
-        </div>
-
-        <!-- Session Automation Card -->
-        <div class="settings-card">
-          <div class="settings-card-header">
-            <h4>{$t('settings.sessionAutomation')}</h4>
-            <p>{$t('settings.autoStartSessionDesc')}</p>
-          </div>
-          <label style="display: inline-flex; align-items: center; gap: 10px; cursor: pointer; padding: 6px 0;">
-            <input
-              type="checkbox"
-              bind:checked={settingsState.autoStartSession}
-              style="width: 18px; height: 18px; accent-color: var(--primary); cursor: pointer;"
-            />
-            <span style="font-size: 14px; color: var(--text-main); font-weight: 600;">
-              {$t('settings.autoStartSession')}
-            </span>
-          </label>
-        </div>
-
-        <!-- About & Version Card -->
-        <div class="settings-card">
-          <div class="settings-card-header">
-            <h4>{$t('settings.aboutTitle')}</h4>
-            <p>{$t('settings.aboutDesc')}</p>
-          </div>
-          <div style="display: flex; justify-content: space-between; align-items: center; padding: 4px 0;">
-            <span style="font-size: 13.5px; color: var(--text-secondary); font-weight: 500;">
-              {$t('settings.versionLabel')}
-            </span>
-            <span class="status-tag ready" style="font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; font-weight: 600;">
-              {$t('sidebar.version')}
-            </span>
-          </div>
-        </div>
-
-        <!-- Settings Actions Bar -->
-        <div class="card" style="display: flex; justify-content: space-between; align-items: center; padding: 18px 24px;">
-          <button
-            type="button"
-            class="button primary"
-            disabled={savingSettings}
-            on:click={handleSaveSettings}
-          >
-            {savingSettings ? $t('settings.saving') : $t('settings.savePreferences')}
-          </button>
-
-          <button
-            type="button"
-            class="button ghost"
-            on:click={handleResetSettings}
-          >
-            {$t('settings.resetDefaults')}
-          </button>
-        </div>
-      </div>
-    </div>
-  {/if}
-
-        {#if receiveDir}
-          <div style="margin-top: 24px; padding: 12px 16px; border-radius: 10px; background: var(--surface-secondary); border: 1px solid var(--border); font-size: 12.5px; color: var(--text-tertiary); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
-            <span>{$t('footer.savedPath', { path: receiveDir })}</span>
-            <span style="font-weight: 500;">Flitnix {$t('sidebar.version')}</span>
-          </div>
-        {/if}
-      </div>
-    </div>
+  <ConnectionDoctorModal
+    isOpen={doctorOpen}
+    report={doctorReport}
+    onClose={() => { doctorOpen = false }}
+    onRegenerateQR={regenerateQRAction}
+  />
+
+  <!-- Update Modal -->
+  <UpdateModal
+    isOpen={updateModalOpen}
+    currentVersion={appVersionInfo?.version || '2.7.0'}
+    onClose={() => { updateModalOpen = false }}
+  />
+
+  <!-- Global Toast Notification -->
+  <div class="toast-fixed-container">
+    <Toast message={toastMessage} type={toastType} onDismiss={dismissToast} />
   </div>
 </div>

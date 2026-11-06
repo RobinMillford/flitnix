@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 // Tab configuration model matching App.svelte
-const tabOrder = ['personal', 'guest', 'templates', 'audit', 'devices', 'settings'] as const
+const tabOrder = ['personal', 'guest', 'templates', 'devices', 'history', 'audit', 'settings'] as const
 type TabId = typeof tabOrder[number]
 
 function getNextTab(currentTab: TabId, key: string): TabId {
@@ -30,27 +30,29 @@ function getRovingTabindex(tab: TabId, activeTab: TabId): number {
   return tab === activeTab ? 0 : -1
 }
 
-test('Tab navigation: order contains all 6 tabs including Settings', () => {
-  assert.equal(tabOrder.length, 6)
+test('Tab navigation: order contains all 7 tabs including History and Settings', () => {
+  assert.equal(tabOrder.length, 7)
   assert.deepEqual(Array.from(tabOrder), [
-    'personal', 'guest', 'templates', 'audit', 'devices', 'settings'
+    'personal', 'guest', 'templates', 'devices', 'history', 'audit', 'settings'
   ])
 })
 
 test('Tab navigation: ArrowRight advances and wraps in horizontal orientation', () => {
   assert.equal(getNextTab('personal', 'ArrowRight'), 'guest')
   assert.equal(getNextTab('guest', 'ArrowRight'), 'templates')
-  assert.equal(getNextTab('templates', 'ArrowRight'), 'audit')
-  assert.equal(getNextTab('audit', 'ArrowRight'), 'devices')
-  assert.equal(getNextTab('devices', 'ArrowRight'), 'settings')
+  assert.equal(getNextTab('templates', 'ArrowRight'), 'devices')
+  assert.equal(getNextTab('devices', 'ArrowRight'), 'history')
+  assert.equal(getNextTab('history', 'ArrowRight'), 'audit')
+  assert.equal(getNextTab('audit', 'ArrowRight'), 'settings')
   assert.equal(getNextTab('settings', 'ArrowRight'), 'personal') // Wrap around
 })
 
 test('Tab navigation: ArrowLeft retreats and wraps in horizontal orientation', () => {
   assert.equal(getNextTab('personal', 'ArrowLeft'), 'settings') // Wrap around
-  assert.equal(getNextTab('settings', 'ArrowLeft'), 'devices')
-  assert.equal(getNextTab('devices', 'ArrowLeft'), 'audit')
-  assert.equal(getNextTab('audit', 'ArrowLeft'), 'templates')
+  assert.equal(getNextTab('settings', 'ArrowLeft'), 'audit')
+  assert.equal(getNextTab('audit', 'ArrowLeft'), 'history')
+  assert.equal(getNextTab('history', 'ArrowLeft'), 'devices')
+  assert.equal(getNextTab('devices', 'ArrowLeft'), 'templates')
   assert.equal(getNextTab('templates', 'ArrowLeft'), 'guest')
   assert.equal(getNextTab('guest', 'ArrowLeft'), 'personal')
 })
@@ -87,8 +89,9 @@ test('Tab navigation: Panel and tab IDs have symmetric ARIA relationships', () =
     personal: { tabId: 'tab-personal', panelId: 'panel-personal', role: 'tabpanel' },
     guest: { tabId: 'tab-guest', panelId: 'panel-guest', role: 'tabpanel' },
     templates: { tabId: 'tab-templates', panelId: 'panel-templates', role: 'tabpanel' },
-    audit: { tabId: 'tab-audit', panelId: 'panel-audit', role: 'tabpanel' },
     devices: { tabId: 'tab-devices', panelId: 'panel-devices', role: 'tabpanel' },
+    history: { tabId: 'tab-history', panelId: 'panel-history', role: 'tabpanel' },
+    audit: { tabId: 'tab-audit', panelId: 'panel-audit', role: 'tabpanel' },
     settings: { tabId: 'tab-settings', panelId: 'panel-settings', role: 'tabpanel' }
   }
 

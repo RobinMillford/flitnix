@@ -10,6 +10,10 @@ export function AddExpectedParticipant(arg1, arg2, arg3) {
   return window['go']['main']['App']['AddExpectedParticipant'](arg1, arg2, arg3);
 }
 
+export function ApplyUpdate() {
+  return window['go']['main']['App']['ApplyUpdate']();
+}
+
 export function ApproveBatch(arg1) {
   return window['go']['main']['App']['ApproveBatch'](arg1);
 }
@@ -38,6 +42,10 @@ export function CancelUpload(arg1) {
   return window['go']['main']['App']['CancelUpload'](arg1);
 }
 
+export function CheckForUpdates(arg1) {
+  return window['go']['main']['App']['CheckForUpdates'](arg1);
+}
+
 export function ClearAuditHistory() {
   return window['go']['main']['App']['ClearAuditHistory']();
 }
@@ -54,6 +62,10 @@ export function DenyPairing(arg1) {
   return window['go']['main']['App']['DenyPairing'](arg1);
 }
 
+export function DownloadUpdate() {
+  return window['go']['main']['App']['DownloadUpdate']();
+}
+
 export function DuplicateGuestTemplate(arg1, arg2) {
   return window['go']['main']['App']['DuplicateGuestTemplate'](arg1, arg2);
 }
@@ -68,6 +80,10 @@ export function EndSession(arg1) {
 
 export function ExportGuestCollection(arg1) {
   return window['go']['main']['App']['ExportGuestCollection'](arg1);
+}
+
+export function GetAppVersion() {
+  return window['go']['main']['App']['GetAppVersion']();
 }
 
 export function GetBatch(arg1) {
