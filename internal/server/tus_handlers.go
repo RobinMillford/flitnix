@@ -197,10 +197,14 @@ func handleBatchTusHead(svcs *Services) http.HandlerFunc {
 		}
 
 		meta := upload.Meta()
+		state := meta.State
+		if meta.CommittedOffset == meta.TotalSize && (state == transfer.ResumableActive || state == transfer.ResumableInterrupted) {
+			state = transfer.ResumableAwaitingDigest
+		}
 		w.Header().Set("Tus-Resumable", tusVersion)
 		w.Header().Set("Upload-Offset", strconv.FormatInt(meta.CommittedOffset, 10))
 		w.Header().Set("Upload-Length", strconv.FormatInt(meta.TotalSize, 10))
-		w.Header().Set("Upload-State", string(meta.State))
+		w.Header().Set("Upload-State", string(state))
 		w.Header().Set("Upload-Expires", meta.ExpiresAt.UTC().Format(http.TimeFormat))
 		if pd := prefixDigestForMeta(&meta); pd != "" {
 			w.Header().Set("Upload-Prefix-Digest", pd)
@@ -570,8 +574,12 @@ func handleBatchItemStatus(svcs *Services) http.HandlerFunc {
 		}
 
 		meta := upload.Meta()
+		state := meta.State
+		if meta.CommittedOffset == meta.TotalSize && (state == transfer.ResumableActive || state == transfer.ResumableInterrupted) {
+			state = transfer.ResumableAwaitingDigest
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"status": meta.State,
+			"status": state,
 			"offset": meta.CommittedOffset,
 			"size":   meta.TotalSize,
 			"sha256": meta.PrefixDigest,
@@ -703,10 +711,14 @@ func handleGuestTusHead(svcs *Services) http.HandlerFunc {
 		}
 
 		meta := upload.Meta()
+		state := meta.State
+		if meta.CommittedOffset == meta.TotalSize && (state == transfer.ResumableActive || state == transfer.ResumableInterrupted) {
+			state = transfer.ResumableAwaitingDigest
+		}
 		w.Header().Set("Tus-Resumable", tusVersion)
 		w.Header().Set("Upload-Offset", strconv.FormatInt(meta.CommittedOffset, 10))
 		w.Header().Set("Upload-Length", strconv.FormatInt(meta.TotalSize, 10))
-		w.Header().Set("Upload-State", string(meta.State))
+		w.Header().Set("Upload-State", string(state))
 		w.Header().Set("Upload-Expires", meta.ExpiresAt.UTC().Format(http.TimeFormat))
 		if pd := prefixDigestForMeta(&meta); pd != "" {
 			w.Header().Set("Upload-Prefix-Digest", pd)
@@ -1069,8 +1081,12 @@ func handleGuestResumableStatus(svcs *Services) http.HandlerFunc {
 		}
 
 		meta := upload.Meta()
+		state := meta.State
+		if meta.CommittedOffset == meta.TotalSize && (state == transfer.ResumableActive || state == transfer.ResumableInterrupted) {
+			state = transfer.ResumableAwaitingDigest
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"status": meta.State,
+			"status": state,
 			"offset": meta.CommittedOffset,
 			"size":   meta.TotalSize,
 			"sha256": meta.PrefixDigest,

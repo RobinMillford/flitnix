@@ -751,6 +751,22 @@
 
   function retryJob(job) {
     if (appState.ended) return;
+    if (job.batchID && job.itemID && job.file && typeof FlitnixResumable !== "undefined") {
+      // Safe resumable reconciliation: resume from authoritative server committed offset
+      // without restarting from zero or prompting the desktop operator for duplicate approval.
+      job.phase = "sending";
+      job.err = "Reconciling upload with desktop…";
+      job.retryable = false;
+      job.cancelRequested = false;
+      job.cancelInFlight = false;
+      if (!activeBatch) {
+        activeBatch = { id: job.batchID, jobs: [job], failures: 0, timer: null };
+      }
+      paint(job);
+      syncWakeLock();
+      sendBatchItem(job);
+      return;
+    }
     job.id = null; job.phase = "queued"; job.err = null;
     job.uploaded = 0; job.failures = 0; job.retryable = false;
     job.cancelRequested = false; job.cancelInFlight = false;
@@ -1065,7 +1081,16 @@
         return;
       }
       if (e && e.aborted) { job.phase = "canceled"; job.err = "Upload canceled."; }
-      else { job.phase = "failed"; job.err = (e && e.message) || "Transfer failed."; job.retryable = true; }
+      else {
+        job.phase = "failed";
+        job.err = (e && e.message) || "Transfer failed.";
+        job.retryable = true;
+        if (e && (e.status === 404 || e.status === 410 || (e.message && (e.message.indexOf("404") !== -1 || e.message.indexOf("410") !== -1)))) {
+          job.batchID = null;
+          job.itemID = null;
+          job.uploaded = 0;
+        }
+      }
       activeBatch.jobs.forEach(function (other) {
         if (other !== job && other.phase === "waiting") other.phase = "queued";
         if (other !== job) paint(other);

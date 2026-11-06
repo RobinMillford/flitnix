@@ -198,38 +198,49 @@
   }
 
   /**
-   * Queries authoritative HEAD on tus resource.
+   * Queries authoritative HEAD on tus resource with bounded settlement retry for 423 Locked.
    */
-  ResumableUploadEngine.prototype.queryHead = async function (uploadUrl, authHeader) {
-    var headers = {
-      "Tus-Resumable": "1.0.0"
-    };
-    if (authHeader) headers["Authorization"] = authHeader;
+  ResumableUploadEngine.prototype.queryHead = async function (uploadUrl, authHeader, maxRetries) {
+    var retries = (typeof maxRetries === "number") ? maxRetries : 5;
+    var attempt = 0;
+    while (true) {
+      var headers = {
+        "Tus-Resumable": "1.0.0"
+      };
+      if (authHeader) headers["Authorization"] = authHeader;
 
-    var resp = await fetch(uploadUrl, {
-      method: "HEAD",
-      headers: headers,
-      cache: "no-store"
-    });
+      var resp = await fetch(uploadUrl, {
+        method: "HEAD",
+        headers: headers,
+        cache: "no-store"
+      });
 
-    if (!resp.ok) {
-      throw new Error("HEAD query failed with status " + resp.status);
+      if (resp.status === 423 && attempt < retries) {
+        attempt++;
+        var waitSec = parseInt(resp.headers.get("Retry-After") || "1", 10);
+        await waitMs(waitSec * 1000);
+        continue;
+      }
+
+      if (!resp.ok) {
+        throw new Error("HEAD query failed with status " + resp.status);
+      }
+
+      var offsetStr = resp.headers.get("Upload-Offset");
+      var lengthStr = resp.headers.get("Upload-Length");
+      var state = resp.headers.get("Upload-State") || "active";
+      var prefixDigest = resp.headers.get("Upload-Prefix-Digest") || "";
+
+      var offset = parseInt(offsetStr, 10);
+      var length = parseInt(lengthStr, 10);
+
+      return {
+        offset: !isNaN(offset) ? offset : 0,
+        length: !isNaN(length) ? length : 0,
+        state: state,
+        prefixDigest: prefixDigest
+      };
     }
-
-    var offsetStr = resp.headers.get("Upload-Offset");
-    var lengthStr = resp.headers.get("Upload-Length");
-    var state = resp.headers.get("Upload-State") || "active";
-    var prefixDigest = resp.headers.get("Upload-Prefix-Digest") || "";
-
-    var offset = parseInt(offsetStr, 10);
-    var length = parseInt(lengthStr, 10);
-
-    return {
-      offset: !isNaN(offset) ? offset : 0,
-      length: !isNaN(length) ? length : 0,
-      state: state,
-      prefixDigest: prefixDigest
-    };
   };
 
   /**
@@ -333,6 +344,11 @@
           break;
 
         case "UPLOAD_BYTES_COMPLETE":
+          // Safety guard: verify that server committed offset actually reached total file size!
+          if (msg.serverOffset < file.size) {
+            handleInterruption("Committed offset (" + msg.serverOffset + ") is less than file size (" + file.size + ")");
+            break;
+          }
           // All bytes committed on server; submit completion with calculated digest
           try {
             var completeResp = await self.submitCompletion(completeUrl, msg.expectedSHA256, authHeader);
@@ -364,7 +380,7 @@
 
         case "UPLOAD_INTERRUPTED":
           // Invalidate worker hasher and coordinate bounded retry
-          handleInterruption(msg.error);
+          handleInterruption(msg.error, msg.retryAfter);
           break;
 
         case "PATCH_ABORTED":
@@ -385,7 +401,20 @@
     (async function init() {
       try {
         var head = await self.queryHead(uploadUrl, authHeader);
-        if (head.state === "awaiting_digest") {
+        if (head.state === "completed") {
+          await deleteTransferRecord(transferId);
+          unregisterWorkerListener(transferId);
+          if (callbacks.onComplete) {
+            callbacks.onComplete({
+              status: "completed",
+              sha256: head.prefixDigest || "",
+              response: { status: "completed" }
+            });
+          }
+          return;
+        }
+
+        if (head.state === "awaiting_digest" || head.offset >= file.size) {
           // Server already has 100% bytes; calculate full-file digest and complete
           var fullHasher = new workerScopeSha256();
           // We can ask worker to REBUILD_HASHER for the full file
@@ -400,7 +429,15 @@
         }
 
         if (head.offset > 0) {
-          // Partial upload exists on server: rebuild client hasher up to committed offset
+          // Partial upload exists on server: notify progress and rebuild client hasher up to committed offset
+          if (callbacks.onProgress) {
+            callbacks.onProgress({
+              uploaded: head.offset,
+              total: file.size,
+              speed: 0,
+              eta: 0
+            });
+          }
           worker.postMessage({
             type: "REBUILD_HASHER",
             transferId: transferId,
@@ -427,7 +464,7 @@
     })();
 
     var retryAttempt = 0;
-    async function handleInterruption(errMsg) {
+    async function handleInterruption(errMsg, retryAfterSec) {
       if (isCancelled) return;
       if (retryAttempt >= self.options.maxRetries) {
         unregisterWorkerListener(transferId);
@@ -438,7 +475,10 @@
       }
 
       retryAttempt++;
-      var delay = getBackoffMs(retryAttempt);
+      var delay = (retryAfterSec && retryAfterSec > 0)
+        ? retryAfterSec * 1000
+        : getBackoffMs(retryAttempt);
+
       if (callbacks.onReconnecting) {
         callbacks.onReconnecting({ attempt: retryAttempt, maxRetries: self.options.maxRetries, delay: delay });
       }
@@ -453,6 +493,19 @@
         transferRec.retryCount = retryAttempt;
         saveTransferRecord(transferRec);
 
+        if (head.state === "completed") {
+          await deleteTransferRecord(transferId);
+          unregisterWorkerListener(transferId);
+          if (callbacks.onComplete) {
+            callbacks.onComplete({
+              status: "completed",
+              sha256: head.prefixDigest || "",
+              response: { status: "completed" }
+            });
+          }
+          return;
+        }
+
         if (head.state === "awaiting_digest" || head.offset >= file.size) {
           worker.postMessage({
             type: "REBUILD_HASHER",
@@ -462,6 +515,14 @@
             expectedPrefixDigest: head.prefixDigest
           }, []);
         } else {
+          if (callbacks.onProgress) {
+            callbacks.onProgress({
+              uploaded: head.offset,
+              total: file.size,
+              speed: 0,
+              eta: 0
+            });
+          }
           worker.postMessage({
             type: "REBUILD_HASHER",
             transferId: transferId,
