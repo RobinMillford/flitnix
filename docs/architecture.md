@@ -122,3 +122,21 @@ Reports categorize overall health as `PASS`, `WARNING`, or `FAIL` and provide on
 - **Explicit Binding Security**: Flitnix binds strictly to the chosen candidate address (never `0.0.0.0` or `[::]`), preventing unintended exposure on secondary network adapters or VPN tunnels.
 - **Host & Origin Validation**: Bracketed IPv6 host headers (`[<ipv6>]:<port>`) are parsed and validated strictly against malformed brackets and DNS-rebinding attacks.
 - **Physical Network Verification Status**: Automated test suites cover IPv6 discovery, loopback binding, and bracketed HTTP security. Physical mobile phone verification over an actual IPv6-enabled Wi-Fi network requires a dual-stack router and mobile hardware.
+
+### 2.8 Update & Versioning Subsystem (`internal/version`, `internal/update`)
+- **Authoritative Semantic Versioning**: `internal/version` defines the single source of truth for application versioning (SemVer 2.0.0). Exposes version metadata, commit hash, build date, and semver comparison utilities (`IsNewer`, `Compare`).
+- **Release Feed Discovery**: The Go backend queries GitHub Releases (`/repos/RobinMillford/flitnix/releases/latest`) with an `If-None-Match` ETag caching layer to conserve rate limits. It maps platform and architecture to release assets (`.tar.gz`, `.deb`, `.rpm`, `.exe`, `.dmg`).
+- **Two-Stage Cryptographic Integrity Verification**:
+  1. **Ed25519 Detached Signature**: Downloads `SHA256SUMS.txt.sig` and verifies the signature of `SHA256SUMS.txt` against the compiled-in official Ed25519 public key.
+  2. **SHA-256 Digest Matching**: Parses `SHA256SUMS.txt` to find the expected digest for the target asset and verifies the downloaded binary during streaming using bounded 64 KiB buffers.
+- **Platform-Specific Safe Installation Strategies**:
+  - **Standalone / Portable Linux (`InstallTypeDirect`)**: Stages the update in a secure temporary directory, sets executable permissions (`0755`), atomically renames over the running binary path (`os.Rename`), and relaunches the application cleanly.
+  - **Windows Installer (`InstallTypeInstaller`)**: Downloads the NSIS setup executable (`.exe`), verifies checksum and signature, launches the installer with user privileges, and gracefully exits the running application.
+  - **Linux System Packages (`InstallTypePackageManager`)**: If Flitnix is installed system-wide in `/usr/bin/flitnix` via `.deb` or `.rpm`, in-place binary overwrite without root is rejected. Instead, the verified package is saved to the user's Downloads directory and the UI displays the exact package manager installation command (`sudo dpkg -i` or `sudo rpm -Uvh`).
+  - **macOS (`InstallTypeManual`)**: Downloads the verified `.dmg` and opens the disk image or download folder for drag-and-drop installation into `/Applications`.
+
+### 2.9 Modernized Design System & Accessibility
+- **Slate Token Architecture**: Unified modern palette based on Slate tones (`--bg-app`, `--bg-surface`, `--bg-surface-elevated`, `--text-primary`, `--accent: #3b82f6` dark / `#2563eb` light).
+- **Light & Dark Theme Parity**: Full support for system-following, manual dark, and manual light themes with persistent storage and zero contrast regressions.
+- **Restrained Motion Design**: Strict transition timings (150ms fast, 200ms base) with complete suppression under `@media (prefers-reduced-motion: reduce)`.
+- **Keyboard & Screen Reader Ergonomics**: Full roving `tabindex` keyboard navigation across tabs, visible high-contrast focus rings (`outline: 2px solid var(--accent)`), ARIA live region announcements for transfer approvals, and tabular numerals (`font-variant-numeric: tabular-nums`) to prevent layout jitter during fast byte transfers.

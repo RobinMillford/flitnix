@@ -71,6 +71,7 @@ test-results/
 # Internal documentation, architecture audits, and unpublished reports
 /docs/architecture/
 /docs/internal/
+/docs/screenshots/
 docs/*audit*.md
 docs/*-audit.md
 docs/*-report.md

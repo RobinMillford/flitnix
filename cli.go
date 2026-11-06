@@ -21,9 +21,11 @@ import (
 	"github.com/itsyamin/flitnix/internal/server"
 	"github.com/itsyamin/flitnix/internal/session"
 	"github.com/itsyamin/flitnix/internal/transfer"
+	"github.com/itsyamin/flitnix/internal/version"
 )
 
-const AppVersion = "v2.6"
+// AppVersion is the display version string, sourced authoritatively from internal/version.
+var AppVersion = version.String()
 
 // handleCLI processes command-line flags and subcommands before GUI initialization.
 // If a CLI action is handled (version, help, doctor, serve), it returns handled=true
