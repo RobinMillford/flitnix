@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -34,6 +35,15 @@ type Config struct {
 	CurrentArch           string
 	DownloadDir           string
 	CacheDuration         time.Duration
+
+	// AllowEmptyExecutablePath prevents New from defaulting CurrentExecutablePath to os.Executable().
+	AllowEmptyExecutablePath bool
+
+	// PackageManagerChecker allows platform-specific ownership detection or test overrides.
+	PackageManagerChecker func(path string) (bool, error)
+
+	// IsAppImage allows environment detection or test overrides.
+	IsAppImage func() bool
 }
 
 // Service manages discovery, verification, and staging of application updates.
@@ -70,7 +80,7 @@ func New(cfg Config) *Service {
 	if cfg.CacheDuration == 0 {
 		cfg.CacheDuration = 1 * time.Hour
 	}
-	if cfg.CurrentExecutablePath == "" {
+	if cfg.CurrentExecutablePath == "" && !cfg.AllowEmptyExecutablePath {
 		if exe, err := os.Executable(); err == nil {
 			cfg.CurrentExecutablePath = exe
 		}
@@ -476,17 +486,27 @@ func (s *Service) isAssetMatch(assetName string) bool {
 	case "darwin":
 		return strings.HasSuffix(assetLower, ".dmg") || (strings.HasSuffix(assetLower, ".zip") && strings.Contains(assetLower, "macos"))
 	case "linux":
-		// If system package manager is active (e.g. deb or rpm):
-		if s.isDebian() && strings.HasSuffix(assetLower, ".deb") && strings.Contains(assetLower, s.cfg.CurrentArch) {
-			return true
-		}
-		if s.isRpm() && strings.HasSuffix(assetLower, ".rpm") && strings.Contains(assetLower, s.cfg.CurrentArch) {
-			return true
+		installType := s.determineInstallType()
+		if installType == InstallTypePackageManager {
+			if s.isDebian() && strings.HasSuffix(assetLower, ".deb") && strings.Contains(assetLower, s.cfg.CurrentArch) {
+				return true
+			}
+			if s.isRpm() && strings.HasSuffix(assetLower, ".rpm") && strings.Contains(assetLower, s.cfg.CurrentArch) {
+				return true
+			}
 		}
 		return strings.HasSuffix(assetLower, ".tar.gz") && strings.Contains(assetLower, "linux") && strings.Contains(assetLower, s.cfg.CurrentArch)
 	default:
 		return false
 	}
+}
+
+func normalizePath(p string) string {
+	if p == "" {
+		return ""
+	}
+	p = strings.ReplaceAll(p, "\\", "/")
+	return path.Clean(p)
 }
 
 func (s *Service) determineInstallType() InstallType {
@@ -496,24 +516,114 @@ func (s *Service) determineInstallType() InstallType {
 	case "darwin":
 		return InstallTypeManual
 	case "linux":
-		if s.isSystemInstalled() {
+		exe := s.cfg.CurrentExecutablePath
+		if exe == "" {
+			// Missing executable path: cannot safely replace in-place, fall back to manual
+			return InstallTypeManual
+		}
+
+		clean := normalizePath(exe)
+
+		// 1. Portable AppImage installation: read-only mount, direct overwrite unsupported
+		if s.isAppImage(clean) {
+			return InstallTypeManual
+		}
+
+		// 2. Unsupported sandbox/container formats (Snap, Flatpak)
+		if isUnsupportedFormat(clean) {
+			return InstallTypeManual
+		}
+
+		// 3. Package-managed installation
+		managed, err := s.isPackageManagerInstalled(clean)
+		if err != nil {
+			// Detection error: fall back safely to manual rather than attempting risky direct overwrite
+			return InstallTypeManual
+		}
+		if managed {
 			return InstallTypePackageManager
 		}
+
+		// 4. Default for standalone portable Linux binary
 		return InstallTypeDirect
+
 	default:
 		return InstallTypeManual
 	}
 }
 
-func (s *Service) isSystemInstalled() bool {
-	exe := s.cfg.CurrentExecutablePath
-	if exe == "" {
-		return false
+func (s *Service) isAppImage(cleanPath string) bool {
+	if s.cfg.IsAppImage != nil {
+		return s.cfg.IsAppImage()
 	}
-	clean := filepath.Clean(exe)
-	return strings.HasPrefix(clean, "/usr/bin") ||
-		strings.HasPrefix(clean, "/usr/local/bin") ||
-		strings.HasPrefix(clean, "/opt/")
+	if os.Getenv("APPIMAGE") != "" || os.Getenv("APPDIR") != "" {
+		return true
+	}
+	lower := strings.ToLower(cleanPath)
+	return strings.HasSuffix(lower, ".appimage")
+}
+
+func isUnsupportedFormat(cleanPath string) bool {
+	lower := strings.ToLower(cleanPath)
+	if strings.HasPrefix(lower, "/snap/") || os.Getenv("SNAP") != "" {
+		return true
+	}
+	if strings.Contains(lower, "/flatpak/") || os.Getenv("FLATPAK_ID") != "" {
+		return true
+	}
+	return false
+}
+
+func (s *Service) isPackageManagerInstalled(cleanPath string) (bool, error) {
+	if s.cfg.PackageManagerChecker != nil {
+		return s.cfg.PackageManagerChecker(cleanPath)
+	}
+
+	// Application contract: /usr/bin/flitnix is the documented target of .deb and .rpm packages
+	// (see nfpm.yaml and docs/architecture.md).
+	if cleanPath == "/usr/bin/flitnix" || strings.HasPrefix(cleanPath, "/usr/bin/") {
+		return true, nil
+	}
+
+	return checkSystemPackageManager(cleanPath)
+}
+
+func checkSystemPackageManager(cleanPath string) (bool, error) {
+	if runtime.GOOS != "linux" {
+		return false, nil
+	}
+
+	// Check dpkg
+	if dpkgPath, err := exec.LookPath("dpkg"); err == nil && dpkgPath != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, dpkgPath, "-S", cleanPath)
+		if out, err := cmd.Output(); err == nil && len(out) > 0 {
+			return true, nil
+		}
+	}
+
+	// Check rpm
+	if rpmPath, err := exec.LookPath("rpm"); err == nil && rpmPath != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, rpmPath, "-qf", cleanPath)
+		if out, err := cmd.Output(); err == nil && len(out) > 0 {
+			return true, nil
+		}
+	}
+
+	// Check pacman
+	if pacmanPath, err := exec.LookPath("pacman"); err == nil && pacmanPath != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, pacmanPath, "-Qo", cleanPath)
+		if out, err := cmd.Output(); err == nil && len(out) > 0 {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
 
 func (s *Service) isDebian() bool {
