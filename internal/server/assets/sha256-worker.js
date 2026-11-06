@@ -230,6 +230,22 @@
         var committedOffset = parseInt(respOffsetStr, 10);
         if (isNaN(committedOffset)) committedOffset = currentUploaded;
 
+        if (committedOffset < totalSize) {
+          // Stream ended or connection closed before full file transfer was complete.
+          // This is an interrupted partial upload, NOT a full upload completion.
+          upload.hasher = null;
+          workerScope.postMessage({
+            type: "UPLOAD_INTERRUPTED",
+            transferId: transferId,
+            status: 204,
+            serverOffset: committedOffset,
+            serverPrefixDigest: respPrefixDigest,
+            error: "Stream ended before all bytes were transferred (" + committedOffset + "/" + totalSize + ")",
+            clientOffset: currentUploaded
+          });
+          return;
+        }
+
         var finalDigest = upload.hasher.hex();
         workerScope.postMessage({
           type: "UPLOAD_BYTES_COMPLETE",
@@ -237,6 +253,17 @@
           serverOffset: committedOffset,
           serverPrefixDigest: respPrefixDigest,
           expectedSHA256: finalDigest
+        });
+      } else if (resp.status === 423) {
+        upload.hasher = null;
+        var retryAfter = parseInt(resp.headers.get("Retry-After") || "1", 10);
+        workerScope.postMessage({
+          type: "UPLOAD_INTERRUPTED",
+          transferId: transferId,
+          status: 423,
+          retryAfter: retryAfter,
+          error: "Upload resource is actively settling",
+          clientOffset: currentUploaded
         });
       } else {
         // Any non-204 invalidates the in-memory hasher state

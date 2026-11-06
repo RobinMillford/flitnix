@@ -961,7 +961,19 @@ func (rm *ResumableManager) FinalizeComplete(transferID, expectedSHA256 string) 
 	}
 
 	if meta.State != ResumableAwaitingDigest && meta.State != ResumableVerifying {
-		return nil, fmt.Errorf("%w: current state is %s", ErrInvalidState, meta.State)
+		// If 100% of declared bytes have been committed on disk and the lifecycle lock is
+		// held exclusively, data ingestion has settled. Reconcile to ResumableAwaitingDigest
+		// so digest verification and atomic publication can proceed safely without forcing
+		// the client to re-upload.
+		if meta.CommittedOffset == meta.TotalSize && (meta.State == ResumableActive || meta.State == ResumableInterrupted) {
+			upload.UpdateMeta(func(m *ResumableMeta) {
+				m.State = ResumableAwaitingDigest
+			})
+			meta = upload.Meta()
+			_ = rm.writeDurableMeta(&meta)
+		} else {
+			return nil, fmt.Errorf("%w: current state is %s", ErrInvalidState, meta.State)
+		}
 	}
 
 	var metaSnap ResumableMeta

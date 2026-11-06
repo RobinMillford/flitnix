@@ -689,6 +689,13 @@
     retryBtn.hidden = true;
     retryBtn.addEventListener("click", function () {
       retryBtn.hidden = true;
+      if (job.uploadId && typeof FlitnixResumable !== "undefined") {
+        job.state = "uploading";
+        job.error = "Reconciling upload with host desktop…";
+        updateJobUI(job);
+        streamGuestUpload(job);
+        return;
+      }
       job.state = "queued";
       job.uploadId = null;
       job.transferred = 0;
