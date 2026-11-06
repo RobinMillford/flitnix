@@ -1,3 +1,5 @@
+//go:build historical_wp4
+
 package main
 
 import (

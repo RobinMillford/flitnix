@@ -1,4 +1,4 @@
-//go:build !unix
+//go:build !unix && historical_wp4
 
 package main
 
