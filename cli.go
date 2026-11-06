@@ -23,7 +23,7 @@ import (
 	"github.com/itsyamin/flitnix/internal/transfer"
 )
 
-const AppVersion = "v2.5"
+const AppVersion = "v2.6"
 
 // handleCLI processes command-line flags and subcommands before GUI initialization.
 // If a CLI action is handled (version, help, doctor, serve), it returns handled=true
