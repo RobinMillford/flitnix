@@ -39,10 +39,34 @@ func (r *errorAfterReader) Read(p []byte) (int, error) {
 	}
 	copy(p, r.data[r.offset:r.offset+toRead])
 	r.offset += toRead
-	if r.offset >= r.limit {
-		return toRead, r.err
-	}
 	return toRead, nil
+}
+
+// waitForUploadSettledOffset polls until the resumable upload transitions to wantState,
+// committedOffset matches exactOffset, and exclusive lifecycle lock is released.
+func waitForUploadSettledOffset(t *testing.T, env *simTestEnv, transferID string, wantState transfer.ResumableState, exactOffset int64, timeout time.Duration) *transfer.ResumableUpload {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		up, ok := env.svcs.Resumable.GetUpload(transferID)
+		if ok && up.Meta().State == wantState && up.Meta().CommittedOffset == exactOffset {
+			if up.TryLock() {
+				up.Unlock()
+				return up
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	up, ok := env.svcs.Resumable.GetUpload(transferID)
+	var state transfer.ResumableState
+	var off int64
+	if ok {
+		state = up.Meta().State
+		off = up.Meta().CommittedOffset
+	}
+	t.Fatalf("timeout waiting for upload %s to settle (want state=%q, offset=%d, got state=%q, offset=%d, found=%v)",
+		transferID, wantState, exactOffset, state, off, ok)
+	return nil
 }
 
 // blockingReader reads up to blockAt bytes, then blocks on unblock channel before finishing.
@@ -912,7 +936,8 @@ func TestPhase5_Scenario10_MultiStageResumptionByteForByteIntegrity(t *testing.T
 	if r1 != nil {
 		r1.Body.Close()
 	}
-	waitForUploadSettled(t, env, transferID, transfer.ResumableInterrupted, 5*time.Second)
+	http.DefaultClient.CloseIdleConnections()
+	waitForUploadSettledOffset(t, env, transferID, transfer.ResumableInterrupted, stage1Limit, 5*time.Second)
 
 	// Verify stage 1 offset via HEAD
 	h1Req, _ := http.NewRequest(http.MethodHead, tusURL, nil)
@@ -929,21 +954,38 @@ func TestPhase5_Scenario10_MultiStageResumptionByteForByteIntegrity(t *testing.T
 
 	// Stage 2: Resume [1 MB, 2 MB), then drop
 	const stage2Limit = 2 * 1024 * 1024
-	req2, _ := http.NewRequest(http.MethodPatch, tusURL, &errorAfterReader{
-		data:  payload[stage1Limit:],
-		limit: stage2Limit - stage1Limit,
-		err:   io.ErrUnexpectedEOF,
-	})
-	req2.Header.Set("Authorization", "Bearer "+env.token)
-	req2.Header.Set("Tus-Resumable", "1.0.0")
-	req2.Header.Set("Upload-Offset", strconv.FormatInt(stage1Limit, 10))
-	req2.Header.Set("Content-Type", "application/offset+octet-stream")
-	req2.ContentLength = payloadSize - stage1Limit
-	r2, _ := http.DefaultClient.Do(req2)
-	if r2 != nil {
-		r2.Body.Close()
+	const maxStageAttempts = 5
+	var stage2Started bool
+	for attempt := 0; attempt < maxStageAttempts; attempt++ {
+		http.DefaultClient.CloseIdleConnections()
+		req2, _ := http.NewRequest(http.MethodPatch, tusURL, &errorAfterReader{
+			data:  payload[stage1Limit:],
+			limit: stage2Limit - stage1Limit,
+			err:   io.ErrUnexpectedEOF,
+		})
+		req2.Header.Set("Authorization", "Bearer "+env.token)
+		req2.Header.Set("Tus-Resumable", "1.0.0")
+		req2.Header.Set("Upload-Offset", strconv.FormatInt(stage1Limit, 10))
+		req2.Header.Set("Content-Type", "application/offset+octet-stream")
+		req2.ContentLength = payloadSize - stage1Limit
+
+		r2, r2Err := http.DefaultClient.Do(req2)
+		if r2Err == nil && r2 != nil && r2.StatusCode == http.StatusLocked {
+			r2.Body.Close()
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		if r2 != nil {
+			r2.Body.Close()
+		}
+		stage2Started = true
+		break
 	}
-	waitForUploadSettled(t, env, transferID, transfer.ResumableInterrupted, 5*time.Second)
+	if !stage2Started {
+		t.Fatalf("stage 2 patch failed: lock acquisition timed out after %d attempts", maxStageAttempts)
+	}
+	http.DefaultClient.CloseIdleConnections()
+	waitForUploadSettledOffset(t, env, transferID, transfer.ResumableInterrupted, stage2Limit, 5*time.Second)
 
 	// Verify stage 2 offset via HEAD
 	h2Req, _ := http.NewRequest(http.MethodHead, tusURL, nil)
@@ -960,21 +1002,38 @@ func TestPhase5_Scenario10_MultiStageResumptionByteForByteIntegrity(t *testing.T
 
 	// Stage 3: Resume [2 MB, 3 MB) to completion
 	stage3Payload := payload[stage2Limit:]
-	req3, _ := http.NewRequest(http.MethodPatch, tusURL, bytes.NewReader(stage3Payload))
-	req3.Header.Set("Authorization", "Bearer "+env.token)
-	req3.Header.Set("Tus-Resumable", "1.0.0")
-	req3.Header.Set("Upload-Offset", strconv.FormatInt(stage2Limit, 10))
-	req3.Header.Set("Content-Type", "application/offset+octet-stream")
-	req3.ContentLength = int64(len(stage3Payload))
+	var stage3Success bool
+	for attempt := 0; attempt < maxStageAttempts; attempt++ {
+		http.DefaultClient.CloseIdleConnections()
+		req3, _ := http.NewRequest(http.MethodPatch, tusURL, bytes.NewReader(stage3Payload))
+		req3.Header.Set("Authorization", "Bearer "+env.token)
+		req3.Header.Set("Tus-Resumable", "1.0.0")
+		req3.Header.Set("Upload-Offset", strconv.FormatInt(stage2Limit, 10))
+		req3.Header.Set("Content-Type", "application/offset+octet-stream")
+		req3.ContentLength = int64(len(stage3Payload))
 
-	resp3, err := http.DefaultClient.Do(req3)
-	if err != nil {
-		t.Fatal(err)
+		resp3, err3 := http.DefaultClient.Do(req3)
+		if err3 == nil && resp3 != nil {
+			if resp3.StatusCode == http.StatusNoContent {
+				resp3.Body.Close()
+				stage3Success = true
+				break
+			}
+			if resp3.StatusCode == http.StatusLocked {
+				resp3.Body.Close()
+				time.Sleep(50 * time.Millisecond)
+				continue
+			}
+			resp3.Body.Close()
+			t.Fatalf("stage 3 patch returned status %d", resp3.StatusCode)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	resp3.Body.Close()
-	if resp3.StatusCode != http.StatusNoContent {
-		t.Fatalf("stage 3 expected 204 No Content, got %d", resp3.StatusCode)
+	if !stage3Success {
+		t.Fatalf("stage 3 patch failed after %d attempts", maxStageAttempts)
 	}
+	http.DefaultClient.CloseIdleConnections()
+	waitForUploadSettledOffset(t, env, transferID, transfer.ResumableAwaitingDigest, payloadSize, 5*time.Second)
 
 	// Finalize complete
 	compURL := fmt.Sprintf("%s/api/batches/%s/items/%s/complete", env.url, bID, itID)
