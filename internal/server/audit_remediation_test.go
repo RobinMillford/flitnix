@@ -16,13 +16,55 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/itsyamin/flitnix/internal/devices"
+	"github.com/itsyamin/flitnix/internal/guest"
+	"github.com/itsyamin/flitnix/internal/session"
+	"github.com/itsyamin/flitnix/internal/transfer"
 )
+
+func setupGuestServerWithServices(t *testing.T) (*httptest.Server, *guest.Manager, *guest.Room, *Services) {
+	t.Helper()
+	tmpDir := t.TempDir()
+
+	guestMgr := guest.NewManager()
+	t.Cleanup(guestMgr.Close)
+
+	room, err := guestMgr.CreateRoom(tmpDir, 1*time.Hour)
+	if err != nil {
+		t.Fatalf("CreateRoom: %v", err)
+	}
+
+	store, err := transfer.NewStore(transfer.StoreConfig{Dir: tmpDir})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	sessMgr := session.NewManager(session.Config{})
+	transfers := transfer.NewService(transfer.Config{Store: store})
+	coord := transfer.NewCoordinator(transfer.CoordinatorConfig{})
+	reg := transfer.NewRegistry()
+	downloads := transfer.NewDownloadRegistry()
+
+	services := &Services{
+		Sessions:     sessMgr,
+		Transfers:    transfers,
+		Coordinator:  coord,
+		Registry:     reg,
+		Downloads:    downloads,
+		GuestManager: guestMgr,
+	}
+
+	grants := newGrantStore(downloads)
+	handler := newRouter(services, 5*time.Second, 5*time.Second, grants)
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+
+	return ts, guestMgr, room, services
+}
 
 // oversizedBody builds a JSON object comfortably larger than
 // maxControlBytes while staying syntactically valid, so the limit is what
@@ -267,72 +309,6 @@ func TestDecodeControlJSONContract(t *testing.T) {
 	})
 }
 
-// F-01: the guest completion route is cookie-authenticated. Once a real guest
-// upload exists, an oversized completion body answers 413 rather than being
-// read without a limit.
-func TestGuestCompleteRejectsOversizedBody(t *testing.T) {
-	ts, _, room, _ := setupGuestServerWithServices(t)
-
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	client := &http.Client{Jar: jar}
-
-	// Join through the endpoint so the cookie and the declared upload belong
-	// to the same guest; a separately-created guest would answer 404 instead.
-	joinBody, _ := json.Marshal(map[string]string{"secret": room.InviteSecret, "nickname": "Overflow Guest"})
-	joinResp, err := client.Post(ts.URL+"/guest-api/join", "application/json", bytes.NewReader(joinBody))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var joined guestJoinResponse
-	if err := json.NewDecoder(joinResp.Body).Decode(&joined); err != nil {
-		t.Fatalf("decode join response: %v", err)
-	}
-	joinResp.Body.Close()
-	if joinResp.StatusCode != http.StatusCreated {
-		t.Fatalf("join: status = %d, want 201", joinResp.StatusCode)
-	}
-
-	if err := room.ApproveGuest(joined.GuestID); err != nil {
-		t.Fatal(err)
-	}
-	up, err := room.DeclareUpload(joined.GuestID, "oversized-complete.bin", 4)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := room.ApproveUpload(up.ID); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create the tus upload so the handler gets past its upload lookup and
-	// reaches the completion body.
-	tusURL := ts.URL + "/guest-api/uploads/" + up.ID + "/tus"
-	postReq, _ := http.NewRequest(http.MethodPost, tusURL, nil)
-	postReq.Header.Set("Tus-Resumable", "1.0.0")
-	postReq.Header.Set("Upload-Length", "4")
-	postResp, err := client.Do(postReq)
-	if err != nil {
-		t.Fatal(err)
-	}
-	postResp.Body.Close()
-	if postResp.StatusCode != http.StatusCreated {
-		t.Fatalf("tus create: status = %d, want 201", postResp.StatusCode)
-	}
-
-	completeReq, _ := http.NewRequest(http.MethodPost, tusURL[:len(tusURL)-len("/tus")]+"/complete", bytes.NewReader(oversizedBody(t)))
-	completeReq.Header.Set("Content-Type", "application/json")
-	completeResp, err := client.Do(completeReq)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer completeResp.Body.Close()
-	if completeResp.StatusCode != http.StatusRequestEntityTooLarge {
-		t.Fatalf("oversized completion: status = %d, want 413", completeResp.StatusCode)
-	}
-}
-
 // F-02: over plain HTTP the guest cookie must not claim Secure, must stay
 // HttpOnly, and must keep SameSite=Lax for the QR navigation flow.
 func TestGuestCookieAttributesOverPlainHTTP(t *testing.T) {
@@ -522,44 +498,16 @@ func TestGuestCookieAuthenticatesFullUploadFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Resumable upload, cookie-authenticated.
-	tusURL := ts.URL + "/guest-api/uploads/" + declared.ID + "/tus"
-	postReq, _ := http.NewRequest(http.MethodPost, tusURL, nil)
-	postReq.Header.Set("Tus-Resumable", "1.0.0")
-	postReq.Header.Set("Upload-Length", strconv.Itoa(len(payload)))
-	postResp, err := client.Do(postReq)
+	// Single-pass streaming upload, cookie-authenticated.
+	putURL := ts.URL + "/guest-api/uploads/" + declared.ID + "/content"
+	putReq, _ := http.NewRequest(http.MethodPut, putURL, bytes.NewReader(payload))
+	putResp, err := client.Do(putReq)
 	if err != nil {
 		t.Fatal(err)
 	}
-	postResp.Body.Close()
-	if postResp.StatusCode != http.StatusCreated {
-		t.Fatalf("tus create: status = %d, want 201", postResp.StatusCode)
-	}
-
-	patchReq, _ := http.NewRequest(http.MethodPatch, tusURL, bytes.NewReader(payload))
-	patchReq.Header.Set("Tus-Resumable", "1.0.0")
-	patchReq.Header.Set("Upload-Offset", "0")
-	patchReq.Header.Set("Content-Type", "application/offset+octet-stream")
-	patchResp, err := client.Do(patchReq)
-	if err != nil {
-		t.Fatal(err)
-	}
-	patchResp.Body.Close()
-	if patchResp.StatusCode != http.StatusNoContent {
-		t.Fatalf("patch: status = %d, want 204", patchResp.StatusCode)
-	}
-
-	completeBody, _ := json.Marshal(map[string]string{"expectedSHA256": sha256Hex(payload)})
-	completeURL := ts.URL + "/guest-api/uploads/" + declared.ID + "/complete"
-	completeReq, _ := http.NewRequest(http.MethodPost, completeURL, bytes.NewReader(completeBody))
-	completeReq.Header.Set("Content-Type", "application/json")
-	completeResp, err := client.Do(completeReq)
-	if err != nil {
-		t.Fatal(err)
-	}
-	completeResp.Body.Close()
-	if completeResp.StatusCode != http.StatusOK {
-		t.Fatalf("complete: status = %d, want 200", completeResp.StatusCode)
+	defer putResp.Body.Close()
+	if putResp.StatusCode != http.StatusOK {
+		t.Fatalf("put: status = %d, want 200", putResp.StatusCode)
 	}
 }
 
