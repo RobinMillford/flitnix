@@ -34,14 +34,15 @@ Flitnix combines the performance and concurrency safety of Go with a modern Svel
 
 ---
 
-## Key Features & What's New in v2.6
+## Key Features & What's New in v2.7
 
-Flitnix provides high-speed, private local file transfers between desktop computers and phones. Version **v2.6** brings major reliability, security, and recovery improvements across the transfer engine:
+Flitnix provides high-speed, private local file transfers between desktop computers and phones. Version **v2.7** brings major reliability, security, and recovery improvements across the transfer engine:
 
-- **Resumable Transfers & Interruption Recovery (Tus 1.0.0)**:
-  - If Wi-Fi drops, connections reset, or browser tabs close mid-stream, transfers resume seamlessly from the last verified checkpoint without re-uploading completed data.
-  - Asynchronous metadata checkpoint pipelining on Linux for maximum throughput; synchronous checkpoint fallback on Windows and macOS for durable safety.
-  - Incremental single-pass SHA-256 integrity verification hashes data on the fly without holding whole files in memory.
+- **Direct High-Speed Streaming Uploads**:
+  - High-throughput, single-pass HTTP streaming directly from browser storage to desktop with zero whole-file memory buffering.
+  - Incremental single-pass SHA-256 integrity verification hashes data on the fly during the write pass without duplicate reads or storage synchronization stalls.
+  - Sequential transfer queue preserving low CPU and RAM consumption on phones and laptops.
+  - Clean restart from byte zero: if a connection is interrupted or fails, incomplete temporary files are safely aborted and discarded; retrying starts a fresh transfer allocation from byte zero without complex or fragile partial-offset reconciliation.
 - **Guest Drop Box (Multi-Device Upload Room)**:
   - Collect photos, videos, and documents from an entire group, classroom, or meeting without requiring anyone to install an app.
   - Guests scan a single QR code with their phone camera to request entry.
@@ -120,15 +121,15 @@ Every release includes a verified `SHA256SUMS.txt` manifest.
 
 ## Platform Compatibility & Project Status
 
-### Flitnix v2.6 Project & Release Status
+### Flitnix v2.7 Project & Release Status
 
 | Platform / Target | Minimum Version | Status | Verification & Readiness Notes |
 | :--- | :--- | :--- | :--- |
-| **Linux (Desktop)** | Fedora 39+, Ubuntu 22.04+, Debian 12+, Arch Linux | **Locally Verified** | Full test suite and race detector clean; native packaging (`.deb`, `.rpm`, `.tar.gz`) locally built and verified; Linux asynchronous metadata checkpoint pipelining active. |
-| **Windows (Desktop)** | Windows 10 (1809+) / Windows 11 (64-bit) | **CI Pending** | Source-level implementation and synchronous checkpoint fallback complete; local repeated tests pass (20/20); remote Windows GitHub Actions CI confirmation pending. Authenticode code signing pending. |
-| **macOS (Desktop)** | macOS 11.0 Big Sur or later | **Native Validation Pending** | Universal binary configuration present (`.dmg` / `.zip`); synchronous checkpoint fallback implemented and cross-compiled; native hardware execution, code signing, and notarization pending. |
-| **Mobile Browsers** | iOS 14+ (Safari), Android 8+ (Chrome, Firefox, etc.) | **Automated Tests Passed** | Automated browser runtime, worker SHA-256 streaming, and wake-lock test suites pass; physical mobile device validation across diverse hardware pending. |
-| **Physical RF Wi-Fi & Power Loss** | All Platforms | **Deferred** | Physical multi-room RF Wi-Fi roaming, AP handoff, and hardware sudden power-loss testing are explicitly deferred to post-v2.6 evaluation tracks. |
+| **Linux (Desktop)** | Fedora 39+, Ubuntu 22.04+, Debian 12+, Arch Linux | **Locally Verified** | Full test suite and race detector clean; native packaging (`.deb`, `.rpm`, `.tar.gz`) locally built and verified; single-pass direct streaming engine active. |
+| **Windows (Desktop)** | Windows 10 (1809+) / Windows 11 (64-bit) | **CI Pending** | Single-pass streaming and atomic collision-safe publication verified; local repeated tests pass (50/50); remote Windows GitHub Actions CI confirmation pending. Authenticode code signing pending. |
+| **macOS (Desktop)** | macOS 11.0 Big Sur or later | **Native Validation Pending** | Universal binary configuration present (`.dmg` / `.zip`); direct streaming upload engine cross-compiled; native hardware execution, code signing, and notarization pending. |
+| **Mobile Browsers** | iOS 14+ (Safari), Android 8+ (Chrome, Firefox, etc.) | **Automated Tests Passed** | Direct single-pass HTTP streaming with native progress reporting and wake-lock test suites pass; physical mobile device validation across diverse hardware pending. |
+| **Physical RF Wi-Fi & Power Loss** | All Platforms | **Deferred** | Physical multi-room RF Wi-Fi roaming, AP handoff, and hardware sudden power-loss testing are explicitly deferred to post-v2.7 evaluation tracks. |
 
 ---
 

@@ -43,6 +43,8 @@ import (
 	"github.com/itsyamin/flitnix/internal/settings"
 	"github.com/itsyamin/flitnix/internal/textmsg"
 	"github.com/itsyamin/flitnix/internal/transfer"
+	"github.com/itsyamin/flitnix/internal/update"
+	"github.com/itsyamin/flitnix/internal/version"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -258,6 +260,7 @@ type App struct {
 	hostIdentity  *devices.HostIdentity
 	pairing       *devices.PairingCoordinator
 	inhibitor     power.Inhibitor
+	updater       *update.Service
 	startupMu     sync.Mutex
 	startupDone   bool
 	initialShares []string
@@ -356,6 +359,7 @@ func NewApp() (*App, error) {
 		pairing:       pairingCoord,
 		inhibitor:     power.New(),
 		source:        netenv.DefaultSource(),
+		updater:       update.New(update.Config{RepoOwner: "RobinMillford", RepoName: "flitnix"}),
 	}
 	a.sessions = session.NewManager(session.Config{OnExpire: a.releaseSession, OnEnd: a.logSessionEnd})
 	return a, nil
@@ -2360,4 +2364,49 @@ func (a *App) GetPairingStatus() devices.PairingStatusView {
 		return devices.PairingStatusView{}
 	}
 	return a.pairing.GetPairingStatus()
+}
+
+// GetAppVersion returns authoritative compile-time and runtime version info.
+func (a *App) GetAppVersion() version.Info {
+	return version.Get()
+}
+
+// CheckForUpdates queries GitHub Releases for newer stable versions.
+func (a *App) CheckForUpdates(force bool) (*update.CheckResult, error) {
+	if a.updater == nil {
+		return nil, errors.New("updater service unavailable")
+	}
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return a.updater.Check(ctx, force)
+}
+
+// DownloadUpdate downloads and verifies the matched release asset.
+func (a *App) DownloadUpdate() (*update.Progress, error) {
+	if a.updater == nil {
+		return nil, errors.New("updater service unavailable")
+	}
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return a.updater.Download(ctx, func(p update.Progress) {
+		if a.ctx != nil {
+			runtime.EventsEmit(a.ctx, "update:progress", p)
+		}
+	})
+}
+
+// ApplyUpdate installs or launches the verified update.
+func (a *App) ApplyUpdate() error {
+	if a.updater == nil {
+		return errors.New("updater service unavailable")
+	}
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return a.updater.Apply(ctx)
 }

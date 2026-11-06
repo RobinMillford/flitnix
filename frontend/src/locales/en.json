@@ -12,8 +12,9 @@
     "personal": "Personal Transfer",
     "guest": "Guest Drop Box",
     "templates": "Templates",
-    "audit": "Audit History",
     "devices": "Trusted Devices",
+    "history": "Transfer History",
+    "audit": "Audit History",
     "settings": "Settings",
     "doctor": "Connection Doctor",
     "doctorLabel": "Open Connection Doctor, status: {status}"
@@ -253,15 +254,18 @@
     "personalDesc": "Peer-to-peer file transfer over your local network",
     "guestDesc": "Collect files from any phone browser without app installation",
     "templatesDesc": "Preconfigured room templates and collection workflows",
-    "auditDesc": "Cryptographic logs and security audit trail",
     "devicesDesc": "Manage cryptographically authenticated devices and pairing",
+    "historyDesc": "View and manage past and active file transfers",
+    "auditDesc": "Cryptographic logs and security audit trail",
     "settingsDesc": "Application preferences, download path, and theme"
   },
   "sidebar": {
-    "sectionMain": "Transfer",
-    "sectionSecurity": "Security & Logs",
+    "sectionTransfer": "Transfer",
+    "sectionManagement": "Management",
     "sectionSystem": "System",
-    "version": "v2.6"
+    "sectionMain": "Transfer",
+    "sectionSecurity": "Management",
+    "version": "v2.7.0"
   },
   "settings": {
     "eyebrow": "Preferences",
