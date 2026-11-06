@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -322,24 +323,104 @@ func TestAssetMatching(t *testing.T) {
 }
 
 func TestInstallTypeDetermination(t *testing.T) {
+	// Windows returns installer
 	svcWin := New(Config{CurrentOS: "windows"})
-	if svcWin.determineInstallType() != InstallTypeInstaller {
-		t.Errorf("want installer on windows, got %s", svcWin.determineInstallType())
+	if got := svcWin.determineInstallType(); got != InstallTypeInstaller {
+		t.Errorf("want installer on windows, got %s", got)
 	}
 
+	// macOS returns manual
 	svcMac := New(Config{CurrentOS: "darwin"})
-	if svcMac.determineInstallType() != InstallTypeManual {
-		t.Errorf("want manual on macos, got %s", svcMac.determineInstallType())
+	if got := svcMac.determineInstallType(); got != InstallTypeManual {
+		t.Errorf("want manual on macos, got %s", got)
 	}
 
-	svcLinuxPortable := New(Config{CurrentOS: "linux", CurrentExecutablePath: "/home/user/bin/flitnix"})
-	if svcLinuxPortable.determineInstallType() != InstallTypeDirect {
-		t.Errorf("want direct on linux portable, got %s", svcLinuxPortable.determineInstallType())
-	}
-
+	// 1. /usr/bin/flitnix package-manager classification according to contract (Unix & Windows path separators)
 	svcLinuxSystem := New(Config{CurrentOS: "linux", CurrentExecutablePath: "/usr/bin/flitnix"})
-	if svcLinuxSystem.determineInstallType() != InstallTypePackageManager {
-		t.Errorf("want package_manager on /usr/bin/flitnix, got %s", svcLinuxSystem.determineInstallType())
+	if got := svcLinuxSystem.determineInstallType(); got != InstallTypePackageManager {
+		t.Errorf("want package_manager on /usr/bin/flitnix, got %s", got)
+	}
+
+	svcLinuxSystemWinStyle := New(Config{CurrentOS: "linux", CurrentExecutablePath: `\usr\bin\flitnix`})
+	if got := svcLinuxSystemWinStyle.determineInstallType(); got != InstallTypePackageManager {
+		t.Errorf(`want package_manager on \usr\bin\flitnix, got %s`, got)
+	}
+
+	// 2. Portable binary installation
+	svcLinuxPortable := New(Config{CurrentOS: "linux", CurrentExecutablePath: "/home/user/bin/flitnix"})
+	if got := svcLinuxPortable.determineInstallType(); got != InstallTypeDirect {
+		t.Errorf("want direct on linux portable, got %s", got)
+	}
+
+	// 3. Portable AppImage installation (path-based and env-based)
+	svcAppImagePath := New(Config{CurrentOS: "linux", CurrentExecutablePath: "/home/user/Applications/Flitnix-2.7.0.AppImage"})
+	if got := svcAppImagePath.determineInstallType(); got != InstallTypeManual {
+		t.Errorf("want manual on portable AppImage path, got %s", got)
+	}
+
+	svcAppImageEnv := New(Config{
+		CurrentOS:             "linux",
+		CurrentExecutablePath: "/tmp/.mount_flitnix/flitnix",
+		IsAppImage:            func() bool { return true },
+	})
+	if got := svcAppImageEnv.determineInstallType(); got != InstallTypeManual {
+		t.Errorf("want manual on AppImage environment, got %s", got)
+	}
+
+	// 4. Package-managed installation via platform query mechanism
+	svcPkgManaged := New(Config{
+		CurrentOS:             "linux",
+		CurrentExecutablePath: "/opt/flitnix/bin/flitnix",
+		PackageManagerChecker: func(path string) (bool, error) {
+			if path == "/opt/flitnix/bin/flitnix" {
+				return true, nil
+			}
+			return false, nil
+		},
+	})
+	if got := svcPkgManaged.determineInstallType(); got != InstallTypePackageManager {
+		t.Errorf("want package_manager on package-managed installation, got %s", got)
+	}
+
+	// 5. Missing executable path
+	svcMissingExe := New(Config{CurrentOS: "linux", CurrentExecutablePath: "", AllowEmptyExecutablePath: true})
+	if got := svcMissingExe.determineInstallType(); got != InstallTypeManual {
+		t.Errorf("want manual fallback on missing executable path, got %s", got)
+	}
+
+	// 6. Unsupported installation formats (Snap, Flatpak)
+	svcSnap := New(Config{CurrentOS: "linux", CurrentExecutablePath: "/snap/flitnix/10/bin/flitnix"})
+	if got := svcSnap.determineInstallType(); got != InstallTypeManual {
+		t.Errorf("want manual on snap format, got %s", got)
+	}
+
+	svcFlatpak := New(Config{CurrentOS: "linux", CurrentExecutablePath: "/var/lib/flatpak/app/com.flitnix.Flitnix/flitnix"})
+	if got := svcFlatpak.determineInstallType(); got != InstallTypeManual {
+		t.Errorf("want manual on flatpak format, got %s", got)
+	}
+
+	// 7. Detection errors and safe fallback behaviour
+	svcDetectionErr := New(Config{
+		CurrentOS:             "linux",
+		CurrentExecutablePath: "/home/user/bin/flitnix",
+		PackageManagerChecker: func(path string) (bool, error) {
+			return false, errors.New("rpm database query failed: lock timeout")
+		},
+	})
+	if got := svcDetectionErr.determineInstallType(); got != InstallTypeManual {
+		t.Errorf("want manual fallback on detection error, got %s", got)
+	}
+
+	// Fallback for non-package-managed binary with successful check
+	svcExplicitNonPkg := New(Config{
+		CurrentOS:             "linux",
+		CurrentExecutablePath: "/opt/standalone/flitnix",
+		PackageManagerChecker: func(path string) (bool, error) {
+			return false, nil
+		},
+	})
+	if got := svcExplicitNonPkg.determineInstallType(); got != InstallTypeDirect {
+		t.Errorf("want direct on standalone non-packaged binary, got %s", got)
 	}
 }
 
