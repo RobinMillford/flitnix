@@ -34,9 +34,9 @@ Flitnix combines the performance and concurrency safety of Go with a modern Svel
 
 ---
 
-## Key Features & What's New in v2.5
+## Key Features & What's New in v2.6
 
-Flitnix provides high-speed, private local file transfers between desktop computers and phones. Version **v2.5** brings major reliability, security, and recovery improvements across the transfer engine:
+Flitnix provides high-speed, private local file transfers between desktop computers and phones. Version **v2.6** brings major reliability, security, and recovery improvements across the transfer engine:
 
 - **Resumable Transfers & Interruption Recovery (Tus 1.0.0)**:
   - If Wi-Fi drops, connections reset, or browser tabs close mid-stream, transfers resume seamlessly from the last verified checkpoint without re-uploading completed data.
@@ -120,7 +120,7 @@ Every release includes a verified `SHA256SUMS.txt` manifest.
 
 ## Platform Compatibility & Project Status
 
-### Flitnix v2.5 Project & Release Status
+### Flitnix v2.6 Project & Release Status
 
 | Platform / Target | Minimum Version | Status | Verification & Readiness Notes |
 | :--- | :--- | :--- | :--- |
@@ -128,7 +128,7 @@ Every release includes a verified `SHA256SUMS.txt` manifest.
 | **Windows (Desktop)** | Windows 10 (1809+) / Windows 11 (64-bit) | **CI Pending** | Source-level implementation and synchronous checkpoint fallback complete; local repeated tests pass (20/20); remote Windows GitHub Actions CI confirmation pending. Authenticode code signing pending. |
 | **macOS (Desktop)** | macOS 11.0 Big Sur or later | **Native Validation Pending** | Universal binary configuration present (`.dmg` / `.zip`); synchronous checkpoint fallback implemented and cross-compiled; native hardware execution, code signing, and notarization pending. |
 | **Mobile Browsers** | iOS 14+ (Safari), Android 8+ (Chrome, Firefox, etc.) | **Automated Tests Passed** | Automated browser runtime, worker SHA-256 streaming, and wake-lock test suites pass; physical mobile device validation across diverse hardware pending. |
-| **Physical RF Wi-Fi & Power Loss** | All Platforms | **Deferred** | Physical multi-room RF Wi-Fi roaming, AP handoff, and hardware sudden power-loss testing are explicitly deferred to post-v2.5 evaluation tracks. |
+| **Physical RF Wi-Fi & Power Loss** | All Platforms | **Deferred** | Physical multi-room RF Wi-Fi roaming, AP handoff, and hardware sudden power-loss testing are explicitly deferred to post-v2.6 evaluation tracks. |
 
 ---
 
