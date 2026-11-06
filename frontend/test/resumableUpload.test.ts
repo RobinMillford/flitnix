@@ -1266,3 +1266,193 @@ test('Scenario 39 & 43: Browser restart at 100% bytes (awaiting_digest) rehashes
   // Verify that subsequent completion can be submitted with this exact verified digest
   assert.equal(verifiedMsg.serverOffset, fullBytes.length)
 })
+
+// -----------------------------------------------------------------------------
+// 9. Upload Retry State & Mid-Transfer Interruption Tests (Android Bug Fix)
+// -----------------------------------------------------------------------------
+
+test('Worker Streaming: Partial 204 response (committedOffset < totalSize) posts UPLOAD_INTERRUPTED instead of UPLOAD_BYTES_COMPLETE', async () => {
+  const totalSize = 10000
+  const partialCommitted = 4500
+
+  // Mock server returning 204 No Content with Upload-Offset: 4500 (partial commit due to premature stream closure)
+  const mockFetch = async (url: string, opts: any) => {
+    return {
+      status: 204,
+      ok: true,
+      headers: {
+        get: (h: string) => {
+          if (h.toLowerCase() === 'upload-offset') return String(partialCommitted)
+          return null
+        }
+      }
+    }
+  }
+
+  const { context, messages } = createWorkerContext(mockFetch)
+
+  const mockFile = {
+    name: 'android_large_transfer.bin',
+    size: totalSize,
+    slice: () => ({
+      size: totalSize,
+      stream: () => new ReadableStream({
+        start(controller) {
+          controller.enqueue(new Uint8Array(partialCommitted))
+          controller.close()
+        }
+      })
+    })
+  }
+
+  await context.onmessage({
+    data: {
+      type: 'START_UPLOAD',
+      transferId: 't-android-partial',
+      file: mockFile,
+      uploadUrl: 'http://desktop.local/tus/item',
+      authHeader: 'Bearer token',
+      serverOffset: 0
+    }
+  })
+
+  // Ensure worker processed the response
+  await new Promise((resolve) => setTimeout(resolve, 50))
+
+  const completeMsg = messages.find((m) => m.type === 'UPLOAD_BYTES_COMPLETE')
+  assert.equal(completeMsg, undefined, 'Worker MUST NEVER emit UPLOAD_BYTES_COMPLETE when committedOffset < totalSize')
+
+  const interruptedMsg = messages.find((m) => m.type === 'UPLOAD_INTERRUPTED')
+  assert.ok(interruptedMsg, 'Worker must emit UPLOAD_INTERRUPTED on partial 204')
+  assert.equal(interruptedMsg.status, 204)
+  assert.equal(interruptedMsg.serverOffset, partialCommitted)
+  assert.ok(interruptedMsg.error.includes('Stream ended before all bytes were transferred'))
+})
+
+test('Worker Streaming: 423 Locked response posts UPLOAD_INTERRUPTED with status 423 and retryAfter', async () => {
+  const mockFetch = async () => ({
+    status: 423,
+    ok: false,
+    headers: {
+      get: (h: string) => (h.toLowerCase() === 'retry-after' ? '2' : null)
+    }
+  })
+
+  const { context, messages } = createWorkerContext(mockFetch)
+
+  const mockFile = {
+    name: 'locked_transfer.bin',
+    size: 5000,
+    slice: () => ({
+      size: 5000,
+      stream: () => new ReadableStream({
+        start(controller) {
+          controller.enqueue(new Uint8Array(100))
+          controller.close()
+        }
+      })
+    })
+  }
+
+  await context.onmessage({
+    data: {
+      type: 'START_UPLOAD',
+      transferId: 't-locked-retry',
+      file: mockFile,
+      uploadUrl: 'http://desktop.local/tus/item',
+      authHeader: 'Bearer token',
+      serverOffset: 0
+    }
+  })
+
+  await new Promise((resolve) => setTimeout(resolve, 50))
+
+  const interruptedMsg = messages.find((m) => m.type === 'UPLOAD_INTERRUPTED')
+  assert.ok(interruptedMsg, 'Worker must emit UPLOAD_INTERRUPTED on 423')
+  assert.equal(interruptedMsg.status, 423)
+  assert.equal(interruptedMsg.retryAfter, 2)
+})
+
+test('ResumableEngine: Reconciles with server HEAD on retry and resumes from committed offset without restarting from zero', async () => {
+  const fileBytes = Buffer.from('0123456789'.repeat(100)) // 1000 bytes
+  const committedOffset = 600
+  const prefixDigest = createHash('sha256').update(fileBytes.subarray(0, committedOffset)).digest('hex')
+  const fullDigest = createHash('sha256').update(fileBytes).digest('hex')
+
+  const file = createMockFile('resume_retry.bin', fileBytes)
+
+  let headCount = 0
+  let patchCount = 0
+  let patchOffset = -1
+  let completed = false
+
+  const mockFetch = async (url: string, opts: any = {}) => {
+    const method = opts.method || 'GET'
+    if (method === 'HEAD') {
+      headCount++
+      return {
+        ok: true,
+        status: 200,
+        headers: {
+          get: (name: string) => {
+            const lower = name.toLowerCase()
+            if (lower === 'upload-offset') return String(committedOffset)
+            if (lower === 'upload-length') return String(fileBytes.length)
+            if (lower === 'upload-state') return 'interrupted'
+            if (lower === 'upload-prefix-digest') return prefixDigest
+            return null
+          }
+        }
+      }
+    }
+    if (method === 'PATCH') {
+      patchCount++
+      patchOffset = Number(opts.headers['Upload-Offset'])
+      const reader = opts.body.getReader()
+      while (!(await reader.read()).done) {}
+      return {
+        ok: true,
+        status: 204,
+        headers: {
+          get: (name: string) => (name.toLowerCase() === 'upload-offset' ? String(fileBytes.length) : null)
+        }
+      }
+    }
+    if (method === 'POST') {
+      const body = JSON.parse(opts.body)
+      assert.equal(body.expectedSHA256, fullDigest)
+      completed = true
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ id: 'item-1', name: 'resume_retry.bin', state: 'completed' })
+      }
+    }
+    throw new Error('Unhandled method: ' + method)
+  }
+
+  const session = createClientContext({ mockFetch })
+  session.context.waitMs = () => new Promise((r) => setTimeout(r, 5))
+  session.context.getBackoffMs = () => 5
+
+  const engine = new session.client.ResumableUploadEngine()
+
+  await new Promise<void>((resolve, reject) => {
+    engine.startUpload({
+      transferId: 't-retry-reconcile',
+      file,
+      uploadUrl: 'http://desktop.local/tus/item',
+      completeUrl: 'http://desktop.local/complete/item',
+      statusUrl: 'http://desktop.local/status/item',
+      type: 'guest'
+    }, {
+      onComplete: () => resolve(),
+      onError: reject
+    })
+  })
+
+  assert.equal(headCount, 1, 'Must query authoritative HEAD on start')
+  assert.equal(patchCount, 1, 'Must issue resumed PATCH')
+  assert.equal(patchOffset, committedOffset, 'Must resume exactly from server committed offset (600), NOT 0')
+  assert.ok(completed, 'Must complete upload after resuming remaining bytes')
+})
