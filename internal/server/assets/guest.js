@@ -689,13 +689,6 @@
     retryBtn.hidden = true;
     retryBtn.addEventListener("click", function () {
       retryBtn.hidden = true;
-      if (job.uploadId && typeof FlitnixResumable !== "undefined") {
-        job.state = "uploading";
-        job.error = "Reconciling upload with host desktop…";
-        updateJobUI(job);
-        streamGuestUpload(job);
-        return;
-      }
       job.state = "queued";
       job.uploadId = null;
       job.transferred = 0;
@@ -875,80 +868,7 @@
     check();
   }
 
-  function streamJobContentResumable(job) {
-    job.state = "uploading";
-    updateJobUI(job);
-    syncWakeLock();
-
-    var tusURL = "/guest-api/uploads/" + encodeURIComponent(job.uploadId) + "/tus";
-    var completeURL = "/guest-api/uploads/" + encodeURIComponent(job.uploadId) + "/complete";
-    var statusURL = "/guest-api/uploads/" + encodeURIComponent(job.uploadId) + "/status";
-    var transferID = "guest-" + job.uploadId;
-
-    fetch(tusURL, {
-      method: "POST",
-      headers: {
-        "Tus-Resumable": "1.0.0",
-        "Upload-Length": String(job.size)
-      }
-    })
-      .then(function () {
-        var engine = new FlitnixResumable.ResumableUploadEngine();
-        job.resumableSession = engine.startUpload({
-          transferId: transferID,
-          file: job.file,
-          uploadUrl: tusURL,
-          completeUrl: completeURL,
-          statusUrl: statusURL,
-          type: "guest"
-        }, {
-          onProgress: function (p) {
-            job.transferred = p.uploaded;
-            job.speed = p.speed || 0;
-            updateJobUI(job);
-            updateAwarenessUI();
-          },
-          onRebuildProgress: function (p) {
-            if (job.el && job.el.detail) {
-              job.el.detail.textContent = "Rebuilding prefix (" + formatBytes(p.hashed) + " / " + formatBytes(p.total) + ")…";
-            }
-          },
-          onReconnecting: function (r) {
-            if (job.el && job.el.detail) {
-              job.el.detail.textContent = "Reconnecting (attempt " + r.attempt + "/" + r.maxRetries + ")…";
-            }
-          },
-          onComplete: function () {
-            job.resumableSession = null;
-            job.state = "completed";
-            job.transferred = job.size;
-            updateJobUI(job);
-            isUploading = false;
-            syncWakeLock();
-            pumpQueue();
-          },
-          onError: function (err) {
-            job.resumableSession = null;
-            job.state = "failed";
-            job.error = (err && err.message) || "Upload failed";
-            updateJobUI(job);
-            isUploading = false;
-            syncWakeLock();
-            pumpQueue();
-          }
-        });
-      })
-      .catch(function (err) {
-        job.state = "failed";
-        job.error = (err && err.message) || "Tus creation failed";
-        updateJobUI(job);
-        isUploading = false;
-        syncWakeLock();
-        pumpQueue();
-      });
-  }
-
-  function streamJobContentLegacy(job) {
+  function streamJobContent(job) {
     job.state = "uploading";
     updateJobUI(job);
     syncWakeLock();
@@ -1001,14 +921,6 @@
 
     xhr.open("PUT", "/guest-api/uploads/" + encodeURIComponent(job.uploadId) + "/content");
     xhr.send(job.file);
-  }
-
-  function streamJobContent(job) {
-    if (typeof FlitnixResumable !== "undefined") {
-      streamJobContentResumable(job);
-    } else {
-      streamJobContentLegacy(job);
-    }
   }
 
 })();

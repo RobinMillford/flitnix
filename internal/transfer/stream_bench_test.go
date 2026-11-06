@@ -3,7 +3,6 @@ package transfer
 import (
 	"io"
 	"os"
-	"path/filepath"
 	"testing"
 )
 
@@ -23,8 +22,8 @@ func (z *zeroReader) Read(p []byte) (int, error) {
 	return int(toRead), nil
 }
 
-func BenchmarkIngestStream(b *testing.B) {
-	tempDir, err := os.MkdirTemp("", "bench-ingest-*")
+func BenchmarkSimplifiedStreamingUpload(b *testing.B) {
+	tempDir, err := os.MkdirTemp("", "bench-stream-*")
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -34,8 +33,6 @@ func BenchmarkIngestStream(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	rm := NewResumableManager(store, nil)
-	defer rm.Close()
 
 	const payloadSize = 256 * 1024 * 1024 // 256 MB per benchmark run
 
@@ -44,25 +41,19 @@ func BenchmarkIngestStream(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
-		transferID := filepath.Join(tempDir, "bench_up")
-		_ = os.Remove(transferID)
-		meta, err := rm.CreateUpload("sess-1", "up-bench", "batch-1", "item-1", "test.bin", "", payloadSize, "")
+		sink, err := newPartSink(store, "test.bin")
 		if err != nil {
 			b.Fatal(err)
 		}
 		zr := &zeroReader{remaining: payloadSize}
 		b.StartTimer()
 
-		_, _, err = rm.IngestStream(meta.TransferID, 0, zr, nil)
+		_, err = streamBody(zr, sink, payloadSize, nil)
 		if err != nil {
 			b.Fatal(err)
 		}
 
 		b.StopTimer()
-		_ = os.Remove(rm.partPath(meta.TransferID))
-		_ = os.Remove(rm.metaPath(meta.TransferID))
-		rm.mu.Lock()
-		delete(rm.uploads, meta.TransferID)
-		rm.mu.Unlock()
+		_ = sink.Abort()
 	}
 }

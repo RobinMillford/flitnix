@@ -6,6 +6,16 @@
     <link rel="icon" type="image/png" href="/favicon.png"/>
     <link rel="apple-touch-icon" href="/favicon.png"/>
     <title>Flitnix</title>
+    <script>
+      (function() {
+        try {
+          const q = new URLSearchParams(window.location.search).get('theme');
+          if (q === 'dark' || q === 'light') {
+            document.documentElement.setAttribute('data-theme', q);
+          }
+        } catch (_) {}
+      })();
+    </script>
 </head>
 <body>
 <div id="app"></div>

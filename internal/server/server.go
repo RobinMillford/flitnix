@@ -143,7 +143,6 @@ type Config struct {
 // application is the composition root: it owns these instances (and the
 // receive Store inside the transfer Service) and handed to Config.
 type Services struct {
-	resumableMu    sync.Mutex
 	Sessions       *session.Manager
 	Transfers      *transfer.Service
 	Coordinator    *transfer.Coordinator
@@ -156,7 +155,6 @@ type Services struct {
 	HostIdentity   *devices.HostIdentity
 	Pairing        *devices.PairingCoordinator
 	Inhibitor      power.Inhibitor
-	Resumable      *transfer.ResumableManager
 	OnPhoneContact func(source string)
 
 	// OnBatchPending, when non-nil, receives notice of a newly declared batch
@@ -188,26 +186,6 @@ func (s *Services) RecordContact(source string) {
 	if s != nil && s.OnPhoneContact != nil {
 		s.OnPhoneContact(source)
 	}
-}
-
-// EnsureResumable ensures that ResumableManager is initialized if Transfers is configured.
-func (s *Services) EnsureResumable() *transfer.ResumableManager {
-	if s == nil {
-		return nil
-	}
-	s.resumableMu.Lock()
-	defer s.resumableMu.Unlock()
-	if s.Resumable != nil {
-		return s.Resumable
-	}
-	if s.Transfers != nil && s.Transfers.Store() != nil {
-		store := s.Transfers.Store()
-		quota := transfer.NewQuotaManager(store.Dir(), transfer.DefaultSafetyMargin, transfer.DefaultMaxConcurrentPerSession)
-		s.Resumable = transfer.NewResumableManager(store, quota)
-		s.Resumable.SetPipelineCheckpoints(true)
-		return s.Resumable
-	}
-	return nil
 }
 
 // normalize fills in zero-value defaults.

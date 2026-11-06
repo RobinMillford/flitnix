@@ -53,3 +53,32 @@ benchmarks/*_results.json
 # Local transfer staging directories.
 /.flitnix-tmp/
 **/.flitnix-tmp/
+
+# Scratch, patch files, temporary artifacts, and coverage
+*.patch
+*.diff
+*.orig
+*.rej
+*.tmp
+*.temp
+scratch/
+coverage/
+.nyc_output/
+test-results/
+.claude/
+.gemini/
+
+# Internal documentation, architecture audits, and unpublished reports
+/docs/architecture/
+/docs/internal/
+/docs/screenshots/
+docs/*audit*.md
+docs/*-audit.md
+docs/*-report.md
+docs/*-assessment.md
+docs/*-backlog.md
+docs/*-evaluation.md
+docs/TRANSPORT_ENCRYPTION_EVALUATION.md
+!docs/architecture.md
+!docs/batch-transfer-contract.md
+!docs/phase3-scenario-matrix.md

@@ -456,11 +456,12 @@
       case "queued": return "Queued";
       case "declaring": return "Contacting the desktop…";
       case "waiting": return "Waiting for approval on the desktop…";
-      case "sending": return "Transferring…";
+      case "sending": return "Uploading…";
       case "canceling": return "Canceling…";
-      case "done": return "Sent";
+      case "done": return "Completed";
       case "canceled": return "Canceled";
       case "failed": return "Failed";
+      case "retrying": return "Retrying from the beginning…";
     }
     return job.phase;
   }
@@ -626,17 +627,10 @@
     if (job.phase === "waiting" || job.phase === "sending") {
       job.cancelRequested = true;
       job.phase = "canceling";
-      paint(job);
-      if (job.resumableSession && typeof job.resumableSession.cancel === "function") {
-        job.resumableSession.cancel(function (res) {
-          if (res && res.cancelled) {
-            cancelJob(job);
-          } else {
-            refreshBatchAfterCancel();
-          }
-        });
-        return;
+      if (job.xhr) {
+        try { job.xhr.abort(); } catch (e) { /* gone */ }
       }
+      paint(job);
       cancelDeclaredItem(job, 1);
       return;
     }
@@ -751,29 +745,29 @@
 
   function retryJob(job) {
     if (appState.ended) return;
-    if (job.batchID && job.itemID && job.file && typeof FlitnixResumable !== "undefined") {
-      // Safe resumable reconciliation: resume from authoritative server committed offset
-      // without restarting from zero or prompting the desktop operator for duplicate approval.
-      job.phase = "sending";
-      job.err = "Reconciling upload with desktop…";
-      job.retryable = false;
-      job.cancelRequested = false;
-      job.cancelInFlight = false;
-      if (!activeBatch) {
-        activeBatch = { id: job.batchID, jobs: [job], failures: 0, timer: null };
-      }
-      paint(job);
-      syncWakeLock();
-      sendBatchItem(job);
-      return;
-    }
-    job.id = null; job.phase = "queued"; job.err = null;
-    job.uploaded = 0; job.failures = 0; job.retryable = false;
-    job.cancelRequested = false; job.cancelInFlight = false;
-    job.refs.fill.style.width = "0%";
-    job.refs.bar.hidden = true;
+    job.id = null;
+    job.batchID = null;
+    job.itemID = null;
+    job.phase = "retrying";
+    job.err = null;
+    job.uploaded = 0;
+    job.failures = 0;
+    job.speed = 0;
+    job.eta = 0;
+    job.retryable = false;
+    job.cancelRequested = false;
+    job.cancelInFlight = false;
+    if (job.refs && job.refs.fill) job.refs.fill.style.width = "0%";
+    if (job.refs && job.refs.bar) job.refs.bar.hidden = true;
     paint(job);
-    pump();
+    syncWakeLock();
+    // Fresh restart: start streaming from byte zero with a new transfer allocation
+    setTimeout(function () {
+      if (job.removed || appState.ended) return;
+      job.phase = "queued";
+      paint(job);
+      pump();
+    }, 200);
   }
 
   function pump() {
@@ -993,76 +987,8 @@
     });
   }
 
-  function streamBatchItemResumable(job) {
-    if (typeof FlitnixResumable === "undefined") {
-      return putBatchContent(job);
-    }
-    return new Promise(function (resolve, reject) {
-      var tusURL = "/api/batches/" + encodeURIComponent(job.batchID) +
-                   "/items/" + encodeURIComponent(job.itemID) + "/tus";
-      var completeURL = "/api/batches/" + encodeURIComponent(job.batchID) +
-                        "/items/" + encodeURIComponent(job.itemID) + "/complete";
-      var statusURL = "/api/batches/" + encodeURIComponent(job.batchID) +
-                      "/items/" + encodeURIComponent(job.itemID) + "/status";
-      var transferID = "batch-" + job.batchID + "-" + job.itemID;
-
-      // Ensure tus upload is created on server
-      api(tusURL, {
-        method: "POST",
-        headers: {
-          "Tus-Resumable": "1.0.0",
-          "Upload-Length": String(job.size)
-        }
-      }).then(function () {
-        var engine = new FlitnixResumable.ResumableUploadEngine();
-        job.resumableSession = engine.startUpload({
-          transferId: transferID,
-          file: job.file,
-          uploadUrl: tusURL,
-          completeUrl: completeURL,
-          statusUrl: statusURL,
-          authHeader: "Bearer " + token,
-          type: "personal"
-        }, {
-          onProgress: function (p) {
-            job.uploaded = p.uploaded;
-            job.speed = p.speed || 0;
-            job.eta = p.eta || 0;
-            paint(job);
-          },
-          onRebuildProgress: function (p) {
-            job.err = "Rebuilding prefix (" + fmtBytes(p.hashed) + " / " + fmtBytes(p.total) + ")…";
-            paint(job);
-          },
-          onReconnecting: function (r) {
-            job.err = "Reconnecting (attempt " + r.attempt + "/" + r.maxRetries + ")…";
-            paint(job);
-          },
-          onComplete: function () {
-            job.resumableSession = null;
-            resolve();
-          },
-          onAborted: function () {
-            job.resumableSession = null;
-            reject({ aborted: true });
-          },
-          onError: function (err) {
-            job.resumableSession = null;
-            reject(err);
-          }
-        });
-      }).catch(function (err) {
-        reject(err);
-      });
-    });
-  }
-
   function sendBatchItem(job) {
-    var transferPromise = (typeof FlitnixResumable !== "undefined")
-      ? streamBatchItemResumable(job)
-      : putBatchContent(job);
-
-    transferPromise.then(function () {
+    putBatchContent(job).then(function () {
       if (job.phase === "done" || job.phase === "canceled") return;
       job.phase = "done"; job.err = null; paint(job);
       watchBatch();
@@ -1080,17 +1006,17 @@
         if (activeBatch) watchBatch();
         return;
       }
-      if (e && e.aborted) { job.phase = "canceled"; job.err = "Upload canceled."; }
-      else {
+      if (e && e.aborted) {
+        job.phase = "canceled"; job.err = "Upload canceled.";
+      } else {
         job.phase = "failed";
-        job.err = (e && e.message) || "Transfer failed.";
+        job.err = (e && e.message) || "Upload failed.";
         job.retryable = true;
-        if (e && (e.status === 404 || e.status === 410 || (e.message && (e.message.indexOf("404") !== -1 || e.message.indexOf("410") !== -1)))) {
-          job.batchID = null;
-          job.itemID = null;
-          job.uploaded = 0;
-        }
       }
+      // Stale transfer identifiers cleared so retry creates a fresh transfer from byte zero
+      job.batchID = null;
+      job.itemID = null;
+      job.uploaded = 0;
       activeBatch.jobs.forEach(function (other) {
         if (other !== job && other.phase === "waiting") other.phase = "queued";
         if (other !== job) paint(other);

@@ -38,15 +38,6 @@ func newGuestAPIMux(services *Services, stall time.Duration) http.Handler {
 	mux.HandleFunc("POST /guest-api/uploads", handleGuestUploadDeclare(services))
 	mux.HandleFunc("GET /guest-api/uploads/{id}", handleGuestUploadStatus(services))
 	mux.HandleFunc("PUT /guest-api/uploads/{id}/content", handleGuestUploadContent(services, stall))
-
-	// Resumable upload endpoints (tus 1.0.0 & application lifecycle)
-	mux.HandleFunc("OPTIONS /guest-api/uploads/{uploadID}/tus", handleGuestTusOptions())
-	mux.HandleFunc("POST /guest-api/uploads/{uploadID}/tus", handleGuestTusCreate(services))
-	mux.HandleFunc("HEAD /guest-api/uploads/{uploadID}/tus", handleGuestTusHead(services))
-	mux.HandleFunc("PATCH /guest-api/uploads/{uploadID}/tus", handleGuestTusPatch(services, stall))
-	mux.HandleFunc("DELETE /guest-api/uploads/{uploadID}/tus", handleGuestTusDelete(services))
-	mux.HandleFunc("POST /guest-api/uploads/{uploadID}/complete", handleGuestComplete(services))
-	mux.HandleFunc("GET /guest-api/uploads/{uploadID}/status", handleGuestResumableStatus(services))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if services != nil {
 			services.RecordContact("guest_api")
