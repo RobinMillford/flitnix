@@ -292,7 +292,13 @@ func TestServeBindsSpecificLANIPv4(t *testing.T) {
 // package default 127.0.0.1), so the binding logic is exercised even on
 // machines with no LAN interfaces.
 func TestServeBindsSpecificLoopbackIPv4(t *testing.T) {
-	listen := net.JoinHostPort("127.0.0.9", "0")
+	ip := "127.0.0.9"
+	if blk, err := net.Listen("tcp", "127.0.0.9:0"); err != nil {
+		ip = "127.0.0.1"
+	} else {
+		_ = blk.Close()
+	}
+	listen := net.JoinHostPort(ip, "0")
 	s := startBound(t, listen)
 	checkBound(t, s, s.Addr().String())
 }
@@ -318,7 +324,13 @@ func TestServeBindsSpecificLoopbackIPv6(t *testing.T) {
 // also surfaces when binding an explicit interface address rather than
 // the loopback default.
 func TestServePortInUseOnSpecificAddress(t *testing.T) {
-	blocker, err := net.Listen("tcp", "127.0.0.8:0")
+	ip := "127.0.0.8"
+	if blk, err := net.Listen("tcp", "127.0.0.8:0"); err != nil {
+		ip = "127.0.0.1"
+	} else {
+		_ = blk.Close()
+	}
+	blocker, err := net.Listen("tcp", net.JoinHostPort(ip, "0"))
 	if err != nil {
 		t.Fatalf("allocating blocker: %v", err)
 	}

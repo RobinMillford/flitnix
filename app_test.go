@@ -251,14 +251,39 @@ func mustJSON(t *testing.T, value any) []byte {
 
 // ---- server lifecycle through the adapter ----
 
-// loopTestIP picks an uncommon loopback address: the adapter tests exercise
-// real binds through addresses that no other test package's default
-// (127.0.0.1 / .9) occupies, while keeping the fixed port.
-const loopTestIP = "127.0.0.77"
+// loopTestIP returns a loopback address supported by the host OS.
+// Linux routes the entire 127.0.0.0/8 block, allowing 127.0.0.77.
+// Darwin and other platforms typically bind only 127.0.0.1 by default.
+func loopTestIP(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.77:0")
+	if err == nil {
+		_ = ln.Close()
+		return "127.0.0.77"
+	}
+	return "127.0.0.1"
+}
+
+func loopTestAltIP(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.78:0")
+	if err == nil {
+		_ = ln.Close()
+		return "127.0.0.78"
+	}
+	lip := lanIPv4(t)
+	if lip != "127.0.0.1" {
+		return lip
+	}
+	t.Skip("skipping rebind test: alternate loopback IP not routable on this OS")
+	return ""
+}
 
 func TestEnsureServerBindsExplicitAddress(t *testing.T) {
 	a := newTestApp(t)
-	listen := loopTestIP + ":43821"
+	ip := loopTestIP(t)
+	probeLANPort(t, ip)
+	listen := ip + ":43821"
 	if err := a.ensureServer(listen); err != nil {
 		t.Fatalf("ensureServer(%s): %v", listen, err)
 	}
@@ -275,7 +300,9 @@ func TestEnsureServerBindsExplicitAddress(t *testing.T) {
 
 func TestEnsureServerReusesSameAddress(t *testing.T) {
 	a := newTestApp(t)
-	listen := loopTestIP + ":43821"
+	ip := loopTestIP(t)
+	probeLANPort(t, ip)
+	listen := ip + ":43821"
 	if err := a.ensureServer(listen); err != nil {
 		t.Fatalf("first ensureServer: %v", err)
 	}
@@ -303,8 +330,12 @@ func TestEnsureServerReusesSameAddress(t *testing.T) {
 
 func TestEnsureServerDifferentAddressEndsSessions(t *testing.T) {
 	a := newTestApp(t)
-	first := loopTestIP + ":43821"
-	second := "127.0.0.78:43821"
+	ip1 := loopTestIP(t)
+	ip2 := loopTestAltIP(t)
+	probeLANPort(t, ip1)
+	probeLANPort(t, ip2)
+	first := ip1 + ":43821"
+	second := ip2 + ":43821"
 	if err := a.ensureServer(first); err != nil {
 		t.Fatalf("first ensureServer: %v", err)
 	}
@@ -337,7 +368,7 @@ func TestEnsureServerDifferentAddressEndsSessions(t *testing.T) {
 
 func TestEnsureServerPortOccupied(t *testing.T) {
 	a := newTestApp(t)
-	blocker, err := net.Listen("tcp", "127.0.0.79:0")
+	blocker, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("allocating blocker: %v", err)
 	}
@@ -479,7 +510,9 @@ func TestStartSessionSecondCallIsTheSameAddress(t *testing.T) {
 
 func TestSessionQREndToEnd(t *testing.T) {
 	a := newTestApp(t)
-	listen := loopTestIP + ":43821"
+	ip := loopTestIP(t)
+	probeLANPort(t, ip)
+	listen := ip + ":43821"
 	if err := a.ensureServer(listen); err != nil {
 		t.Fatalf("ensureServer: %v", err)
 	}
@@ -517,7 +550,9 @@ func TestSessionQREndToEnd(t *testing.T) {
 
 func TestEndSessionStopsServerWhenLastLeaves(t *testing.T) {
 	a := newTestApp(t)
-	listen := loopTestIP + ":43821"
+	ip := loopTestIP(t)
+	probeLANPort(t, ip)
+	listen := ip + ":43821"
 	if err := a.ensureServer(listen); err != nil {
 		t.Fatalf("ensureServer: %v", err)
 	}
