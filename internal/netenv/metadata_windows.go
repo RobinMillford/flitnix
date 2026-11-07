@@ -41,6 +41,9 @@ type wlanConnectionAttributes struct {
 	BssType uint32
 }
 
+// InvalidateMetadataCache is a no-op on Windows since wlanapi queries are in-process Win32 calls.
+func InvalidateMetadataCache() {}
+
 // systemMetadata queries the Native Wi-Fi API. Windows interface/address
 // enumeration remains in the shared net package; this adapter only supplies
 // connection identity and SSID metadata.

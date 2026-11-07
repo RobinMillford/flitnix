@@ -4,6 +4,9 @@
 
   export let settingsState: main.SettingsView
   export let interfaces: netenv.View[] = []
+  export let networkState: netenv.NetworkState | null = null
+  export let refreshingNetwork: boolean = false
+  export let onRefreshNetwork: () => void = () => {}
   export let appVersionInfo: version.Info | null = null
   export let updateAvailableBadge: boolean = false
   export let savingSettings: boolean = false
@@ -171,7 +174,7 @@
       </div>
 
       <div class="setting-row">
-        <div style="max-width: 480px;">
+        <div style="display: flex; gap: 10px; align-items: center; max-width: 580px;">
           <select id="iface-select" class="text-input" bind:value={settingsState.preferredInterface}>
             <option value="">Automatic Selection (Recommended)</option>
             {#each uniqueInterfaces as iface (iface.name)}
@@ -185,7 +188,26 @@
               </option>
             {/if}
           </select>
+          <button
+            type="button"
+            class="button secondary small"
+            on:click={onRefreshNetwork}
+            disabled={refreshingNetwork}
+            title="Refresh network status"
+            aria-label="Refresh network status"
+            style="white-space: nowrap; display: inline-flex; align-items: center; gap: 6px;"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class:spinning={refreshingNetwork}>
+              <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+            </svg>
+            {refreshingNetwork ? 'Refreshing…' : 'Refresh'}
+          </button>
         </div>
+        {#if networkState?.status === 'selected_unavailable' && networkState?.error}
+          <div class="setting-hint" style="color: var(--warning-text); margin-top: 6px;">
+            {networkState.error}
+          </div>
+        {/if}
         <span class="setting-hint">Flitnix automatically chooses the active LAN/Wi-Fi adapter when set to Automatic.</span>
       </div>
     </div>
@@ -257,7 +279,7 @@
           <h3>Flitnix</h3>
           <p>High-speed, private, offline-first local network file transfer.</p>
           <span class="version-tag monospace">
-            {appVersionInfo ? `Version ${appVersionInfo.version}` : 'Version 2.7.0'}
+            {appVersionInfo ? `Version ${appVersionInfo.version}` : 'Version 0.2.7.1'}
           </span>
         </div>
       </div>

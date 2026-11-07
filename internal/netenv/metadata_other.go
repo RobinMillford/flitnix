@@ -9,3 +9,6 @@ import "net"
 func systemMetadata(iface net.Interface) Metadata {
 	return Metadata{Type: typeFromInterface(iface)}
 }
+
+// InvalidateMetadataCache is a no-op on platforms without external metadata caches.
+func InvalidateMetadataCache() {}
