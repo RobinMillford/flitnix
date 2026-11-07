@@ -156,13 +156,17 @@ func TestAppSecondaryInterfaceChangeDoesNotInterruptSession(t *testing.T) {
 	}
 
 	// Secondary interface appears (e.g. docker0 or secondary ethernet)
+	dockerIP := "10.254.254.1"
+	if lip == dockerIP {
+		dockerIP = "10.254.253.1"
+	}
 	a.source = fakeSource(
 		[]net.Interface{
 			upIf("docker0"),
 			upIf("flitbr0"),
 		},
 		map[string][]net.Addr{
-			"docker0": {makeIPNet("172.17.0.1", 16)},
+			"docker0": {makeIPNet(dockerIP, 16)},
 			"flitbr0": {&net.IPNet{
 				IP:   net.ParseIP(lip),
 				Mask: net.CIDRMask(24, 32),

@@ -145,12 +145,20 @@ func EvaluateState(views []View, preferredInterface string, serverAddr string, s
 		if err == nil && host != "" {
 			// Strip brackets if IPv6
 			host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+			var bestCandidate View
+			bestScore := -1
 			for _, v := range views {
 				if v.IP == host {
-					selected = v
-					selectedFound = true
-					break
+					score := interfaceScore(v)
+					if score > bestScore {
+						bestScore = score
+						bestCandidate = v
+						selectedFound = true
+					}
 				}
+			}
+			if selectedFound {
+				selected = bestCandidate
 			}
 		}
 	}

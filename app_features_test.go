@@ -49,7 +49,7 @@ func TestAppGuestDropBoxWorkflow(t *testing.T) {
 
 	tmpDir := t.TempDir()
 
-	listen := "127.0.0.77:0"
+	listen := "127.0.0.1:0"
 	if err := app.ensureServer(listen); err != nil {
 		t.Fatalf("ensureServer: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestAppEventCollectionPlatform(t *testing.T) {
 	}
 
 	tmpDir := t.TempDir()
-	listen := "127.0.0.78:0"
+	listen := "127.0.0.1:0"
 	if err := app.ensureServer(listen); err != nil {
 		t.Fatalf("ensureServer: %v", err)
 	}
