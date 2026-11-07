@@ -337,12 +337,12 @@ func TestEnsureServerDifferentAddressEndsSessions(t *testing.T) {
 
 func TestEnsureServerPortOccupied(t *testing.T) {
 	a := newTestApp(t)
-	listen := "127.0.0.79:43821"
-	blocker, err := net.Listen("tcp", listen)
+	blocker, err := net.Listen("tcp", "127.0.0.79:0")
 	if err != nil {
-		t.Skipf("test address unavailable right now: %v", err)
+		t.Fatalf("allocating blocker: %v", err)
 	}
 	defer blocker.Close()
+	listen := blocker.Addr().String()
 
 	err = a.ensureServer(listen)
 	if err == nil {

@@ -49,7 +49,7 @@ func TestAppGuestDropBoxWorkflow(t *testing.T) {
 
 	tmpDir := t.TempDir()
 
-	listen := "127.0.0.77:43821"
+	listen := "127.0.0.77:0"
 	if err := app.ensureServer(listen); err != nil {
 		t.Fatalf("ensureServer: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestAppEventCollectionPlatform(t *testing.T) {
 	}
 
 	tmpDir := t.TempDir()
-	listen := "127.0.0.78:43821"
+	listen := "127.0.0.78:0"
 	if err := app.ensureServer(listen); err != nil {
 		t.Fatalf("ensureServer: %v", err)
 	}
@@ -396,6 +396,10 @@ func TestExportDuplicateNameDeduplication(t *testing.T) {
 	tmpDir := t.TempDir()
 	roomFolder := filepath.Join(tmpDir, "export-room")
 	_ = os.MkdirAll(roomFolder, 0o755)
+
+	if err := app.ensureServer("127.0.0.1:0"); err != nil {
+		t.Fatalf("ensureServer: %v", err)
+	}
 
 	_, err = app.StartGuestRoomWithConfig(GuestRoomConfigView{
 		Title:           "Duplicate Test Room",

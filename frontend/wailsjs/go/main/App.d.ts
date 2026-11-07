@@ -4,9 +4,9 @@ import {main} from '../models';
 import {update} from '../models';
 import {guest} from '../models';
 import {version} from '../models';
+import {netenv} from '../models';
 import {devices} from '../models';
 import {audit} from '../models';
-import {netenv} from '../models';
 import {doctor} from '../models';
 import {power} from '../models';
 
@@ -56,6 +56,8 @@ export function GetBatch(arg1:string):Promise<main.BatchView>;
 
 export function GetGuestRoomState():Promise<main.GuestRoomStateView>;
 
+export function GetNetworkState():Promise<netenv.NetworkState>;
+
 export function GetPairingStatus():Promise<devices.PairingStatusView>;
 
 export function GetSettings():Promise<main.SettingsView>;
@@ -103,6 +105,8 @@ export function ReceiveDirectory():Promise<string>;
 export function RecentDownloads():Promise<Array<main.DownloadView>>;
 
 export function RecentUploads():Promise<Array<main.UploadView>>;
+
+export function RefreshNetwork():Promise<netenv.NetworkState>;
 
 export function RejectBatch(arg1:string):Promise<main.BatchView>;
 

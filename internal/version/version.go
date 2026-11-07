@@ -10,7 +10,7 @@ import (
 
 var (
 	// Version is the current authoritative semver version of Flitnix.
-	Version = "2.7.0"
+	Version = "0.2.7.1"
 
 	// Prerelease indicates a release stage like "beta.1", "rc.1", or "dev".
 	// Set to empty string for official stable releases.
@@ -64,17 +64,18 @@ func String() string {
 	return "v" + Version
 }
 
-var semverPattern = regexp.MustCompile(`^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$`)
+var semverPattern = regexp.MustCompile(`^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$`)
 
 // SemVer represents a parsed semantic version.
 type SemVer struct {
 	Major      int
 	Minor      int
 	Patch      int
+	Build      int
 	Prerelease string
 }
 
-// ParseSemVer parses a version string like "v2.7.0", "2.6", or "2.6.0-rc1".
+// ParseSemVer parses a version string like "v0.2.7.1", "v2.7.0", "2.6", or "2.6.0-rc1".
 func ParseSemVer(v string) (SemVer, error) {
 	v = strings.TrimSpace(v)
 	matches := semverPattern.FindStringSubmatch(v)
@@ -91,12 +92,17 @@ func ParseSemVer(v string) (SemVer, error) {
 	if matches[3] != "" {
 		patch, _ = strconv.Atoi(matches[3])
 	}
+	build := 0
+	if matches[4] != "" {
+		build, _ = strconv.Atoi(matches[4])
+	}
 
 	return SemVer{
 		Major:      major,
 		Minor:      minor,
 		Patch:      patch,
-		Prerelease: matches[4],
+		Build:      build,
+		Prerelease: matches[5],
 	}, nil
 }
 
@@ -133,8 +139,14 @@ func Compare(v1, v2 string) (int, error) {
 		}
 		return -1, nil
 	}
+	if s1.Build != s2.Build {
+		if s1.Build > s2.Build {
+			return 1, nil
+		}
+		return -1, nil
+	}
 
-	// When major, minor, patch are equal:
+	// When major, minor, patch, build are equal:
 	// A version without a prerelease is higher than one with a prerelease (e.g. 2.6.0 > 2.6.0-rc1).
 	if s1.Prerelease == "" && s2.Prerelease != "" {
 		return 1, nil
