@@ -2,16 +2,17 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, 'feature/**' ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  test-and-verify:
-    name: Test & Verify
+  test-linux:
+    name: Linux (ubuntu-latest)
     runs-on: ubuntu-latest
 
     steps:
@@ -54,8 +55,6 @@ jobs:
           npm run build
 
       - name: Verify frontend embed assets exist
-        # main.go embeds all:frontend/dist; fail fast with a clear message if
-        # the frontend build above did not produce it, before Go commands run.
         run: |
           if [ ! -f frontend/dist/index.html ]; then
             echo "::error::frontend/dist/index.html is missing; run 'npm ci && npm run build' in frontend/ before compiling Go (main.go embeds all:frontend/dist)" >&2
@@ -63,19 +62,21 @@ jobs:
           fi
           echo "frontend/dist present for go:embed"
 
+      - name: Compile every package
+        run: go build ./...
+
+      - name: Vet every package
+        run: go vet ./...
+
       - name: Run Go unit and integration tests
         run: |
           go test -count=1 ./...
 
-      - name: Run Go race detector on concurrency-sensitive packages
+      - name: Run Go race detector
         run: |
-          go test -race ./internal/transfer ./internal/server .
+          go test -race -count=1 ./...
 
       - name: Install Wails CLI & nfpm
-        # Pinned to the exact versions the release workflow builds with
-        # (release.yml), so CI validates the same packaging toolchain that
-        # produces the shipped artifacts. A mutable @latest here would let an
-        # upstream release change or break CI builds silently.
         run: |
           go install github.com/wailsapp/wails/v2/cmd/wails@v2.17.0
           go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.48.0
@@ -89,10 +90,6 @@ jobs:
           bash scripts/package-linux.sh "0.1.0-ci" "amd64" "dist"
 
       - name: Guard against unpinned @latest tool installs
-        # Supply-chain guard (Phase 2 hardening): every `go install` in CI and
-        # release workflows must reference an explicit version. A mutable
-        # @latest would silently re-point the build toolchain at whatever an
-        # upstream module publishes next.
         run: |
           if grep -RnE 'go install [^ ]+@latest' .github/workflows/; then
             echo "::error::Unpinned @latest go install found in workflows; pin an explicit tested version." >&2
@@ -100,11 +97,8 @@ jobs:
           fi
           echo "No unpinned @latest tool installs in .github/workflows/."
 
-  # Cross-platform compile and vet. A successful build proves the source
-  # compiles for the production targets; it does NOT prove native GUI
-  # behaviour, drag-and-drop, file pickers or packaging on those systems.
-  cross-platform-build:
-    name: Build & vet (${{ matrix.os }})
+  test-cross-platform:
+    name: Native Test & Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -128,13 +122,13 @@ jobs:
           cache: 'npm'
           cache-dependency-path: 'frontend/package-lock.json'
 
-      - name: Build frontend embed assets
-        # main.go embeds all:frontend/dist. GitHub Actions jobs run in
-        # separate environments, so every job that compiles Go must produce
-        # these assets itself before `go build` / `go vet` / `go test` run.
+      - name: Frontend checks and tests
+        shell: bash
         run: |
           cd frontend
           npm ci
+          npm test
+          npm run check
           npm run build
 
       - name: Verify frontend embed assets exist
@@ -152,30 +146,44 @@ jobs:
       - name: Vet every package
         run: go vet ./...
 
-      - name: Platform-neutral tests
-        if: matrix.os != 'windows-latest'
-        run: go test -count=1 ./internal/transfer ./internal/recovery ./internal/session ./internal/qr ./internal/settings
-
-      # Windows access-control tests inspect real DACLs and can only fail on a
-      # Windows kernel. Cross-compiling them proves they build, not that a
-      # sensitive directory is private, so the job runs the actual binaries
-      # here instead of deferring to the Linux job.
-      - name: Run full test suite
-        if: matrix.os == 'windows-latest'
+      - name: Run full Go test suite
         shell: bash
         run: go test -count=1 ./...
 
-      - name: Check for a C toolchain for the race detector
-        if: matrix.os == 'windows-latest'
-        shell: bash
-        run: |
-          if ! command -v gcc >/dev/null 2>&1; then
-            echo "::error::gcc is required for 'go test -race' on windows-latest and was not found" >&2
-            exit 1
-          fi
-          gcc --version | head -1
-
-      - name: Run race detector
-        if: matrix.os == 'windows-latest'
+      - name: Run race detector (macOS)
+        if: matrix.os == 'macos-latest'
         shell: bash
         run: go test -race -count=1 ./...
+
+      - name: Verify MinGW GCC and libsynchronization.a (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          gcc --version
+          $lib = gcc --print-file-name libsynchronization.a
+          Write-Host "Resolved libsynchronization.a: $lib"
+          if (-not (Test-Path $lib)) {
+            Write-Error "libsynchronization.a could not be found for CGO race detector"
+            exit 1
+          }
+
+      - name: Run race detector (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $env:CGO_ENABLED = "1"
+          go test -race -count=1 ./...
+
+      - name: Install Wails CLI
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@v2.17.0
+
+      - name: Test native application build (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          wails build
+
+      - name: Test native application build (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          wails build

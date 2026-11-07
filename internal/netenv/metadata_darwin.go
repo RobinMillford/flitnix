@@ -17,6 +17,9 @@ import (
 	"unsafe"
 )
 
+// InvalidateMetadataCache is a no-op on Darwin since CoreWLAN queries are in-process CGO calls.
+func InvalidateMetadataCache() {}
+
 func systemMetadata(iface net.Interface) Metadata {
 	var ssid [256]byte
 	interfaceName := C.CString(iface.Name)

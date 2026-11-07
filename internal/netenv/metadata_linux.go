@@ -7,21 +7,56 @@ import (
 	"net"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
+
+type metadataCacheEntry struct {
+	meta     Metadata
+	cachedAt time.Time
+	flags    net.Flags
+}
+
+var (
+	metaMu    sync.RWMutex
+	metaCache = make(map[string]metadataCacheEntry)
+)
+
+// InvalidateMetadataCache clears any cached interface metadata, ensuring the next
+// query retrieves live state from NetworkManager.
+func InvalidateMetadataCache() {
+	metaMu.Lock()
+	metaCache = make(map[string]metadataCacheEntry)
+	metaMu.Unlock()
+}
 
 // systemMetadata uses NetworkManager when available. Generic interface and
 // address discovery remains usable on Linux systems using another manager.
 func systemMetadata(iface net.Interface) Metadata {
+	metaMu.RLock()
+	entry, ok := metaCache[iface.Name]
+	metaMu.RUnlock()
+
+	if ok && time.Since(entry.cachedAt) < 15*time.Second && entry.flags == iface.Flags {
+		return entry.meta
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "nmcli", "-t", "-g", "GENERAL.TYPE,GENERAL.CONNECTION", "device", "show", iface.Name)
 	out, err := cmd.Output()
 	if err != nil || ctx.Err() != nil {
-		return Metadata{Type: typeFromInterface(iface)}
+		res := Metadata{Type: typeFromInterface(iface)}
+		metaMu.Lock()
+		metaCache[iface.Name] = metadataCacheEntry{meta: res, cachedAt: time.Now(), flags: iface.Flags}
+		metaMu.Unlock()
+		return res
 	}
 	metadata := parseNMCLIOutput(string(out), iface)
 	if metadata.Type != "Wi-Fi" {
+		metaMu.Lock()
+		metaCache[iface.Name] = metadataCacheEntry{meta: metadata, cachedAt: time.Now(), flags: iface.Flags}
+		metaMu.Unlock()
 		return metadata
 	}
 	metadata.SSID = activeSSIDWithRetry(ctx, iface.Name, func() (string, error) {
@@ -29,6 +64,9 @@ func systemMetadata(iface net.Interface) Metadata {
 		out, err := wifi.Output()
 		return string(out), err
 	})
+	metaMu.Lock()
+	metaCache[iface.Name] = metadataCacheEntry{meta: metadata, cachedAt: time.Now(), flags: iface.Flags}
+	metaMu.Unlock()
 	return metadata
 }
 

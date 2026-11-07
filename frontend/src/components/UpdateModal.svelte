@@ -8,7 +8,7 @@
   import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime';
 
   export let isOpen: boolean = false;
-  export let currentVersion: string = '2.7.0';
+  export let currentVersion: string = '0.2.7.1';
   export let onClose: () => void = () => {};
 
   let checkResult: update.CheckResult | null = null;

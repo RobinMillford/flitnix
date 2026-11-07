@@ -112,7 +112,7 @@ func TestPairCLIFirstContactYesRefused(t *testing.T) {
 	}
 
 	// Verify host was NOT pinned
-	khPath := filepath.Join(clientConfigDir, "flitnix", "known_hosts.json")
+	khPath := filepath.Join(client.ResolveDataDir(), "known_hosts.json")
 	if data, err := os.ReadFile(khPath); err == nil && len(data) > 0 {
 		var kh client.KnownHosts
 		_ = json.Unmarshal(data, &kh)
@@ -154,7 +154,7 @@ func TestPairCLIPinnedHostAllowsYesAndJSON(t *testing.T) {
 	setClientConfigDir(t, clientConfigDir)
 
 	// Pre-pin the server's legitimate public key
-	khPath := filepath.Join(clientConfigDir, "flitnix", "known_hosts.json")
+	khPath := filepath.Join(client.ResolveDataDir(), "known_hosts.json")
 	kh, err := client.LoadOrCreateKnownHosts(khPath)
 	if err != nil {
 		t.Fatal(err)
@@ -194,7 +194,7 @@ func TestPairCLIPinnedHostRejectsKeyChange(t *testing.T) {
 	setClientConfigDir(t, clientConfigDir)
 
 	// Pre-pin an IMPOSTER public key for this HostID
-	khPath := filepath.Join(clientConfigDir, "flitnix", "known_hosts.json")
+	khPath := filepath.Join(client.ResolveDataDir(), "known_hosts.json")
 	kh, err := client.LoadOrCreateKnownHosts(khPath)
 	if err != nil {
 		t.Fatal(err)
@@ -218,12 +218,11 @@ func TestPairCLIPinnedHostRejectsKeyChange(t *testing.T) {
 }
 
 // setClientConfigDir isolates the client's persistent configuration for one
-// test. os.UserConfigDir resolves to %AppData% on Windows and to
-// XDG_CONFIG_HOME on Unix, so both are redirected: pinning only the Unix
-// variable would leave the test reading (and writing) the runner's real
-// known_hosts.json on Windows, where the pre-seeded pin would never be found.
+// test. os.UserConfigDir resolves to %AppData% on Windows, $HOME/Library/Application Support
+// on macOS, and XDG_CONFIG_HOME on Linux, so all are redirected.
 func setClientConfigDir(t *testing.T, dir string) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("AppData", dir)
+	t.Setenv("HOME", dir)
 }

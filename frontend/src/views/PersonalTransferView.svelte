@@ -12,6 +12,9 @@
   export let files: main.SharedFileView[] = []
   export let sources: main.SharedSourceView[] = []
   export let interfaces: netenv.View[] = []
+  export let networkState: netenv.NetworkState | null = null
+  export let refreshingNetwork: boolean = false
+  export let onRefreshNetwork: () => void = () => {}
   export let selectedIp: string = ''
   export let serverAddress: string = ''
   export let qrUrl: string = ''
@@ -96,11 +99,29 @@
       <div class="hub-inactive-grid">
         <div class="hub-info-col">
           <div class="hub-pill-row">
-            <span class="hub-status-chip ready">
-              <span class="chip-pulse"></span>
-              Ready to Pair
-            </span>
-            {#if currentNetwork}
+            {#if refreshingNetwork}
+              <span class="hub-status-chip scanning">
+                <span class="chip-spinner"></span>
+                Detecting network…
+              </span>
+            {:else if networkState?.status === 'no_network' || interfaces.length === 0}
+              <span class="hub-status-chip disconnected">
+                <span class="chip-pulse off"></span>
+                No Network Connection
+              </span>
+            {:else if networkState?.status === 'selected_unavailable'}
+              <span class="hub-status-chip warning">
+                <span class="chip-pulse warn"></span>
+                Preferred Interface Unavailable
+              </span>
+            {:else}
+              <span class="hub-status-chip ready">
+                <span class="chip-pulse"></span>
+                Ready to Pair
+              </span>
+            {/if}
+
+            {#if currentNetwork && interfaces.length > 0 && networkState?.status !== 'no_network'}
               <span class="hub-network-chip">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M5 12.55a11 11 0 0 1 14.08 0"/>
@@ -111,12 +132,38 @@
                 {currentNetwork.friendlyName || currentNetwork.name || 'Wi-Fi'} ({currentNetwork.ip})
               </span>
             {/if}
+
+            <button
+              type="button"
+              class="hub-refresh-btn"
+              class:spinning={refreshingNetwork}
+              on:click={onRefreshNetwork}
+              disabled={refreshingNetwork}
+              title="Refresh network status"
+              aria-label="Refresh network status"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+              </svg>
+            </button>
           </div>
 
+          {#if networkState?.status === 'selected_unavailable' && networkState?.error}
+            <div class="hub-fallback-hint">
+              {networkState.error}
+            </div>
+          {/if}
+
           <h2 class="hub-heading">Fast, Private Local File Transfer</h2>
-          <p class="hub-desc">
-            Pair your desktop directly with any phone browser. Transfers stream at full local Wi-Fi speeds without cloud servers, accounts, or mobile app installation.
-          </p>
+          {#if networkState?.status === 'no_network' || interfaces.length === 0}
+            <p class="hub-desc" style="color: var(--danger-text);">
+              Flitnix requires a usable local network interface (such as Wi-Fi or Ethernet) to transfer files directly to your phone. Connect this computer to a local network and refresh.
+            </p>
+          {:else}
+            <p class="hub-desc">
+              Pair your desktop directly with any phone browser. Transfers stream at full local Wi-Fi speeds without cloud servers, accounts, or mobile app installation.
+            </p>
+          {/if}
 
           <div class="hub-network-selector-row">
             {#if interfaces.length > 1}
@@ -169,15 +216,23 @@
               type="button"
               class="button primary large full-width"
               on:click={startSession}
-              disabled={starting}
+              disabled={starting || interfaces.length === 0 || networkState?.status === 'no_network'}
             >
               {#if starting}
                 Starting Session…
+              {:else if networkState?.status === 'no_network' || interfaces.length === 0}
+                No Network Available
               {:else}
                 Start Transfer Session
               {/if}
             </button>
-            <span class="hub-action-tip">Prepares local connection on port 43821</span>
+            <span class="hub-action-tip">
+              {#if networkState?.status === 'no_network' || interfaces.length === 0}
+                Connect to Wi-Fi or Ethernet to enable transfers
+              {:else}
+                Prepares local connection on port 43821
+              {/if}
+            </span>
           </div>
         </div>
       </div>
@@ -203,24 +258,59 @@
 
         <div class="hub-active-details-col">
           <div class="active-status-bar">
-            <span class="hub-status-chip online">
-              <span class="chip-pulse active"></span>
-              Session Live & Listening
-            </span>
+            {#if refreshingNetwork}
+              <span class="hub-status-chip scanning">
+                <span class="chip-spinner"></span>
+                Detecting network…
+              </span>
+            {:else if networkState?.status === 'no_network' || interfaces.length === 0}
+              <span class="hub-status-chip disconnected">
+                <span class="chip-pulse off"></span>
+                Network Disconnected
+              </span>
+            {:else}
+              <span class="hub-status-chip online">
+                <span class="chip-pulse active"></span>
+                Session Live & Listening
+              </span>
+            {/if}
             <span class="muted" style="font-size: 12px;">Port 43821 · Ephemeral Token</span>
+            <button
+              type="button"
+              class="hub-refresh-btn"
+              class:spinning={refreshingNetwork}
+              on:click={onRefreshNetwork}
+              disabled={refreshingNetwork}
+              title="Refresh network status"
+              aria-label="Refresh network status"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+              </svg>
+            </button>
           </div>
 
           <h3 class="active-heading">Connect your phone to begin</h3>
-          <p class="active-instructions">
-            1. Scan the QR code with your phone camera, or open your mobile browser to the address below.<br>
-            2. Both devices must be on the same local network (<strong>{currentNetwork?.friendlyName || 'Wi-Fi'}</strong>).
-          </p>
+          {#if networkState?.status === 'no_network' || interfaces.length === 0}
+            <p class="active-instructions" style="color: var(--danger-text);">
+              Network connection was lost. Reconnect this computer to Wi-Fi or phone hotspot to continue transfers.
+            </p>
+          {:else}
+            <p class="active-instructions">
+              1. Scan the QR code with your phone camera, or open your mobile browser to the address below.<br>
+              2. Both devices must be on the same local network (<strong>{currentNetwork?.friendlyName || 'Wi-Fi'}</strong>).
+            </p>
+          {/if}
 
           <div class="active-url-box">
-            <span class="url-text">http://{serverAddress || '…'}</span>
-            <button type="button" class="button ghost small copy-btn" on:click={copySessionUrl}>
-              Copy Address
-            </button>
+            {#if networkState?.status === 'no_network' || !serverAddress}
+              <span class="url-text" style="color: var(--danger-text); font-style: italic;">Waiting for network reconnection…</span>
+            {:else}
+              <span class="url-text">http://{serverAddress}</span>
+              <button type="button" class="button ghost small copy-btn" on:click={copySessionUrl}>
+                Copy Address
+              </button>
+            {/if}
           </div>
 
           <div class="active-controls-row">
@@ -704,6 +794,21 @@
     color: var(--success);
   }
 
+  .hub-status-chip.disconnected {
+    background: var(--danger-subtle);
+    color: var(--danger-text);
+  }
+
+  .hub-status-chip.warning {
+    background: var(--warning-subtle);
+    color: var(--warning-text);
+  }
+
+  .hub-status-chip.scanning {
+    background: var(--bg-surface-elevated);
+    color: var(--text-muted);
+  }
+
   .chip-pulse {
     width: 7px;
     height: 7px;
@@ -713,6 +818,68 @@
 
   .chip-pulse.active {
     box-shadow: 0 0 0 3px var(--success-border);
+  }
+
+  .chip-pulse.off {
+    background: var(--danger-text);
+  }
+
+  .chip-pulse.warn {
+    background: var(--warning-text);
+  }
+
+  .chip-spinner {
+    width: 8px;
+    height: 8px;
+    border: 1.5px solid var(--border-default);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  .hub-refresh-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-default);
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all var(--duration-fast, 150ms) var(--ease-default);
+    padding: 0;
+  }
+
+  .hub-refresh-btn:hover:not(:disabled) {
+    background: var(--bg-surface-hover);
+    color: var(--text-primary);
+    border-color: var(--border-strong);
+  }
+
+  .hub-refresh-btn:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 1px;
+  }
+
+  .hub-refresh-btn.spinning svg {
+    animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  .hub-fallback-hint {
+    margin: -4px 0 12px;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--warning-text);
+    background: var(--warning-subtle);
+    padding: 6px 12px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--warning-border);
   }
 
   .hub-network-chip {

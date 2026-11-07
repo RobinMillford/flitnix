@@ -94,6 +94,10 @@ export function GetGuestRoomState() {
   return window['go']['main']['App']['GetGuestRoomState']();
 }
 
+export function GetNetworkState() {
+  return window['go']['main']['App']['GetNetworkState']();
+}
+
 export function GetPairingStatus() {
   return window['go']['main']['App']['GetPairingStatus']();
 }
@@ -188,6 +192,10 @@ export function RecentDownloads() {
 
 export function RecentUploads() {
   return window['go']['main']['App']['RecentUploads']();
+}
+
+export function RefreshNetwork() {
+  return window['go']['main']['App']['RefreshNetwork']();
 }
 
 export function RejectBatch(arg1) {

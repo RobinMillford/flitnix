@@ -282,8 +282,9 @@ func checkBound(t *testing.T, s *Server, listen string) {
 // on that address only.
 func TestServeBindsSpecificLANIPv4(t *testing.T) {
 	ip := lanIPv4(t)
-	listen := net.JoinHostPort(ip, "43821")
-	checkBound(t, startBound(t, listen), listen)
+	listen := net.JoinHostPort(ip, "0")
+	s := startBound(t, listen)
+	checkBound(t, s, s.Addr().String())
 }
 
 // TestServeBindsSpecificLoopbackIPv4 runs the identical path on an always
@@ -291,8 +292,15 @@ func TestServeBindsSpecificLANIPv4(t *testing.T) {
 // package default 127.0.0.1), so the binding logic is exercised even on
 // machines with no LAN interfaces.
 func TestServeBindsSpecificLoopbackIPv4(t *testing.T) {
-	listen := net.JoinHostPort("127.0.0.9", "43821")
-	checkBound(t, startBound(t, listen), listen)
+	ip := "127.0.0.9"
+	if blk, err := net.Listen("tcp", "127.0.0.9:0"); err != nil {
+		ip = "127.0.0.1"
+	} else {
+		_ = blk.Close()
+	}
+	listen := net.JoinHostPort(ip, "0")
+	s := startBound(t, listen)
+	checkBound(t, s, s.Addr().String())
 }
 
 // TestServeBindsSpecificLoopbackIPv6 tests that the server binds an explicit
@@ -306,13 +314,7 @@ func TestServeBindsSpecificLoopbackIPv6(t *testing.T) {
 	}
 	_ = testLn.Close()
 
-	listen := net.JoinHostPort("::1", "43821")
-	if blk, err := net.Listen("tcp", listen); err != nil {
-		listen = "[::1]:0"
-	} else {
-		_ = blk.Close()
-	}
-
+	listen := "[::1]:0"
 	s := startBound(t, listen)
 	actualAddr := s.Addr().String()
 	checkBound(t, s, actualAddr)
@@ -322,9 +324,15 @@ func TestServeBindsSpecificLoopbackIPv6(t *testing.T) {
 // also surfaces when binding an explicit interface address rather than
 // the loopback default.
 func TestServePortInUseOnSpecificAddress(t *testing.T) {
-	blocker, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", "43821"))
+	ip := "127.0.0.8"
+	if blk, err := net.Listen("tcp", "127.0.0.8:0"); err != nil {
+		ip = "127.0.0.1"
+	} else {
+		_ = blk.Close()
+	}
+	blocker, err := net.Listen("tcp", net.JoinHostPort(ip, "0"))
 	if err != nil {
-		t.Skipf("the default port is unavailable for this test right now: %v", err)
+		t.Fatalf("allocating blocker: %v", err)
 	}
 	defer blocker.Close()
 

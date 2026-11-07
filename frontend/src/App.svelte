@@ -2,7 +2,7 @@
   import { onMount } from 'svelte'
   import { t, setLocale, tFn } from './i18n'
   import type { main, netenv, doctor, guest, audit, devices, power, version, update } from '../wailsjs/go/models'
-  import { OnFileDrop, OnFileDropOff } from '../wailsjs/runtime/runtime.js'
+  import { OnFileDrop, OnFileDropOff, EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
   import logoUrl from './assets/images/logo-universal.png'
   import { createRefreshScheduler } from './refreshScheduler'
   import ConnectionDoctorModal from './components/ConnectionDoctorModal.svelte'
@@ -25,7 +25,7 @@
     ListPendingBatches, ListBatches, ApproveBatch, RejectBatch, CancelBatch,
     PickFilesForSharing, PickFolderForSharing, AddDroppedSources,
     ListSharedFiles, ListSharedSources, RevokeSharedFile, RevokeSharedSource, ReceiveDirectory,
-    ListNetworkInterfaces, SessionQR, ServerAddress,
+    ListNetworkInterfaces, SessionQR, ServerAddress, GetNetworkState, RefreshNetwork,
     StartGuestRoomWithConfig, GetGuestRoomState, ApproveGuest, RejectGuest, RevokeGuest,
     ApproveGuestUpload, RejectGuestUpload, EndGuestRoom, PickGuestDestination, OpenGuestFolder,
     PickExportDestination, ExportGuestCollection,
@@ -173,6 +173,7 @@
   let busy: Record<string, boolean> = {}
   let interfaces: netenv.View[] = []
   let loadingIfaces = false
+  let refreshingNetwork = false
   let ifaceError = ''
   let selectedIp = ''
   let serverAddress = ''
@@ -183,6 +184,7 @@
   let activeAddress = ''
   let networkRefreshGeneration = 0
   let disposed = false
+  let networkState: netenv.NetworkState | null = null
   const SESSION_PORT = '43821'
 
   // Quick Text state
@@ -288,14 +290,22 @@
     }
   }
 
-  async function refreshNetwork(): Promise<void> {
-    const generation = ++networkRefreshGeneration
-    loadingIfaces = true
-    ifaceError = ''
-    try {
-      const next = await ListNetworkInterfaces()
-      if (generation !== networkRefreshGeneration) return
-      interfaces = next ?? []
+  function handleNetworkStateUpdate(st: netenv.NetworkState): void {
+    if (!st) return
+    networkState = st
+    const next = st.interfaces ?? []
+    interfaces = next
+
+    if (st.status === 'no_network') {
+      ifaceError = st.error || 'No network connection available'
+      selectedIp = ''
+      if (sessions.length > 0) {
+        serverAddress = ''
+      }
+    } else if (st.status === 'error') {
+      ifaceError = st.error || 'Network detection failed'
+    } else {
+      ifaceError = ''
       if (next.length === 1) {
         selectedIp = next[0].ip
       } else if (settingsState.preferredInterface && next.some((item) => item.name === settingsState.preferredInterface)) {
@@ -303,14 +313,37 @@
         if (prefMatch) {
           selectedIp = prefMatch.ip
         }
-      } else if (!next.some((item) => item.ip === selectedIp)) {
-        selectedIp = ''
+      } else if (st.ip && (!selectedIp || !next.some((item) => item.ip === selectedIp))) {
+        selectedIp = st.ip
       }
+
+      if (st.serverAddress) {
+        serverAddress = st.serverAddress
+        if (sessions.length > 0 && qrKey) {
+          fetchQR(qrKey)
+        }
+      }
+    }
+  }
+
+  async function refreshNetwork(): Promise<void> {
+    if (refreshingNetwork) return
+    const generation = ++networkRefreshGeneration
+    loadingIfaces = true
+    refreshingNetwork = true
+    ifaceError = ''
+    try {
+      const fresh = await RefreshNetwork()
+      if (generation !== networkRefreshGeneration) return
+      handleNetworkStateUpdate(fresh)
     } catch (err) {
       if (generation !== networkRefreshGeneration) return
-      interfaces = []; selectedIp = ''; ifaceError = stringOfError(err)
+      ifaceError = stringOfError(err)
     } finally {
-      if (generation === networkRefreshGeneration) loadingIfaces = false
+      if (generation === networkRefreshGeneration) {
+        loadingIfaces = false
+        refreshingNetwork = false
+      }
     }
   }
 
@@ -933,6 +966,9 @@
     refreshNetwork()
     loadPresets()
     loadTemplates()
+    EventsOn('network:changed', (st: netenv.NetworkState) => {
+      handleNetworkStateUpdate(st)
+    })
     GetAppVersion().then((v) => {
       appVersionInfo = v
     }).catch(report)
@@ -948,6 +984,7 @@
       disposed = true
       clearInterval(id)
       OnFileDropOff()
+      EventsOff('network:changed')
     }
   })
 </script>
@@ -1244,6 +1281,9 @@
               {files}
               {sources}
               {interfaces}
+              {networkState}
+              {refreshingNetwork}
+              onRefreshNetwork={refreshNetwork}
               {selectedIp}
               {serverAddress}
               {qrUrl}
@@ -1365,6 +1405,9 @@
             <SettingsView
               bind:settingsState
               {interfaces}
+              {networkState}
+              {refreshingNetwork}
+              onRefreshNetwork={refreshNetwork}
               {appVersionInfo}
               {updateAvailableBadge}
               {savingSettings}
@@ -1395,7 +1438,7 @@
   <!-- Update Modal -->
   <UpdateModal
     isOpen={updateModalOpen}
-    currentVersion={appVersionInfo?.version || '2.7.0'}
+    currentVersion={appVersionInfo?.version || '0.2.7.1'}
     onClose={() => { updateModalOpen = false }}
   />
 
