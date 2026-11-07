@@ -10,13 +10,16 @@ func TestParseSemVer(t *testing.T) {
 		want    SemVer
 		wantErr bool
 	}{
-		{"2.7.0", SemVer{2, 7, 0, ""}, false},
-		{"v2.7.0", SemVer{2, 7, 0, ""}, false},
-		{"v2.7", SemVer{2, 7, 0, ""}, false},
-		{"2", SemVer{2, 0, 0, ""}, false},
-		{"v2.7.0-rc1", SemVer{2, 7, 0, "rc1"}, false},
-		{"2.7.0-beta.2", SemVer{2, 7, 0, "beta.2"}, false},
-		{"v2.7.0+build123", SemVer{2, 7, 0, ""}, false},
+		{"0.2.7.1", SemVer{0, 2, 7, 1, ""}, false},
+		{"v0.2.7.1", SemVer{0, 2, 7, 1, ""}, false},
+		{"v0.2.7.1-rc1", SemVer{0, 2, 7, 1, "rc1"}, false},
+		{"2.7.0", SemVer{2, 7, 0, 0, ""}, false},
+		{"v2.7.0", SemVer{2, 7, 0, 0, ""}, false},
+		{"v2.7", SemVer{2, 7, 0, 0, ""}, false},
+		{"2", SemVer{2, 0, 0, 0, ""}, false},
+		{"v2.7.0-rc1", SemVer{2, 7, 0, 0, "rc1"}, false},
+		{"2.7.0-beta.2", SemVer{2, 7, 0, 0, "beta.2"}, false},
+		{"v2.7.0+build123", SemVer{2, 7, 0, 0, ""}, false},
 		{"invalid", SemVer{}, true},
 		{"", SemVer{}, true},
 	}
@@ -39,6 +42,11 @@ func TestCompare(t *testing.T) {
 		v2   string
 		want int
 	}{
+		{"0.2.7.1", "0.2.7.1", 0},
+		{"0.2.7.1", "0.2.7.0", 1},
+		{"0.2.7.0", "0.2.7.1", -1},
+		{"0.2.7.1", "0.2.7", 1},
+		{"0.2.7", "0.2.7.1", -1},
 		{"2.7.0", "2.7.0", 0},
 		{"v2.7.0", "2.7.0", 0},
 		{"2.8.0", "2.7.0", 1},

@@ -14,16 +14,18 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/itsyamin/flitnix/internal/version"
 )
 
 func TestUpdateCheck_NoUpdateWhenEqualOrOlder(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rel := gitHubRelease{
-			TagName:     "v2.7.0",
-			Name:        "Flitnix v2.7.0",
+			TagName:     "v" + version.Version,
+			Name:        "Flitnix v" + version.Version,
 			PublishedAt: time.Now(),
 			Assets: []gitHubAsset{
-				{Name: "flitnix_2.6.0_linux_amd64.tar.gz", BrowserDownloadURL: "http://example.com/asset.tar.gz", Size: 1024},
+				{Name: "flitnix_0.2.7.1_linux_amd64.tar.gz", BrowserDownloadURL: "http://example.com/asset.tar.gz", Size: 1024},
 			},
 		}
 		_ = json.NewEncoder(w).Encode(rel)

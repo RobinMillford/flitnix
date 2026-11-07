@@ -842,6 +842,36 @@ func (s *Service) CancelSession(sessionKey string) {
 	}
 }
 
+// AbortActiveUploads halts every actively streaming upload whose network connection
+// was severed by an interface drop or address change. The unfinalized partial file
+// is removed and the record transitions to StateFailed with an explanatory error.
+func (s *Service) AbortActiveUploads() {
+	s.mu.Lock()
+	var targets []*upload
+	for _, u := range s.uploads {
+		if stateOf(u) == StateUploading {
+			targets = append(targets, u)
+		}
+	}
+	s.mu.Unlock()
+
+	for _, u := range targets {
+		u.mu.Lock()
+		if u.pub == pubPublishing {
+			u.mu.Unlock()
+			continue
+		}
+		sink := u.sink
+		u.pub = pubCancelReserved
+		u.state = StateFailed
+		u.reason = "transfer interrupted: network connection lost or interface changed"
+		u.mu.Unlock()
+		if sink != nil {
+			_ = sink.Abort()
+		}
+	}
+}
+
 // Get returns a consistent copy of one upload record.
 func (s *Service) Get(id string) (Upload, bool) {
 	s.mu.Lock()

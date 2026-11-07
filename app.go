@@ -272,6 +272,8 @@ type App struct {
 	// address decisions; tests inject synthetic interfaces.
 	source netenv.Provider
 
+	netMonitor *netenv.Monitor
+
 	// batchMu serializes batch decisions (approve, reject, cancel) so the
 	// coordinator and the upload service always move together and a repeated
 	// or concurrent decision observes a settled state.
@@ -361,6 +363,20 @@ func NewApp() (*App, error) {
 		source:        netenv.DefaultSource(),
 		updater:       update.New(update.Config{RepoOwner: "RobinMillford", RepoName: "flitnix"}),
 	}
+	a.netMonitor = netenv.NewMonitor(appSourceProxy{app: a},
+		netenv.WithPreferredInterface(func() string {
+			if a.settingsStore != nil {
+				return a.settingsStore.Get().PreferredInterface
+			}
+			return ""
+		}),
+		netenv.WithServerAddress(func() string {
+			return a.ServerAddress()
+		}),
+	)
+	a.netMonitor.OnChange(func(state netenv.NetworkState) {
+		a.handleNetworkChange(state)
+	})
 	a.sessions = session.NewManager(session.Config{OnExpire: a.releaseSession, OnEnd: a.logSessionEnd})
 	return a, nil
 }
@@ -401,6 +417,10 @@ func (a *App) startup(ctx context.Context) {
 	a.startupMu.Unlock()
 
 	ensureLinuxNautilusScript()
+
+	if a.netMonitor != nil {
+		a.netMonitor.Start(bgCtx)
+	}
 
 	if len(initial) > 0 {
 		_, _ = a.AddDroppedSources(initial)
@@ -566,6 +586,10 @@ func (a *App) shutdown(ctx context.Context) {
 		}
 		a.startupMu.Unlock()
 		a.bgWg.Wait()
+
+		if a.netMonitor != nil {
+			a.netMonitor.Stop()
+		}
 
 		for _, s := range a.sessions.ActiveSessions() {
 			a.transfers.CancelSession(s.Key())
@@ -810,6 +834,120 @@ func (a *App) ListNetworkInterfaces() ([]netenv.View, error) {
 		return nil, fmt.Errorf("flitnix: could not read the network interfaces: %w", err)
 	}
 	return views, nil
+}
+
+type appSourceProxy struct {
+	app *App
+}
+
+func (p appSourceProxy) InterfacesFor() ([]net.Interface, error) {
+	if p.app != nil && p.app.source != nil {
+		return p.app.source.InterfacesFor()
+	}
+	return netenv.DefaultSource().InterfacesFor()
+}
+
+func (p appSourceProxy) AddressesFor(iface net.Interface) ([]net.Addr, error) {
+	if p.app != nil && p.app.source != nil {
+		return p.app.source.AddressesFor(iface)
+	}
+	return netenv.DefaultSource().AddressesFor(iface)
+}
+
+func (p appSourceProxy) MetadataFor(iface net.Interface) netenv.Metadata {
+	if p.app != nil && p.app.source != nil {
+		return p.app.source.MetadataFor(iface)
+	}
+	return netenv.DefaultSource().MetadataFor(iface)
+}
+
+func (a *App) handleNetworkChange(state netenv.NetworkState) {
+	a.srvMu.Lock()
+	sessionsCount := a.sessions.Len()
+	var currentListen string
+	if a.srv != nil && a.srv.Addr() != nil {
+		currentListen = a.srv.Addr().String()
+	}
+
+	if sessionsCount > 0 {
+		if state.Status == netenv.StatusNoNetwork || state.IP == "" {
+			a.transfers.AbortActiveUploads()
+			a.stopServerLocked()
+			state.ServerAddress = ""
+			state.AdvertisedURL = ""
+		} else {
+			newListen, err := netenv.ListenAddr(state.IP, server.DefaultPort)
+			if err == nil {
+				if a.srv == nil {
+					if err := a.startServerLocked(newListen); err == nil && a.srv != nil && a.srv.Addr() != nil {
+						state.ServerAddress = a.srv.Addr().String()
+						state.AdvertisedURL = "http://" + state.ServerAddress
+					}
+				} else if currentListen != newListen {
+					a.transfers.AbortActiveUploads()
+					a.stopServerLocked()
+					if err := a.startServerLocked(newListen); err == nil && a.srv != nil && a.srv.Addr() != nil {
+						state.ServerAddress = a.srv.Addr().String()
+						state.AdvertisedURL = "http://" + state.ServerAddress
+					}
+				}
+			}
+		}
+	} else if a.isGuestRoomActive() {
+		if state.Status == netenv.StatusNoNetwork || state.IP == "" {
+			a.stopServerLocked()
+			state.ServerAddress = ""
+			state.AdvertisedURL = ""
+		} else {
+			newListen, err := netenv.ListenAddr(state.IP, server.DefaultPort)
+			if err == nil && (a.srv == nil || currentListen != newListen) {
+				a.stopServerLocked()
+				if err := a.startServerLocked(newListen); err == nil && a.srv != nil && a.srv.Addr() != nil {
+					state.ServerAddress = a.srv.Addr().String()
+					state.AdvertisedURL = "http://" + state.ServerAddress
+				}
+			}
+		}
+	}
+	a.srvMu.Unlock()
+
+	a.startupMu.Lock()
+	ctx := a.ctx
+	a.startupMu.Unlock()
+	if ctx != nil && ctx.Value("frontend") != nil {
+		runtime.EventsEmit(ctx, "network:changed", state)
+	}
+}
+
+// GetNetworkState returns the verified operational network state snapshot.
+func (a *App) GetNetworkState() netenv.NetworkState {
+	if a.netMonitor == nil {
+		views, err := netenv.Enumerate(a.source)
+		pref := ""
+		if a.settingsStore != nil {
+			pref = a.settingsStore.Get().PreferredInterface
+		}
+		return netenv.EvaluateState(views, pref, a.ServerAddress(), err)
+	}
+	return a.netMonitor.State()
+}
+
+// RefreshNetwork triggers an immediate network scan, updates cached state,
+// rebinds active session listeners if the host address changed, emits the
+// network:changed runtime event, and returns the newly detected state.
+func (a *App) RefreshNetwork() (netenv.NetworkState, error) {
+	if a.netMonitor == nil {
+		views, err := netenv.Enumerate(a.source)
+		pref := ""
+		if a.settingsStore != nil {
+			pref = a.settingsStore.Get().PreferredInterface
+		}
+		st := netenv.EvaluateState(views, pref, a.ServerAddress(), err)
+		return st, err
+	}
+	st, err := a.netMonitor.Refresh()
+	a.handleNetworkChange(st)
+	return st, err
 }
 
 // ServerAddress returns the running server's listening address as
@@ -1485,6 +1623,9 @@ func (a *App) SaveSettings(view SettingsView) error {
 		if err := a.store.SetDir(s.DownloadDir); err != nil {
 			return err
 		}
+	}
+	if a.netMonitor != nil {
+		_, _ = a.RefreshNetwork()
 	}
 	return nil
 }
@@ -2393,7 +2534,7 @@ func (a *App) DownloadUpdate() (*update.Progress, error) {
 		ctx = context.Background()
 	}
 	return a.updater.Download(ctx, func(p update.Progress) {
-		if a.ctx != nil {
+		if a.ctx != nil && a.ctx.Value("frontend") != nil {
 			runtime.EventsEmit(a.ctx, "update:progress", p)
 		}
 	})
