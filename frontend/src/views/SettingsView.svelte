@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { main, netenv, version, power } from '../../wailsjs/go/models'
+  import { openExternalURL } from '../utils'
   import logoUrl from '../assets/images/logo-universal.png'
 
   export let settingsState: main.SettingsView
@@ -305,7 +306,7 @@
             <button
               type="button"
               class="button ghost small"
-              on:click={() => window.open('https://github.com/RobinMillford/flitnix', '_blank', 'noopener,noreferrer')}
+              on:click={() => openExternalURL('https://github.com/RobinMillford/flitnix')}
             >
               GitHub Repository ↗
             </button>

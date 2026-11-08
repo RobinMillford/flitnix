@@ -73,7 +73,44 @@ func TestTextMessagingRoutes(t *testing.T) {
 		t.Fatalf("unexpected message result: %+v", msgRes)
 	}
 
-	// 3. List messages returns the new message
+	// 2b. Send text message using mobile format ("text" key)
+	sendPhoneFormat, _ := json.Marshal(map[string]string{
+		"text": "Hello from mobile browser!",
+	})
+	reqSendPhone, _ := http.NewRequest("POST", ts.URL+"/api/text", bytes.NewReader(sendPhoneFormat))
+	reqSendPhone.Header.Set("Authorization", "Bearer "+sess.Token())
+	reqSendPhone.Header.Set("Content-Type", "application/json")
+	respSendPhone, err := http.DefaultClient.Do(reqSendPhone)
+	if err != nil {
+		t.Fatalf("POST /api/text (phone format): %v", err)
+	}
+	defer respSendPhone.Body.Close()
+	if respSendPhone.StatusCode != http.StatusCreated {
+		t.Fatalf("POST status = %d; want 201", respSendPhone.StatusCode)
+	}
+	var msgPhoneRes textmsg.Message
+	_ = json.NewDecoder(respSendPhone.Body).Decode(&msgPhoneRes)
+	if msgPhoneRes.Sender != "phone" || msgPhoneRes.Content != "Hello from mobile browser!" {
+		t.Fatalf("unexpected mobile message result: %+v", msgPhoneRes)
+	}
+
+	// 2c. Send text message with unknown field rejected -> 400
+	sendBadKey, _ := json.Marshal(map[string]string{
+		"unknownField": "bad data",
+	})
+	reqBadKey, _ := http.NewRequest("POST", ts.URL+"/api/text", bytes.NewReader(sendBadKey))
+	reqBadKey.Header.Set("Authorization", "Bearer "+sess.Token())
+	reqBadKey.Header.Set("Content-Type", "application/json")
+	respBadKey, err := http.DefaultClient.Do(reqBadKey)
+	if err != nil {
+		t.Fatalf("POST /api/text (bad key): %v", err)
+	}
+	respBadKey.Body.Close()
+	if respBadKey.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST status for unknown field = %d; want 400", respBadKey.StatusCode)
+	}
+
+	// 3. List messages returns both messages
 	respList2, err := http.DefaultClient.Do(reqList)
 	if err != nil {
 		t.Fatalf("GET /api/text: %v", err)
@@ -83,8 +120,8 @@ func TestTextMessagingRoutes(t *testing.T) {
 		Messages []textmsg.Message `json:"messages"`
 	}
 	_ = json.NewDecoder(respList2.Body).Decode(&listRes)
-	if len(listRes.Messages) != 1 {
-		t.Fatalf("expected 1 message, got %d", len(listRes.Messages))
+	if len(listRes.Messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(listRes.Messages))
 	}
 
 	// 4. Message exceeding 64 KiB rejected -> 413

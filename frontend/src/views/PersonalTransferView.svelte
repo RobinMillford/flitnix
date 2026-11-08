@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { main, netenv } from '../../wailsjs/go/models'
-  import { formatBytes, percent, speed, calcEta, fmtTime } from '../utils'
+  import { formatBytes, percent, speed, calcEta, fmtTime, openExternalURL } from '../utils'
   import ProgressBar from '../components/ProgressBar.svelte'
 
   export let sessions: main.SessionView[] = []
@@ -641,10 +641,16 @@
           <div class="text-compose-box">
             <textarea
               class="text-input notes-textarea"
-              placeholder={sessions.length ? 'Type a note or paste a link to share with your phone…' : 'Start a session above to send notes to your phone.'}
+              placeholder={sessions.length ? 'Type a note or paste a link to share with your phone… (Enter to send)' : 'Start a session above to send notes to your phone.'}
               bind:value={textInput}
               maxlength="65536"
               disabled={!sessions.length}
+              on:keydown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault()
+                  sendTextAction()
+                }
+              }}
             ></textarea>
             <div class="compose-bar">
               <span class="char-count tabular">{textInput.length} / 65536</span>
@@ -662,10 +668,10 @@
           <!-- Message Feed -->
           {#if textMessages.length > 0}
             <div class="notes-feed">
-              {#each textMessages as msg (msg.id)}
+              {#each [...textMessages].reverse() as msg (msg.id)}
                 <div class="note-bubble {msg.sender}">
                   <div class="note-head">
-                    <span class="note-sender">{msg.sender}</span>
+                    <span class="note-sender">{msg.sender === 'desktop' ? 'PC (Desktop)' : 'Phone'}</span>
                     <span class="note-time tabular">{fmtTime(msg.createdAt)}</span>
                   </div>
                   <div class="note-content">{msg.content}</div>
@@ -681,7 +687,7 @@
                       <button
                         type="button"
                         class="mini-action-btn link"
-                        on:click={() => window.open(msg.url, '_blank', 'noopener,noreferrer')}
+                        on:click={() => { if (msg.url) openExternalURL(msg.url) }}
                       >
                         Open Link ↗
                       </button>
@@ -689,6 +695,15 @@
                   </div>
                 </div>
               {/each}
+            </div>
+          {:else}
+            <div class="notes-empty">
+              <span class="notes-empty-icon" aria-hidden="true">💬</span>
+              <p class="notes-empty-text">
+                {sessions.length
+                  ? 'No notes or links shared yet. Send one above, or send one from your phone.'
+                  : 'Start a session above to exchange notes and links with your phone.'}
+              </p>
             </div>
           {/if}
         </div>
@@ -1573,6 +1588,42 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+  }
+
+  .note-bubble.phone {
+    border-left: 3px solid var(--accent);
+  }
+
+  .note-bubble.desktop {
+    border-left: 3px solid var(--border-strong);
+  }
+
+  .note-bubble.phone .note-sender {
+    color: var(--accent);
+  }
+
+  .notes-empty {
+    padding: 14px 10px;
+    text-align: center;
+    background: var(--bg-surface-elevated);
+    border-radius: var(--radius-sm, 6px);
+    border: 1px dashed var(--border-subtle);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .notes-empty-icon {
+    font-size: 15px;
+    opacity: 0.75;
+  }
+
+  .notes-empty-text {
+    margin: 0;
+    font-size: 11.5px;
+    color: var(--text-muted);
+    line-height: 1.4;
   }
 
   .note-head {

@@ -293,6 +293,41 @@
     return n;
   }
 
+  function copyToClipboard(text, onSuccess, onFailure) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () {
+        if (onSuccess) onSuccess();
+      }).catch(function () {
+        fallbackCopy(text, onSuccess, onFailure);
+      });
+      return;
+    }
+    fallbackCopy(text, onSuccess, onFailure);
+  }
+
+  function fallbackCopy(text, onSuccess, onFailure) {
+    try {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      ta.style.top = "-9999px";
+      ta.setAttribute("readonly", "");
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      var ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      if (ok) {
+        if (onSuccess) onSuccess();
+      } else {
+        if (onFailure) onFailure();
+      }
+    } catch (e) {
+      if (onFailure) onFailure(e);
+    }
+  }
+
   function fmtBytes(n) {
     if (typeof n !== "number" || !isFinite(n) || n < 0) return "";
     var units = ["B", "KB", "MB", "GB", "TB"];
@@ -1173,12 +1208,10 @@
       copyBtn = el("button", "btn btn--small btn--ghost", "Copy");
       copyBtn.type = "button";
       copyBtn.addEventListener("click", function () {
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(digest).then(function () {
-            copyBtn.textContent = "Copied!";
-            setTimeout(function () { copyBtn.textContent = "Copy"; }, 2000);
-          });
-        }
+        copyToClipboard(digest, function () {
+          copyBtn.textContent = "Copied!";
+          setTimeout(function () { copyBtn.textContent = "Copy"; }, 2000);
+        });
       });
       hashbox.appendChild(copyBtn);
     }
@@ -1609,10 +1642,13 @@
       textMessagesEl.appendChild(emptyLi);
       return;
     }
-    messages.forEach(function (msg) {
+    // Render newest message first so the latest note is visible at top
+    var items = messages.slice().reverse();
+    items.forEach(function (msg) {
       var li = el("li", "text-msg");
       var hdr = el("div", "text-msg__header");
-      var senderBadge = el("span", "text-msg__badge text-msg__badge--" + (msg.sender === "desktop" ? "desktop" : "phone"), msg.sender === "desktop" ? "Desktop" : "Phone");
+      var senderLabel = msg.sender === "desktop" ? "PC (Desktop)" : "Phone";
+      var senderBadge = el("span", "text-msg__badge text-msg__badge--" + (msg.sender === "desktop" ? "desktop" : "phone"), senderLabel);
       var timeStr = "";
       try {
         timeStr = new Date(msg.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -1629,12 +1665,10 @@
       var copyBtn = el("button", "text-msg__btn", "Copy");
       copyBtn.type = "button";
       copyBtn.addEventListener("click", function () {
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(msg.content).then(function () {
-            copyBtn.textContent = "Copied!";
-            setTimeout(function () { copyBtn.textContent = "Copy"; }, 1500);
-          });
-        }
+        copyToClipboard(msg.content, function () {
+          copyBtn.textContent = "Copied!";
+          setTimeout(function () { copyBtn.textContent = "Copy"; }, 1500);
+        });
       });
       actions.appendChild(copyBtn);
 
@@ -1652,9 +1686,10 @@
 
   function fetchTextMessages() {
     if (appState.ended || !token) return;
-    api("/api/text").then(function (messages) {
+    api("/api/text").then(function (res) {
       if (appState.ended) return;
-      textMessagesCache = messages || [];
+      var list = (res && Array.isArray(res.messages)) ? res.messages : (Array.isArray(res) ? res : []);
+      textMessagesCache = list;
       renderTextMessages(textMessagesCache);
     }).catch(function () {
       // transient failures are ignored during background polling
@@ -1675,12 +1710,20 @@
 
   function initQuickText() {
     if (!textForm || !textInput) return;
-    textInput.addEventListener("input", function () {
+    function updateSendBtn() {
       var len = textInput.value.length;
+      var trimmed = textInput.value.trim();
       if (textCharCount) {
         textCharCount.textContent = len > 1024 ? Math.round(len / 1024) + " KB / 64 KB" : len + " / 64 KB";
       }
-      if (textSendBtn) textSendBtn.disabled = len === 0 || len > 65536;
+      if (textSendBtn) textSendBtn.disabled = trimmed.length === 0 || len > 65536;
+    }
+    textInput.addEventListener("input", updateSendBtn);
+    textInput.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        textForm.dispatchEvent(new Event("submit"));
+      }
     });
 
     textForm.addEventListener("submit", function (e) {
@@ -1691,7 +1734,7 @@
       api("/api/text", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: text })
+        body: JSON.stringify({ content: text, text: text })
       }).then(function () {
         textInput.value = "";
         if (textCharCount) textCharCount.textContent = "0 / 64 KB";

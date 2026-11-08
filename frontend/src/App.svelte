@@ -191,6 +191,8 @@
   let textMessages: main.TextMessageView[] = []
   let textInput = ''
   let sendingText = false
+  const knownTextMessageIds = new Set<string>()
+  let textMessagesInitialized = false
 
   // Guest Drop Box state
   let guestRoomState: main.GuestRoomStateView | null = null
@@ -269,10 +271,36 @@
 
       if (sessions.length > 0) {
         ListTextMessages(sessions[0].key).then(msgs => {
-          textMessages = msgs ?? []
+          const incoming = msgs ?? []
+          if (!textMessagesInitialized) {
+            incoming.forEach(m => { if (m?.id) knownTextMessageIds.add(m.id) })
+            textMessagesInitialized = true
+          } else {
+            let hasNewPhoneLink = false
+            let hasNewPhoneMessage = false
+            for (const m of incoming) {
+              if (m?.id && !knownTextMessageIds.has(m.id)) {
+                knownTextMessageIds.add(m.id)
+                if (m.sender === 'phone') {
+                  if (m.isLink) hasNewPhoneLink = true
+                  else hasNewPhoneMessage = true
+                }
+              }
+            }
+            if (hasNewPhoneLink) {
+              showToast('Received web link from phone', 'info')
+              liveAnnouncement = 'Received web link from phone'
+            } else if (hasNewPhoneMessage) {
+              showToast('Received note from phone', 'info')
+              liveAnnouncement = 'Received note from phone'
+            }
+          }
+          textMessages = incoming
         }).catch(() => {})
       } else {
         textMessages = []
+        knownTextMessageIds.clear()
+        textMessagesInitialized = false
       }
     },
     (err) => { errorText = stringOfError(err) },
@@ -470,9 +498,14 @@
   async function sendTextAction(): Promise<void> {
     if (!textInput.trim() || sendingText || !sessions.length) return
     sendingText = true
+    const toSend = textInput.trim()
     try {
-      await SendTextMessage(sessions[0].key, textInput.trim())
+      const sent = await SendTextMessage(sessions[0].key, toSend)
       textInput = ''
+      if (sent && sent.id) {
+        knownTextMessageIds.add(sent.id)
+        textMessages = [...textMessages, sent]
+      }
       refresh()
     } catch (err) {
       report(err)
@@ -486,6 +519,8 @@
     try {
       await ClearTextMessages(sessions[0].key)
       textMessages = []
+      knownTextMessageIds.clear()
+      showToast('Notes cleared', 'info')
       refresh()
     } catch (err) {
       report(err)
@@ -494,7 +529,27 @@
 
   function copyTextToClipboard(text: string): void {
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text)
+      navigator.clipboard.writeText(text).catch(() => {
+        fallbackCopyText(text)
+      })
+      return
+    }
+    fallbackCopyText(text)
+  }
+
+  function fallbackCopyText(text: string): void {
+    try {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.focus()
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+    } catch {
+      // ignore
     }
   }
 

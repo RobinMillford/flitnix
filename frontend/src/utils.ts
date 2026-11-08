@@ -87,3 +87,23 @@ export function verifyDigestMatch(actualHex: string | null | undefined, expected
   if (!actualHex || !expectedHex) return false
   return actualHex.trim().toLowerCase() === expectedHex.trim().toLowerCase()
 }
+
+/**
+ * Opens an external URL using Wails runtime BrowserOpenURL if available,
+ * or falling back to window.open in browser/test contexts.
+ */
+export function openExternalURL(url: string | null | undefined): void {
+  if (!url) return
+  try {
+    const w = typeof window !== 'undefined' ? (window as any) : null
+    if (w?.runtime && typeof w.runtime.BrowserOpenURL === 'function') {
+      w.runtime.BrowserOpenURL(url)
+      return
+    }
+  } catch {
+    // ignore
+  }
+  if (typeof window !== 'undefined' && typeof window.open === 'function') {
+    window.open(url, '_blank', 'noopener,noreferrer')
+  }
+}
