@@ -129,3 +129,33 @@ test('openExternalURL handles empty string safely without error', () => {
     openExternalURL('')
   })
 })
+
+test('openExternalURL rejects dangerous or non-HTTP protocols', () => {
+  let calledUrl = ''
+  ;(globalThis as any).window = {
+    runtime: {
+      BrowserOpenURL: (u: string) => {
+        calledUrl = u
+      }
+    },
+    open: (u: string) => {
+      calledUrl = u
+      return null
+    }
+  }
+
+  const dangerous = [
+    'javascript:alert(1)',
+    'data:text/html,<script>alert(1)</script>',
+    'file:///etc/passwd',
+    'vbscript:msgbox(1)',
+    'custom-protocol://do-something',
+    'not a valid url'
+  ]
+
+  for (const url of dangerous) {
+    calledUrl = ''
+    openExternalURL(url)
+    assert.equal(calledUrl, '', `expected ${url} to be blocked`)
+  }
+})
