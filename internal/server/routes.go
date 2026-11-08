@@ -261,10 +261,16 @@ func equalHostPort(h1, h2 string) bool {
 	return strings.EqualFold(host1, host2)
 }
 
-// securityMiddleware rejects requests with untrusted Host headers (DNS rebinding)
-// and rejects cross-origin state-changing requests (CSRF).
+// securityMiddleware sets defensive HTTP response headers, rejects requests
+// with untrusted Host headers (DNS rebinding), and rejects cross-origin state-changing
+// requests (CSRF via Sec-Fetch-Site, Origin, or Referer).
 func securityMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'")
+
 		if !isAllowedHost(r.Host) {
 			writeError(w, http.StatusBadRequest, "invalid host header")
 			return
@@ -282,6 +288,12 @@ func securityMiddleware(next http.Handler) http.Handler {
 					return
 				}
 				u, err := url.Parse(origin)
+				if err != nil || u.Host == "" || !equalHostPort(u.Host, r.Host) {
+					writeError(w, http.StatusForbidden, "cross-origin request forbidden")
+					return
+				}
+			} else if referer := r.Header.Get("Referer"); referer != "" {
+				u, err := url.Parse(referer)
 				if err != nil || u.Host == "" || !equalHostPort(u.Host, r.Host) {
 					writeError(w, http.StatusForbidden, "cross-origin request forbidden")
 					return
