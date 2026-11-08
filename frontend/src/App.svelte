@@ -1493,7 +1493,7 @@
   <!-- Update Modal -->
   <UpdateModal
     isOpen={updateModalOpen}
-    currentVersion={appVersionInfo?.version || '0.2.7.1'}
+    currentVersion={appVersionInfo?.version || '0.2.7.3'}
     onClose={() => { updateModalOpen = false }}
   />
 

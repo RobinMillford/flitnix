@@ -95,6 +95,14 @@ export function verifyDigestMatch(actualHex: string | null | undefined, expected
 export function openExternalURL(url: string | null | undefined): void {
   if (!url) return
   try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return
+    }
+  } catch {
+    return
+  }
+  try {
     const w = typeof window !== 'undefined' ? (window as any) : null
     if (w?.runtime && typeof w.runtime.BrowserOpenURL === 'function') {
       w.runtime.BrowserOpenURL(url)
