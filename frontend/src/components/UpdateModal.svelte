@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { focusTrap } from '../focusTrap';
-  import { formatBytes, speed } from '../utils';
+  import { formatBytes, speed, openExternalURL } from '../utils';
   import ProgressBar from './ProgressBar.svelte';
   import type { update, version } from '../../wailsjs/go/models';
   import { CheckForUpdates, DownloadUpdate, ApplyUpdate } from '../../wailsjs/go/main/App';
@@ -101,7 +101,7 @@
 
   function openReleasePage() {
     if (checkResult?.release?.htmlUrl) {
-      window.open(checkResult.release.htmlUrl, '_blank', 'noopener,noreferrer');
+      openExternalURL(checkResult.release.htmlUrl);
     }
   }
 </script>

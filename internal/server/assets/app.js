@@ -1710,12 +1710,20 @@
 
   function initQuickText() {
     if (!textForm || !textInput) return;
-    textInput.addEventListener("input", function () {
+    function updateSendBtn() {
       var len = textInput.value.length;
+      var trimmed = textInput.value.trim();
       if (textCharCount) {
         textCharCount.textContent = len > 1024 ? Math.round(len / 1024) + " KB / 64 KB" : len + " / 64 KB";
       }
-      if (textSendBtn) textSendBtn.disabled = len === 0 || len > 65536;
+      if (textSendBtn) textSendBtn.disabled = trimmed.length === 0 || len > 65536;
+    }
+    textInput.addEventListener("input", updateSendBtn);
+    textInput.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        textForm.dispatchEvent(new Event("submit"));
+      }
     });
 
     textForm.addEventListener("submit", function (e) {
