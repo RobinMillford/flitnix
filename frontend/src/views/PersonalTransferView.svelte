@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { main, netenv } from '../../wailsjs/go/models'
-  import { formatBytes, percent, speed, calcEta, fmtTime } from '../utils'
+  import { formatBytes, percent, speed, calcEta, fmtTime, openExternalURL } from '../utils'
   import ProgressBar from '../components/ProgressBar.svelte'
 
   export let sessions: main.SessionView[] = []
@@ -641,10 +641,16 @@
           <div class="text-compose-box">
             <textarea
               class="text-input notes-textarea"
-              placeholder={sessions.length ? 'Type a note or paste a link to share with your phone…' : 'Start a session above to send notes to your phone.'}
+              placeholder={sessions.length ? 'Type a note or paste a link to share with your phone… (Enter to send)' : 'Start a session above to send notes to your phone.'}
               bind:value={textInput}
               maxlength="65536"
               disabled={!sessions.length}
+              on:keydown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault()
+                  sendTextAction()
+                }
+              }}
             ></textarea>
             <div class="compose-bar">
               <span class="char-count tabular">{textInput.length} / 65536</span>
@@ -681,7 +687,7 @@
                       <button
                         type="button"
                         class="mini-action-btn link"
-                        on:click={() => window.open(msg.url, '_blank', 'noopener,noreferrer')}
+                        on:click={() => { if (msg.url) openExternalURL(msg.url) }}
                       >
                         Open Link ↗
                       </button>

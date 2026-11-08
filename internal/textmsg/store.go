@@ -55,6 +55,19 @@ func IsSafeURL(text string) (bool, string) {
 	return true, trimmed
 }
 
+func ExtractSafeURL(text string) (bool, string) {
+	if isDirect, directURL := IsSafeURL(text); isDirect {
+		return true, directURL
+	}
+	for _, word := range strings.Fields(text) {
+		clean := strings.Trim(word, "()[]{}<>\"',;:!?")
+		if isWordURL, wordURL := IsSafeURL(clean); isWordURL {
+			return true, wordURL
+		}
+	}
+	return false, ""
+}
+
 type Store struct {
 	mu       sync.RWMutex
 	messages map[string][]*Message // keyed by session key
@@ -88,7 +101,7 @@ func (s *Store) Add(sessionKey, sender, content string) (*Message, error) {
 	}
 	id := hex.EncodeToString(buf)
 
-	isLink, targetURL := IsSafeURL(content)
+	isLink, targetURL := ExtractSafeURL(content)
 
 	msg := &Message{
 		ID:        id,
