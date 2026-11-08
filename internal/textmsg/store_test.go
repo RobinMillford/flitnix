@@ -65,6 +65,7 @@ func TestIsSafeURL(t *testing.T) {
 	}{
 		{"https://flitnix.org", true, "https://flitnix.org"},
 		{"http://192.168.1.5:43821/photo.jpg", true, "http://192.168.1.5:43821/photo.jpg"},
+		{"www.google.com", true, "https://www.google.com"},
 		{"javascript:alert(1)", false, ""},
 		{"data:text/html,bad", false, ""},
 		{"file:///etc/passwd", false, ""},

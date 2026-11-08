@@ -1566,6 +1566,7 @@ func writeError(w http.ResponseWriter, code int, msg string) {
 
 type textSendRequest struct {
 	Content string `json:"content"`
+	Text    string `json:"text"`
 }
 
 func handleTextMessageSend(svcs *Services) http.HandlerFunc {
@@ -1599,7 +1600,12 @@ func handleTextMessageSend(svcs *Services) http.HandlerFunc {
 			return
 		}
 
-		msg, err := svcs.TextMessages.Add(sess.Key(), "phone", req.Content)
+		content := req.Content
+		if content == "" && req.Text != "" {
+			content = req.Text
+		}
+
+		msg, err := svcs.TextMessages.Add(sess.Key(), "phone", content)
 		if err != nil {
 			switch {
 			case errors.Is(err, textmsg.ErrEmptyContent):

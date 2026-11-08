@@ -38,6 +38,9 @@ func IsSafeURL(text string) (bool, string) {
 	if strings.ContainsAny(trimmed, "\r\n\t ") {
 		return false, ""
 	}
+	if strings.HasPrefix(strings.ToLower(trimmed), "www.") {
+		trimmed = "https://" + trimmed
+	}
 	u, err := url.ParseRequestURI(trimmed)
 	if err != nil {
 		return false, ""
