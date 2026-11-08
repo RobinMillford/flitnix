@@ -65,6 +65,7 @@ func TestIsSafeURL(t *testing.T) {
 	}{
 		{"https://flitnix.org", true, "https://flitnix.org"},
 		{"http://192.168.1.5:43821/photo.jpg", true, "http://192.168.1.5:43821/photo.jpg"},
+		{"www.google.com", true, "https://www.google.com"},
 		{"javascript:alert(1)", false, ""},
 		{"data:text/html,bad", false, ""},
 		{"file:///etc/passwd", false, ""},
@@ -76,6 +77,28 @@ func TestIsSafeURL(t *testing.T) {
 		isL, u := IsSafeURL(tc.in)
 		if isL != tc.isLink || u != tc.want {
 			t.Errorf("IsSafeURL(%q) = (%v, %q); want (%v, %q)", tc.in, isL, u, tc.isLink, tc.want)
+		}
+	}
+}
+
+func TestExtractSafeURL(t *testing.T) {
+	cases := []struct {
+		in     string
+		isLink bool
+		want   string
+	}{
+		{"https://flitnix.org", true, "https://flitnix.org"},
+		{"www.google.com", true, "https://www.google.com"},
+		{"Check this out: https://github.com/RobinMillford/flitnix for details!", true, "https://github.com/RobinMillford/flitnix"},
+		{"Visit (www.example.com/test) today", true, "https://www.example.com/test"},
+		{"Plain text with no link", false, ""},
+		{"javascript:alert(1)", false, ""},
+	}
+
+	for _, tc := range cases {
+		isL, u := ExtractSafeURL(tc.in)
+		if isL != tc.isLink || u != tc.want {
+			t.Errorf("ExtractSafeURL(%q) = (%v, %q); want (%v, %q)", tc.in, isL, u, tc.isLink, tc.want)
 		}
 	}
 }

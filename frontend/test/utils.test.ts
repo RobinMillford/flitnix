@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   formatBytes, percent, speed, formatEta, calcEta, fmtTime, fmtRemaining,
-  parseContentDigest, verifyDigestMatch
+  parseContentDigest, verifyDigestMatch, openExternalURL
 } from '../src/utils.ts'
 
 test('formatBytes formats binary unit boundaries accurately', () => {
@@ -92,4 +92,40 @@ test('verifyDigestMatch validates case-insensitive hex digests and rejects misma
   assert.equal(verifyDigestMatch(hashA, hashB), false)
   assert.equal(verifyDigestMatch(hashA, null), false)
   assert.equal(verifyDigestMatch(null, hashB), false)
+})
+
+test('openExternalURL prefers Wails runtime BrowserOpenURL when available', () => {
+  let calledUrl = ''
+  ;(globalThis as any).window = {
+    runtime: {
+      BrowserOpenURL: (u: string) => {
+        calledUrl = u
+      }
+    }
+  }
+
+  openExternalURL('https://flitnix.org')
+  assert.equal(calledUrl, 'https://flitnix.org')
+})
+
+test('openExternalURL falls back to window.open when runtime is unavailable', () => {
+  let openedUrl = ''
+  let openedTarget = ''
+  ;(globalThis as any).window = {
+    open: (u: string, target: string) => {
+      openedUrl = u
+      openedTarget = target
+      return null
+    }
+  }
+
+  openExternalURL('https://flitnix.org/docs')
+  assert.equal(openedUrl, 'https://flitnix.org/docs')
+  assert.equal(openedTarget, '_blank')
+})
+
+test('openExternalURL handles empty string safely without error', () => {
+  assert.doesNotThrow(() => {
+    openExternalURL('')
+  })
 })
