@@ -25,7 +25,7 @@ func TestUpdateCheck_NoUpdateWhenEqualOrOlder(t *testing.T) {
 			Name:        "Flitnix v" + version.Version,
 			PublishedAt: time.Now(),
 			Assets: []gitHubAsset{
-				{Name: "flitnix_0.2.7.1_linux_amd64.tar.gz", BrowserDownloadURL: "http://example.com/asset.tar.gz", Size: 1024},
+				{Name: fmt.Sprintf("flitnix_%s_linux_amd64.tar.gz", version.Version), BrowserDownloadURL: "http://example.com/asset.tar.gz", Size: 1024},
 			},
 		}
 		_ = json.NewEncoder(w).Encode(rel)

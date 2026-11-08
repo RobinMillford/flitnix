@@ -34,9 +34,9 @@ Flitnix combines the performance and concurrency safety of Go with a modern Svel
 
 ---
 
-## Key Features & What's New in v2.7
+## Key Features & What's New in v0.2.7.3
 
-Flitnix provides high-speed, private local file transfers between desktop computers and phones. Version **v2.7** brings major reliability, security, and recovery improvements across the transfer engine:
+Flitnix provides high-speed, private local file transfers between desktop computers and phones. Version **v0.2.7.3** brings major reliability, security, and recovery improvements across the transfer engine:
 
 - **Direct High-Speed Streaming Uploads**:
   - High-throughput, single-pass HTTP streaming directly from browser storage to desktop with zero whole-file memory buffering.
@@ -121,7 +121,7 @@ Every release includes a verified `SHA256SUMS.txt` manifest.
 
 ## Platform Compatibility & Project Status
 
-### Flitnix v2.7 Project & Release Status
+### Flitnix v0.2.7.3 Project & Release Status
 
 | Platform / Target | Minimum Version | Status | Verification & Readiness Notes |
 | :--- | :--- | :--- | :--- |
@@ -129,7 +129,7 @@ Every release includes a verified `SHA256SUMS.txt` manifest.
 | **Windows (Desktop)** | Windows 10 (1809+) / Windows 11 (64-bit) | **CI Pending** | Single-pass streaming and atomic collision-safe publication verified; local repeated tests pass (50/50); remote Windows GitHub Actions CI confirmation pending. Authenticode code signing pending. |
 | **macOS (Desktop)** | macOS 11.0 Big Sur or later | **Native Validation Pending** | Universal binary configuration present (`.dmg` / `.zip`); direct streaming upload engine cross-compiled; native hardware execution, code signing, and notarization pending. |
 | **Mobile Browsers** | iOS 14+ (Safari), Android 8+ (Chrome, Firefox, etc.) | **Automated Tests Passed** | Direct single-pass HTTP streaming with native progress reporting and wake-lock test suites pass; physical mobile device validation across diverse hardware pending. |
-| **Physical RF Wi-Fi & Power Loss** | All Platforms | **Deferred** | Physical multi-room RF Wi-Fi roaming, AP handoff, and hardware sudden power-loss testing are explicitly deferred to post-v2.7 evaluation tracks. |
+| **Physical RF Wi-Fi & Power Loss** | All Platforms | **Deferred** | Physical multi-room RF Wi-Fi roaming, AP handoff, and hardware sudden power-loss testing are explicitly deferred to post-v0.2.7.3 evaluation tracks. |
 
 ---
 
