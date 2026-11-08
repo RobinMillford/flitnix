@@ -175,3 +175,34 @@ func TestExportEmptyFails(t *testing.T) {
 		t.Fatalf("expected ErrNoCompletedUploads, got %v", err)
 	}
 }
+
+func TestSanitizeZipPath(t *testing.T) {
+	cases := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{"normal relative", "foo/bar.txt", "foo/bar.txt"},
+		{"leading slash", "/foo/bar.txt", "foo/bar.txt"},
+		{"double dots root", "..", "file"},
+		{"double dots traversal", "../../etc/passwd", "etc/passwd"},
+		{"embedded double dots", "foo/../../bar.txt", "bar.txt"},
+		{"windows backslashes", `folder\sub\doc.pdf`, "folder/sub/doc.pdf"},
+		{"windows volume", `C:\Windows\System32\calc.exe`, "Windows/System32/calc.exe"},
+		{"empty string", "", "file"},
+		{"current dir", ".", "file"},
+		{"only slashes and dots", "/../../.", "file"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeZipPath(tc.input)
+			if got != tc.expected {
+				t.Errorf("sanitizeZipPath(%q) = %q; want %q", tc.input, got, tc.expected)
+			}
+			if strings.HasPrefix(got, "/") || strings.HasPrefix(got, "../") || got == ".." {
+				t.Errorf("sanitizeZipPath(%q) returned dangerous zip path: %q", tc.input, got)
+			}
+		})
+	}
+}

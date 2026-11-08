@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${1:-${VERSION:-0.2.7.1}}"
+VERSION="${1:-${VERSION:-0.2.7.3}}"
 ARCH="${2:-${ARCH:-amd64}}"
 DIST_DIR="${3:-dist}"
 

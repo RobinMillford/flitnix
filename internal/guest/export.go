@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -51,13 +52,32 @@ type ExportResult struct {
 }
 
 func sanitizeZipPath(p string) string {
-	cleaned := filepath.Clean(filepath.ToSlash(p))
-	cleaned = strings.TrimPrefix(cleaned, "/")
-	cleaned = strings.TrimPrefix(cleaned, "../")
-	for strings.HasPrefix(cleaned, "../") {
-		cleaned = strings.TrimPrefix(cleaned, "../")
+	// 1. Convert backslashes to forward slashes
+	p = strings.ReplaceAll(p, "\\", "/")
+	// 2. Strip any Windows volume prefix (e.g. "C:" or "c:")
+	if len(p) >= 2 && ((p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z')) && p[1] == ':' {
+		p = p[2:]
 	}
-	return cleaned
+	// 3. Clean path using forward-slash path.Clean
+	cleaned := path.Clean("/" + p)
+	cleaned = strings.TrimPrefix(cleaned, "/")
+	if cleaned == "" || cleaned == "." || cleaned == ".." {
+		return "file"
+	}
+	// 4. Split and filter out any dangerous segments
+	parts := strings.Split(cleaned, "/")
+	var safeParts []string
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" || part == "." || part == ".." {
+			continue
+		}
+		safeParts = append(safeParts, part)
+	}
+	if len(safeParts) == 0 {
+		return "file"
+	}
+	return strings.Join(safeParts, "/")
 }
 
 func ExportRoomToZip(room *Room, destZipPath string) (*ExportResult, error) {
@@ -143,6 +163,22 @@ func ExportRoomToZip(room *Room, destZipPath string) (*ExportResult, error) {
 		if srcPath == "" {
 			guestDir := filepath.Join(roomFolder, fmt.Sprintf("%s-%s", item.guest.ID, item.guest.SafeSlug))
 			srcPath = filepath.Join(guestDir, item.up.FileName)
+		}
+
+		cleanSrc, err := filepath.Abs(srcPath)
+		if err != nil {
+			_ = zipWriter.Close()
+			return nil, fmt.Errorf("guest: invalid source file path %s: %w", srcPath, err)
+		}
+		cleanRoom, err := filepath.Abs(roomFolder)
+		if err != nil {
+			_ = zipWriter.Close()
+			return nil, fmt.Errorf("guest: invalid room folder: %w", err)
+		}
+		rel, err := filepath.Rel(cleanRoom, cleanSrc)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			_ = zipWriter.Close()
+			return nil, fmt.Errorf("guest: source file %s is outside room directory", srcPath)
 		}
 
 		info, err := os.Stat(srcPath)

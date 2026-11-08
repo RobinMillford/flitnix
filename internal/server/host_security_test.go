@@ -153,3 +153,64 @@ func TestSecurityMiddlewareRejectsDNSRebindingOverIPv6(t *testing.T) {
 		t.Fatalf("same-origin IPv6 request failed: code=%d %s", recSameOrigin.Code, recSameOrigin.Body.String())
 	}
 }
+
+func TestSecurityResponseHeaders(t *testing.T) {
+	env := newTestEnv(t)
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req.Host = "127.0.0.1:43821"
+	rec := httptest.NewRecorder()
+	env.srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("healthz request failed: code=%d", rec.Code)
+	}
+
+	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q; want %q", got, "nosniff")
+	}
+	if got := rec.Header().Get("X-Frame-Options"); got != "DENY" {
+		t.Errorf("X-Frame-Options = %q; want %q", got, "DENY")
+	}
+	if got := rec.Header().Get("Referrer-Policy"); got != "no-referrer" {
+		t.Errorf("Referrer-Policy = %q; want %q", got, "no-referrer")
+	}
+	csp := rec.Header().Get("Content-Security-Policy")
+	if csp == "" {
+		t.Fatal("Content-Security-Policy header is missing")
+	}
+	if !bytes.Contains([]byte(csp), []byte("frame-ancestors 'none'")) {
+		t.Errorf("CSP missing frame-ancestors 'none': %s", csp)
+	}
+	if !bytes.Contains([]byte(csp), []byte("default-src 'self'")) {
+		t.Errorf("CSP missing default-src 'self': %s", csp)
+	}
+}
+
+func TestCSRFRefererProtection(t *testing.T) {
+	env := newTestEnv(t)
+	tok := env.token()
+
+	// 1. Cross-origin Referer rejected with 403 Forbidden
+	reqCSRF := httptest.NewRequest(http.MethodPost, "/api/uploads", bytes.NewReader([]byte(`{"name":"test.bin","size":100}`)))
+	reqCSRF.Host = "127.0.0.1:43821"
+	reqCSRF.Header.Set("Authorization", "Bearer "+tok)
+	reqCSRF.Header.Set("Referer", "http://evil-attacker.com/page")
+	reqCSRF.Header.Set("Content-Type", "application/json")
+	recCSRF := httptest.NewRecorder()
+	env.srv.Handler().ServeHTTP(recCSRF, reqCSRF)
+	if recCSRF.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin Referer must return 403, got %d", recCSRF.Code)
+	}
+
+	// 2. Same-origin Referer accepted
+	reqSame := httptest.NewRequest(http.MethodPost, "/api/uploads", bytes.NewReader([]byte(`{"name":"test.bin","size":100}`)))
+	reqSame.Host = "127.0.0.1:43821"
+	reqSame.Header.Set("Authorization", "Bearer "+tok)
+	reqSame.Header.Set("Referer", "http://127.0.0.1:43821/")
+	reqSame.Header.Set("Content-Type", "application/json")
+	recSame := httptest.NewRecorder()
+	env.srv.Handler().ServeHTTP(recSame, reqSame)
+	if recSame.Code != http.StatusCreated {
+		t.Fatalf("same-origin Referer failed: code=%d %s", recSame.Code, recSame.Body.String())
+	}
+}

@@ -265,7 +265,7 @@
     "sectionSystem": "System",
     "sectionMain": "Transfer",
     "sectionSecurity": "Management",
-    "version": "v0.2.7.1"
+    "version": "v0.2.7.3"
   },
   "settings": {
     "eyebrow": "Preferences",
