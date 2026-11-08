@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.7.3] - 2026-11-08
+
+### Security
+- **Defensive HTTP Response Headers**: Emitted `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and strict `Content-Security-Policy` with `frame-ancestors 'none'` across all server endpoints to prevent clickjacking and MIME confusion.
+- **CSRF Referer Enforcement**: Validated `Referer` headers against `r.Host` on state-changing operations when `Origin` is omitted.
+- **Archive Export Hardening**: Hardened Guest Drop Box ZIP export against Zip Slip and path traversal using forward-slash normalization, drive volume removal, and strict room boundary containment checks.
+- **Safe Protocol Schemes**: Enforced `http:` and `https:` URL protocol validation in desktop external URL opener to block execution of dangerous or unvalidated URI schemes.
+
+### Changed
+- Bumped application release version to `v0.2.7.3` across runtime metadata, Wails packaging configuration, frontend UI views, localization catalogs, and packaging scripts.
+
+---
+
 ## [0.2.0] - 2026-10-30
 
 Major release introducing high-performance single-pass streaming, multi-tier buffer pooling, Trusted Devices authentication, Guest Drop Box, Connection Doctor, Quick Text sharing, and enhanced desktop integration.
