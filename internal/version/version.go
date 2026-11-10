@@ -10,7 +10,7 @@ import (
 
 var (
 	// Version is the current authoritative semver version of Flitnix.
-	Version = "0.2.7.3"
+	Version = "0.2.7.4"
 
 	// Prerelease indicates a release stage like "beta.1", "rc.1", or "dev".
 	// Set to empty string for official stable releases.
@@ -75,7 +75,7 @@ type SemVer struct {
 	Prerelease string
 }
 
-// ParseSemVer parses a version string like "v0.2.7.3", "v2.7.0", "2.6", or "2.6.0-rc1".
+// ParseSemVer parses a version string like "v0.2.7.4", "v2.7.0", "2.6", or "2.6.0-rc1".
 func ParseSemVer(v string) (SemVer, error) {
 	v = strings.TrimSpace(v)
 	matches := semverPattern.FindStringSubmatch(v)

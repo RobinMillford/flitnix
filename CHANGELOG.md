@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.7.4] - 2026-11-10
+
+### Fixed
+- **Restored File-Transfer Throughput**: Large uploads no longer run their HTTP PUT on the browser main thread. Uploads are streamed from a dedicated Web Worker with an identical main-thread fallback, so painting, progress math, and layout work can no longer starve the socket write path.
+- **Progress Repaint Throttling**: Host and guest progress panels repaint at most once every 200 ms, with a forced repaint on completion, preventing UI churn from degrading sustained transfer speed on low-end phones.
+
+### Changed
+- Added an explicit `worker-src 'self'` Content-Security-Policy directive so the upload worker loads under the hardened header policy.
+- Bumped application release version to `v0.2.7.4` across runtime metadata, Wails packaging configuration, frontend UI views, localization catalogs, packaging scripts, and documentation.
+
+---
+
 ## [0.2.7.3] - 2026-11-08
 
 ### Security

@@ -280,7 +280,7 @@
           <h3>Flitnix</h3>
           <p>High-speed, private, offline-first local network file transfer.</p>
           <span class="version-tag monospace">
-            {appVersionInfo ? `Version ${appVersionInfo.version}` : 'Version 0.2.7.3'}
+            {appVersionInfo ? `Version ${appVersionInfo.version}` : 'Version 0.2.7.4'}
           </span>
         </div>
       </div>
