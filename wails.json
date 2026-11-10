@@ -6,6 +6,9 @@
   "frontend:build": "npm run build",
   "frontend:dev:watcher": "npm run dev",
   "frontend:dev:serverUrl": "auto",
+  "preBuildHooks": {
+    "*/*": "go run ../../scripts/genversion"
+  },
   "author": {
     "name": "RobinMillford",
     "email": "RobinMillford@users.noreply.github.com"

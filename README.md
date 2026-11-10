@@ -195,6 +195,12 @@ wails build -nsis
 wails build
 ```
 
+The application version is not edited by hand. Every `wails build` runs
+`scripts/genversion`, which stamps the tag being built into the binary, so the UI,
+CLI, and updater always report the release you tagged. It resolves the version
+from `FLITNIX_VERSION`, then `GITHUB_REF_NAME` in CI, then the nearest git tag:
+tag `v0.2.7.5` and the next build reports `v0.2.7.5` with no source edits.
+
 ### Running Tests
 
 ```bash

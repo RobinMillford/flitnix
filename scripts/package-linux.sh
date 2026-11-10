@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${1:-${VERSION:-0.2.7.4}}"
+VERSION="${1:-${VERSION:-$(go run ./scripts/genversion -print)}}"
 ARCH="${2:-${ARCH:-amd64}}"
 DIST_DIR="${3:-dist}"
 
@@ -9,8 +9,12 @@ DIST_DIR="${3:-dist}"
 VERSION="${VERSION#v}"
 
 # Validate VERSION
-if [ -z "${VERSION}" ] || ! [[ "${VERSION}" =~ ^[0-9]+(\.[0-9]+)*(-[a-zA-Z0-9.+~-]+)?$ ]]; then
-    echo "Error: Invalid or empty VERSION '${VERSION}'. VERSION must follow semantic version format." >&2
+if [ -z "${VERSION}" ]; then
+    echo "Error: no version resolved. Pass VERSION, set FLITNIX_VERSION, or build from a tagged commit (e.g. v1.2.3)." >&2
+    exit 1
+fi
+if ! [[ "${VERSION}" =~ ^[0-9]+(\.[0-9]+)*(-[a-zA-Z0-9.+~-]+)?$ ]]; then
+    echo "Error: Invalid VERSION '${VERSION}'. VERSION must follow semantic version format." >&2
     exit 1
 fi
 
