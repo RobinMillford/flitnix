@@ -35,7 +35,7 @@ func TestHomePage(t *testing.T) {
 		t.Errorf("GET / returned Content-Type %q, want text/html", ct)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"Flitnix", "/static/styles.css", "/static/app.js", "phone-transfer"} {
+	for _, want := range []string{"Flitnix", "/static/styles.css", "/static/app.js", "/static/upload-client.js", "phone-transfer"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("GET / body does not contain %q", want)
 		}
@@ -66,6 +66,8 @@ func TestStaticAssetsServed(t *testing.T) {
 	}{
 		{"/static/styles.css", []string{"text/css"}},
 		{"/static/app.js", []string{"text/javascript", "application/javascript"}},
+		{"/static/upload-client.js", []string{"text/javascript", "application/javascript"}},
+		{"/static/upload-worker.js", []string{"text/javascript", "application/javascript"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.path, func(t *testing.T) {

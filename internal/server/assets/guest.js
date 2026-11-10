@@ -873,54 +873,56 @@
     updateJobUI(job);
     syncWakeLock();
 
-    var xhr = new XMLHttpRequest();
     var lastLoaded = 0;
     var lastTime = Date.now();
     var currentSpeed = 0;
+    var lastPaint = 0;
 
-    xhr.upload.onprogress = function (e) {
-      if (e.lengthComputable) {
-        job.transferred = e.loaded;
+    var stream = FlitnixUpload.stream({
+      url: "/guest-api/uploads/" + encodeURIComponent(job.uploadId) + "/content",
+      file: job.file,
+      onProgress: function (loaded) {
+        job.transferred = loaded;
         var now = Date.now();
         var dt = (now - lastTime) / 1000;
         if (dt >= 0.3) {
-          var instantSpeed = (e.loaded - lastLoaded) / dt;
+          var instantSpeed = (loaded - lastLoaded) / dt;
           currentSpeed = currentSpeed === 0 ? instantSpeed : (0.7 * currentSpeed + 0.3 * instantSpeed);
           job.speed = currentSpeed;
-          lastLoaded = e.loaded;
+          lastLoaded = loaded;
           lastTime = now;
         }
-        updateJobUI(job);
-        updateAwarenessUI();
+        // Progress events arrive far faster than the screen refreshes;
+        // repainting on every one of them starves the transfer itself.
+        if (now - lastPaint >= 200 || loaded >= job.size) {
+          lastPaint = now;
+          updateJobUI(job);
+          updateAwarenessUI();
+        }
       }
-    };
+    });
 
-    xhr.onload = function () {
-      if (xhr.status >= 200 && xhr.status < 300) {
+    stream.promise.then(function (res) {
+      if (res.status >= 200 && res.status < 300) {
         job.state = "completed";
         job.transferred = job.size;
         updateJobUI(job);
       } else {
         job.state = "failed";
-        job.error = "Upload failed (" + xhr.status + ")";
+        job.error = "Upload failed (" + res.status + ")";
         updateJobUI(job);
       }
       isUploading = false;
       syncWakeLock();
       pumpQueue();
-    };
-
-    xhr.onerror = function () {
+    }, function () {
       job.state = "failed";
       job.error = "Network error during upload";
       updateJobUI(job);
       isUploading = false;
       syncWakeLock();
       pumpQueue();
-    };
-
-    xhr.open("PUT", "/guest-api/uploads/" + encodeURIComponent(job.uploadId) + "/content");
-    xhr.send(job.file);
+    });
   }
 
 })();
