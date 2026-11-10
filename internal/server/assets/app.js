@@ -1062,56 +1062,64 @@
     });
   }
 
-  function errorCode(xhr) {
-    try { var parsed = JSON.parse(xhr.responseText); return parsed && parsed.code; } catch (e) { return undefined; }
+  function errorCode(res) {
+    try { var parsed = JSON.parse(res.responseText); return parsed && parsed.code; } catch (e) { return undefined; }
   }
 
   function putBatchContent(job) {
-    return new Promise(function (resolve, reject) {
-      var xhr = new XMLHttpRequest();
-      job.xhr = xhr;
-      var lastPaint = 0;
-      var lastLoaded = 0;
-      var lastTime = Date.now();
-      var currentSpeed = 0;
-      xhr.open("PUT", "/api/batches/" + encodeURIComponent(job.batchID) +
-        "/items/" + encodeURIComponent(job.itemID) + "/content");
-      xhr.upload.addEventListener("progress", function (ev) {
-        if (!ev.lengthComputable) return;
-        job.uploaded = Math.min(job.size, ev.loaded);
+    var lastPaint = 0;
+    var lastLoaded = 0;
+    var lastTime = Date.now();
+    var currentSpeed = 0;
+
+    var stream = FlitnixUpload.stream({
+      url: "/api/batches/" + encodeURIComponent(job.batchID) +
+        "/items/" + encodeURIComponent(job.itemID) + "/content",
+      headers: {
+        "Authorization": "Bearer " + token,
+        "Content-Type": "application/octet-stream"
+      },
+      file: job.file,
+      onProgress: function (loaded, total) {
+        job.uploaded = Math.min(job.size, loaded);
         var now = Date.now();
         var dt = (now - lastTime) / 1000;
         if (dt >= 0.25) {
-          var instant = (ev.loaded - lastLoaded) / dt;
+          var instant = (loaded - lastLoaded) / dt;
           currentSpeed = currentSpeed === 0 ? instant : (0.7 * currentSpeed + 0.3 * instant);
           job.speed = currentSpeed;
-          lastLoaded = ev.loaded;
+          lastLoaded = loaded;
           lastTime = now;
           if (currentSpeed > 0 && job.size > job.uploaded) {
             job.eta = Math.round((job.size - job.uploaded) / currentSpeed);
           }
         }
-        if (now - lastPaint >= PAINT_MIN_MS || ev.loaded === ev.total) { lastPaint = now; paint(job); }
-      });
-      xhr.setRequestHeader("Authorization", "Bearer " + token);
-      xhr.setRequestHeader("Content-Type", "application/octet-stream");
-      xhr.onload = function () {
-        job.xhr = null;
-        if (job.removed || appState.ended) { reject({ aborted: true }); return; }
-        if (xhr.status === 401) { endUnauthorized(errorCode(xhr)); reject({ aborted: true }); return; }
-        if (xhr.status >= 200 && xhr.status < 300) { diagnoseUpload("completed", job); resolve(); return; }
-        var msg = "Upload failed (" + xhr.status + ")";
-        try { var parsed = JSON.parse(xhr.responseText); if (parsed && parsed.error) msg = parsed.error; } catch (e) {}
-        reject(new Error(msg));
-      };
-      xhr.onerror = function () { diagnoseUpload("network-error", job); job.xhr = null; reject(new Error("Network error while uploading. The desktop may have received part of this file; retry to send it again.")); };
-      xhr.ontimeout = function () { diagnoseUpload("timeout", job); job.xhr = null; reject(new Error("Upload timed out. Keep the page visible and retry this file.")); };
-      xhr.onabort = function () {
+        if (now - lastPaint >= PAINT_MIN_MS || loaded === total) { lastPaint = now; paint(job); }
+      }
+    });
+    // Existing cancel paths abort job.xhr; keep that surface unchanged.
+    job.xhr = { abort: stream.abort };
+
+    return stream.promise.then(function (res) {
+      job.xhr = null;
+      if (job.removed || appState.ended) throw { aborted: true };
+      if (res.status === 401) { endUnauthorized(errorCode(res)); throw { aborted: true }; }
+      if (res.status >= 200 && res.status < 300) { diagnoseUpload("completed", job); return; }
+      var msg = "Upload failed (" + res.status + ")";
+      try { var parsed = JSON.parse(res.responseText); if (parsed && parsed.error) msg = parsed.error; } catch (e) {}
+      throw new Error(msg);
+    }, function (err) {
+      job.xhr = null;
+      if (err && err.aborted) {
         diagnoseUpload(job.cancelRequested ? "canceled" : "aborted", job);
-        job.xhr = null;
-        reject({ aborted: true });
-      };
-      xhr.send(job.file);
+        throw { aborted: true };
+      }
+      if (err && err.timeout) {
+        diagnoseUpload("timeout", job);
+        throw new Error("Upload timed out. Keep the page visible and retry this file.");
+      }
+      diagnoseUpload("network-error", job);
+      throw new Error("Network error while uploading. The desktop may have received part of this file; retry to send it again.");
     });
   }
 
