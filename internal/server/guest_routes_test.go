@@ -73,6 +73,10 @@ func TestGuestRoutesFullFlow(t *testing.T) {
 	if !bytes.Contains(body, []byte("Flitnix Guest Drop Box")) {
 		t.Fatalf("GET /guest body missing title: %s", string(body))
 	}
+	// The uploader depends on the shared transport being loaded first.
+	if !bytes.Contains(body, []byte(`/static/upload-client.js`)) {
+		t.Fatalf("GET /guest body does not load /static/upload-client.js")
+	}
 
 	// 2. Join with invalid secret fails
 	joinBad, _ := json.Marshal(map[string]string{
