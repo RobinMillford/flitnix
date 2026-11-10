@@ -11,6 +11,9 @@ node_modules/
 .npm/
 frontend/dist/
 
+# Version stamped from the current git tag at build time
+internal/version/version_generated.go
+
 # Go test binaries, coverage, and profiling
 *.test
 *.out

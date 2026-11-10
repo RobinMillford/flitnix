@@ -9,7 +9,12 @@ import (
 )
 
 var (
-	// Version is the current authoritative semver version of Flitnix.
+	// Version is the authoritative semver version of Flitnix.
+	//
+	// Release builds override it at build time: wails.json's pre-build hook
+	// (scripts/genversion) writes version_generated.go from FLITNIX_VERSION,
+	// GITHUB_REF_NAME, or the nearest git tag. This literal is only the
+	// fallback used when no tag is available (plain `go build`, unit tests).
 	Version = "0.2.7.4"
 
 	// Prerelease indicates a release stage like "beta.1", "rc.1", or "dev".
