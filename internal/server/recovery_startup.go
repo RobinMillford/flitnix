@@ -306,17 +306,18 @@ func batchFromRecord(record recovery.BatchRecord) transfer.TransferBatch {
 		batch.Items = make([]transfer.TransferItem, 0, len(record.Items))
 		for _, item := range record.Items {
 			batch.Items = append(batch.Items, transfer.TransferItem{
-				ID:           item.ID,
-				BatchID:      item.BatchID,
-				Sequence:     item.Sequence,
-				RelativePath: item.RelativePath,
-				DisplayName:  item.DisplayName,
-				DeclaredSize: item.DeclaredSize,
-				State:        transfer.ItemState(item.State),
-				SHA256:       item.SHA256,
-				ContentID:    item.ContentID,
-				Error:        item.Error,
-				Transferred:  item.Transferred,
+				ID:             item.ID,
+				BatchID:        item.BatchID,
+				Sequence:       item.Sequence,
+				RelativePath:   item.RelativePath,
+				DisplayName:    item.DisplayName,
+				DeclaredSize:   item.DeclaredSize,
+				LastModifiedMs: item.LastModifiedMs,
+				State:          transfer.ItemState(item.State),
+				SHA256:         item.SHA256,
+				ContentID:      item.ContentID,
+				Error:          item.Error,
+				Transferred:    item.Transferred,
 			})
 		}
 	}
@@ -349,17 +350,18 @@ func batchRecordFrom(batch transfer.TransferBatch) recovery.BatchRecord {
 
 func itemRecordFrom(item transfer.TransferItem) recovery.ItemRecord {
 	return recovery.ItemRecord{
-		ID:           item.ID,
-		BatchID:      item.BatchID,
-		Sequence:     item.Sequence,
-		RelativePath: item.RelativePath,
-		DisplayName:  item.DisplayName,
-		DeclaredSize: item.DeclaredSize,
-		State:        string(item.State),
-		SHA256:       item.SHA256,
-		ContentID:    item.ContentID,
-		Error:        item.Error,
-		Transferred:  item.Transferred,
+		ID:             item.ID,
+		BatchID:        item.BatchID,
+		Sequence:       item.Sequence,
+		RelativePath:   item.RelativePath,
+		DisplayName:    item.DisplayName,
+		DeclaredSize:   item.DeclaredSize,
+		LastModifiedMs: item.LastModifiedMs,
+		State:          string(item.State),
+		SHA256:         item.SHA256,
+		ContentID:      item.ContentID,
+		Error:          item.Error,
+		Transferred:    item.Transferred,
 	}
 }
 
@@ -542,6 +544,7 @@ func recoverResumableStaging(recoveryDir string, store *recovery.Store, svcs *Se
 					Root:            art.Meta.RootName,
 					RelativePath:    art.Meta.RelativePath,
 					Size:            it.DeclaredSize,
+					LastModifiedMs:  art.Meta.LastModifiedMs,
 					ExpectedSHA256:  it.SHA256,
 					State:           upState,
 					PartPath:        art.PartPath,
@@ -583,6 +586,7 @@ func recoverResumableStaging(recoveryDir string, store *recovery.Store, svcs *Se
 				Root:           root,
 				RelativePath:   relPath,
 				Size:           it.DeclaredSize,
+				LastModifiedMs: it.LastModifiedMs,
 				ExpectedSHA256: it.SHA256,
 				State:          upState,
 				CreatedAt:      b.CreatedAt,

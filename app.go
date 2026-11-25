@@ -205,17 +205,18 @@ type SharedSourceView struct {
 }
 
 type BatchItemView struct {
-	ID           string `json:"id"`
-	BatchID      string `json:"batchId"`
-	Sequence     int    `json:"sequence"`
-	RelativePath string `json:"relativePath,omitempty"`
-	DisplayName  string `json:"displayName"`
-	DeclaredSize int64  `json:"declaredSize"`
-	Transferred  int64  `json:"transferred"`
-	State        string `json:"state"`
-	Resumable    bool   `json:"resumable,omitempty"`
-	SHA256       string `json:"sha256,omitempty"`
-	Error        string `json:"error,omitempty"`
+	ID             string `json:"id"`
+	BatchID        string `json:"batchId"`
+	Sequence       int    `json:"sequence"`
+	RelativePath   string `json:"relativePath,omitempty"`
+	DisplayName    string `json:"displayName"`
+	DeclaredSize   int64  `json:"declaredSize"`
+	LastModifiedMs int64  `json:"lastModifiedMs,omitempty"`
+	Transferred    int64  `json:"transferred"`
+	State          string `json:"state"`
+	Resumable      bool   `json:"resumable,omitempty"`
+	SHA256         string `json:"sha256,omitempty"`
+	Error          string `json:"error,omitempty"`
 }
 
 type BatchView struct {
@@ -245,6 +246,7 @@ type SettingsView struct {
 	DownloadDir        string `json:"downloadDir"`
 	EffectiveDir       string `json:"effectiveDir"`
 	AutoStartSession   bool   `json:"autoStartSession"`
+	PreserveModTimes   bool   `json:"preserveModTimes"`
 	PreferredInterface string `json:"preferredInterface"`
 }
 
@@ -329,6 +331,9 @@ func NewApp() (*App, error) {
 	store, err := transfer.NewStore(transfer.StoreConfig{Dir: initialDir})
 	if err != nil {
 		return nil, err
+	}
+	if settingsStore != nil {
+		store.SetPreserveModTimes(settingsStore.Get().PreserveModTimes)
 	}
 	auditStore, err := audit.NewStore(filepath.Join(dataDir, "audit.jsonl"), 10000)
 	if err != nil {
@@ -1632,10 +1637,11 @@ func (a *App) ReceiveDirectory() string { return a.store.Dir() }
 func (a *App) GetSettings() SettingsView {
 	if a.settingsStore == nil {
 		return SettingsView{
-			Version:      settings.CurrentSchemaVersion,
-			Theme:        settings.ThemeSystem,
-			Locale:       "system",
-			EffectiveDir: a.store.Dir(),
+			Version:          settings.CurrentSchemaVersion,
+			Theme:            settings.ThemeSystem,
+			Locale:           "system",
+			EffectiveDir:     a.store.Dir(),
+			PreserveModTimes: true,
 		}
 	}
 	s := a.settingsStore.Get()
@@ -1646,6 +1652,7 @@ func (a *App) GetSettings() SettingsView {
 		DownloadDir:        s.DownloadDir,
 		EffectiveDir:       a.store.Dir(),
 		AutoStartSession:   s.AutoStartSession,
+		PreserveModTimes:   s.PreserveModTimes,
 		PreferredInterface: s.PreferredInterface,
 	}
 }
@@ -1711,12 +1718,14 @@ func (a *App) SaveSettings(view SettingsView) error {
 		Locale:             view.Locale,
 		DownloadDir:        view.DownloadDir,
 		AutoStartSession:   view.AutoStartSession,
+		PreserveModTimes:   view.PreserveModTimes,
 		PreferredInterface: view.PreferredInterface,
 	}
 	if err := a.settingsStore.Save(s); err != nil {
 		return err
 	}
 	if a.store != nil {
+		a.store.SetPreserveModTimes(a.settingsStore.Get().PreserveModTimes)
 		if err := a.store.SetDir(s.DownloadDir); err != nil {
 			return err
 		}
@@ -1744,6 +1753,7 @@ func (a *App) ResetSettings() (SettingsView, error) {
 		return SettingsView{}, err
 	}
 	if a.store != nil {
+		a.store.SetPreserveModTimes(a.settingsStore.Get().PreserveModTimes)
 		_ = a.store.SetDir("")
 		if a.quota != nil {
 			a.quota.SetDefaultDir(a.store.Dir())
@@ -1888,9 +1898,9 @@ func batchView(b transfer.BatchView) BatchView {
 		items = append(items, BatchItemView{
 			ID: item.ID, BatchID: item.BatchID, Sequence: item.Sequence,
 			RelativePath: item.RelativePath, DisplayName: item.DisplayName,
-			DeclaredSize: item.DeclaredSize, Transferred: item.Transferred,
-			State: string(item.State), Resumable: item.Resumable,
-			SHA256: item.SHA256, Error: item.Error,
+			DeclaredSize: item.DeclaredSize, LastModifiedMs: item.LastModifiedMs,
+			Transferred: item.Transferred, State: string(item.State),
+			Resumable: item.Resumable, SHA256: item.SHA256, Error: item.Error,
 		})
 	}
 	return BatchView{

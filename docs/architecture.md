@@ -167,4 +167,10 @@ Reports categorize overall health as `PASS`, `WARNING`, or `FAIL` and provide on
 - **Path-Confined Hierarchy Pagination (`GET /api/sources/{id}/items`)**: Accepts `prefix`, `cursor`, and bounded `limit` (default `200`, max `500`), strictly validating prefixes against traversal segments (`..`, `.`, `\`, NUL), symlinks escaping the root via `withinSourceRoot`, and empty/missing directories. Directories sort alphabetically before files with aggregated item counts and byte totals.
 - **Selective Single-File & Multi-File Grants (`POST /api/download-grants`)**: Accepts optional `{ sourceId, itemIds }` selections inside a shared folder. Selecting a single file creates a direct single-file grant (`Archive: false`) supporting G2 HTTP byte-range resumption; selecting multiple items streams an uncompressed ZIP containing only the chosen entries.
 
+### 2.13 Original Modification Timestamp Preservation (`internal/settings`, `internal/transfer`, `internal/server`, `internal/client`)
+- **Preference & Schema Migration (`internal/settings`)**: Adds `PreserveModTimes` (default `true`, `"Preserve original file dates"` in Desktop Settings) with forward-compatible schema default preservation (`CurrentSchemaVersion = 2`) and live application to `transfer.Store.SetPreserveModTimes`.
+- **Validated Propagation & Crash Persistence**: Accepts optional `lastModifiedMs` (Unix milliseconds; `0` = unspecified, rejecting negative values and future clock skew beyond `MaxModTimeFutureSkew = 7d`) across `POST /api/batches`, `POST /api/uploads`, mobile `File.lastModified`, and Go CLI `client.BuildManifest`. Persisted inside durable `recovery.ItemRecord` journals and HMAC-signed `.meta` sidecars so paused or interrupted transfers keep original timestamps after restarts.
+- **Atomic Pre-Publish Application (`os.Chtimes`)**: Both `PartFile.Commit()` (`PUT`) and `Store.CommitResumablePartWithModTime()` (`PATCH`) apply `os.Chtimes` onto the staged `.part` file before atomic hard-link publication so received files never expose a transient receive-time window when appearing in their destination folder.
+
+
 

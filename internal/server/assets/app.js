@@ -628,7 +628,9 @@
         // read the cache, so a job never has to dereference its File
         // object again. File objects are the only large references a
         // job holds and can then be released at the terminal phase.
-        file: f, name: f.name, size: f.size, id: null, phase: "queued", uploaded: 0,
+        file: f, name: f.name, size: f.size,
+        lastModifiedMs: typeof f.lastModified === "number" && f.lastModified > 0 ? Math.round(f.lastModified) : 0,
+        id: null, phase: "queued", uploaded: 0,
         failures: 0, autoRetries: 0, reconnectAttempt: 0, reconnectMax: MAX_AUTO_RETRIES,
         retryable: false, err: null,
         xhr: null, timer: null, removed: false, cancelRequested: false,
@@ -870,7 +872,8 @@
         items: jobs.map(function (job) {
           return {
             relativePath: jobs[0].rootName ? job.relativePath : job.name,
-            size: job.size
+            size: job.size,
+            lastModifiedMs: job.lastModifiedMs || undefined
           };
         })
       })

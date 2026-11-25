@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/itsyamin/flitnix/internal/transfer"
 )
@@ -143,6 +144,24 @@ func TestBuildManifest(t *testing.T) {
 		_, err := BuildManifest(nil, "")
 		if !errors.Is(err, ErrEmptyInput) {
 			t.Fatalf("expected ErrEmptyInput, got %v", err)
+		}
+	})
+
+	t.Run("captures source file lastModifiedMs", func(t *testing.T) {
+		datedFile := filepath.Join(tmpDir, "dated.txt")
+		if err := os.WriteFile(datedFile, []byte("cli-payload"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		wantTime := time.Date(2019, 3, 14, 9, 26, 0, 0, time.UTC)
+		if err := os.Chtimes(datedFile, wantTime, wantTime); err != nil {
+			t.Fatal(err)
+		}
+		lm, err := BuildManifest([]string{datedFile}, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lm.Manifest.Items[0].LastModifiedMs != wantTime.UnixMilli() {
+			t.Fatalf("LastModifiedMs = %d, want %d", lm.Manifest.Items[0].LastModifiedMs, wantTime.UnixMilli())
 		}
 	})
 }

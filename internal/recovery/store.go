@@ -127,17 +127,18 @@ type SessionRecord struct {
 // ItemRecord is the durable projection of one coordinator item. Byte progress
 // lives in resumable metadata, not here.
 type ItemRecord struct {
-	ID           string `json:"id"`
-	BatchID      string `json:"batchId"`
-	Sequence     int    `json:"sequence"`
-	RelativePath string `json:"relativePath"`
-	DisplayName  string `json:"displayName"`
-	DeclaredSize int64  `json:"declaredSize"`
-	State        string `json:"state"`
-	SHA256       string `json:"sha256"`
-	ContentID    string `json:"contentId"`
-	Error        string `json:"error,omitempty"`
-	Transferred  int64  `json:"transferred,omitempty"`
+	ID             string `json:"id"`
+	BatchID        string `json:"batchId"`
+	Sequence       int    `json:"sequence"`
+	RelativePath   string `json:"relativePath"`
+	DisplayName    string `json:"displayName"`
+	DeclaredSize   int64  `json:"declaredSize"`
+	LastModifiedMs int64  `json:"lastModifiedMs,omitempty"`
+	State          string `json:"state"`
+	SHA256         string `json:"sha256"`
+	ContentID      string `json:"contentId"`
+	Error          string `json:"error,omitempty"`
+	Transferred    int64  `json:"transferred,omitempty"`
 }
 
 // BatchRecord is the durable projection of one coordinator batch.

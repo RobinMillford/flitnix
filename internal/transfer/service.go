@@ -187,17 +187,18 @@ func (s *Service) targetDir() string {
 // Upload is a consistent copy of one upload record for callers outside the
 // package (HTTP handlers, the desktop UI).
 type Upload struct {
-	ID        string    // opaque upload ID
-	Name      string    // sanitized final filename candidate
-	Session   string    // owning session's non-secret key (hex digest)
-	Size      int64     // approved size in bytes
-	Created   time.Time // when the metadata arrived
-	State     State
-	Reason    string  // non-empty on failed/canceled records: why the transfer ended
-	Uploaded  int64   // bytes actually received so far (live)
-	Speed     float64 // measured bytes per second while receiving
-	SHA256    string  // lowercase hex SHA-256 digest of published bytes
-	Published string  // absolute final path; populated exactly in the completed state
+	ID             string    // opaque upload ID
+	Name           string    // sanitized final filename candidate
+	Session        string    // owning session's non-secret key (hex digest)
+	Size           int64     // approved size in bytes
+	LastModifiedMs int64     // optional client-supplied original Unix millisecond mtime
+	Created        time.Time // when the metadata arrived
+	State          State
+	Reason         string  // non-empty on failed/canceled records: why the transfer ended
+	Uploaded       int64   // bytes actually received so far (live)
+	Speed          float64 // measured bytes per second while receiving
+	SHA256         string  // lowercase hex SHA-256 digest of published bytes
+	Published      string  // absolute final path; populated exactly in the completed state
 
 	// BatchLinked is true for a record that belongs to a transfer batch. The
 	// batch coordinator is its only approval authority: such a record is
@@ -228,13 +229,14 @@ type ContentResult struct {
 // field; Uploaded stays atomic so the streaming goroutine's progress
 // callback never blocks the desktop's polling reads.
 type upload struct {
-	id           string
-	name         string
-	root         string
-	relativePath string
-	session      string
-	size         int64
-	created      time.Time
+	id             string
+	name           string
+	root           string
+	relativePath   string
+	session        string
+	size           int64
+	lastModifiedMs int64
+	created        time.Time
 
 	// managed marks a batch item whose approval is owned by the batch
 	// coordinator. It is fixed at declaration and never changes.
@@ -300,17 +302,18 @@ const (
 // snapshotLocked copies the record; the caller must already hold u.mu.
 func (u *upload) snapshotLocked() Upload {
 	return Upload{
-		ID:        u.id,
-		Name:      u.name,
-		Session:   u.session,
-		Size:      u.size,
-		Created:   u.created,
-		State:     u.state,
-		Reason:    u.reason,
-		Uploaded:  u.uploaded.Load(),
-		Speed:     u.speed,
-		SHA256:    u.sha256,
-		Published: u.published,
+		ID:             u.id,
+		Name:           u.name,
+		Session:        u.session,
+		Size:           u.size,
+		LastModifiedMs: u.lastModifiedMs,
+		Created:        u.created,
+		State:          u.state,
+		Reason:         u.reason,
+		Uploaded:       u.uploaded.Load(),
+		Speed:          u.speed,
+		SHA256:         u.sha256,
+		Published:      u.published,
 
 		BatchLinked:     u.managed,
 		Resumable:       u.committedOffset > 0 && (u.state == StateInterrupted || u.state == StatePaused || u.state == StateApproved || u.state == StateUploading),
@@ -407,6 +410,21 @@ func (s *Service) DeclarePath(sessionKey, root, relativePath, rawName string, si
 		return Upload{}, ErrInvalidUpload
 	}
 	return s.declare(sessionKey, rawName, root, relativePath, size, false, "", "")
+}
+
+// SetUploadModTime stores a validated client modification timestamp (Unix ms) on an upload.
+func (s *Service) SetUploadModTime(id string, modTimeMs int64) error {
+	if err := ValidateModTimeMs(modTimeMs); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidUpload, err)
+	}
+	u, err := s.lookup(id, "")
+	if err != nil {
+		return err
+	}
+	u.mu.Lock()
+	u.lastModifiedMs = modTimeMs
+	u.mu.Unlock()
+	return nil
 }
 
 func (s *Service) declare(sessionKey, rawName, root, relativePath string, size int64, managed bool, expectedSHA256, deviceID string) (Upload, error) {
@@ -708,6 +726,9 @@ func (s *Service) SubmitContentWithPublish(id, sessionKey string, body io.Reader
 		u.makeFailedLocked(perr)
 		u.mu.Unlock()
 		return ContentResult{}, fmt.Errorf("transfer: cannot prepare the receive file: %w", perr)
+	}
+	if pf, ok := sink.(*PartFile); ok && u.lastModifiedMs > 0 {
+		pf.SetModTimeMs(u.lastModifiedMs)
 	}
 	u.state = StateUploading
 	u.sink = sink

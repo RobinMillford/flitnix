@@ -168,6 +168,24 @@
       </div>
 
       <div class="card-section-head" style="margin-top: 22px;">
+        <h4>File Metadata & Timestamps</h4>
+        <p>Control how received file attributes are written to your storage.</p>
+      </div>
+
+      <div class="setting-row">
+        <label class="toggle-control-label">
+          <input
+            type="checkbox"
+            bind:checked={settingsState.preserveModTimes}
+          />
+          <div class="toggle-text-block">
+            <strong>Preserve original file dates</strong>
+            <span>Keep each received file's original modification timestamp from the sender instead of setting it to the receive time.</span>
+          </div>
+        </label>
+      </div>
+
+      <div class="card-section-head" style="margin-top: 22px;">
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
           <div>
             <h4>Storage Headroom & Protection</h4>

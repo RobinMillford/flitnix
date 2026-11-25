@@ -601,14 +601,19 @@ func handleUploadDeclare(svcs *Services, _ time.Duration) http.HandlerFunc {
 		}
 
 		var meta struct {
-			Name   string `json:"name"`
-			Size   int64  `json:"size"`
-			SHA256 string `json:"sha256,omitempty"`
+			Name           string `json:"name"`
+			Size           int64  `json:"size"`
+			LastModifiedMs int64  `json:"lastModifiedMs,omitempty"`
+			SHA256         string `json:"sha256,omitempty"`
 		}
 		dec := json.NewDecoder(bytes.NewReader(body))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&meta); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid upload metadata JSON")
+			return
+		}
+		if err := transfer.ValidateModTimeMs(meta.LastModifiedMs); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid lastModifiedMs")
 			return
 		}
 
@@ -686,6 +691,11 @@ func handleUploadDeclare(svcs *Services, _ time.Duration) http.HandlerFunc {
 		up, err := svcs.Transfers.DeclareWithDigest(sess.Key(), meta.Name, meta.Size, meta.SHA256, authDeviceID)
 		switch {
 		case err == nil:
+			if meta.LastModifiedMs > 0 {
+				if mErr := svcs.Transfers.SetUploadModTime(up.ID, meta.LastModifiedMs); mErr == nil {
+					up.LastModifiedMs = meta.LastModifiedMs
+				}
+			}
 			if autoApproveUpload {
 				if decidedUp, decErr := svcs.Transfers.Decide(up.ID, true); decErr == nil {
 					up = decidedUp
@@ -1040,6 +1050,9 @@ func handleBatchCreate(svcs *Services) http.HandlerFunc {
 			if declareErr != nil {
 				abort(declareErr)
 				return
+			}
+			if item.LastModifiedMs > 0 {
+				_ = svcs.Transfers.SetUploadModTime(up.ID, item.LastModifiedMs)
 			}
 			declared = append(declared, up.ID)
 			quotaItems = append(quotaItems, transfer.QuotaBatchItem{ID: up.ID, Bytes: item.DeclaredSize})

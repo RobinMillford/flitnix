@@ -364,7 +364,7 @@ func (c *Coordinator) ReconcileItemFromStaging(sessionKey, batchID, itemID strin
 func manifestItems(items []TransferItem) []ManifestItem {
 	out := make([]ManifestItem, len(items))
 	for i, item := range items {
-		out[i] = ManifestItem{ID: item.ID, Sequence: item.Sequence, RelativePath: item.RelativePath, DisplayName: item.DisplayName, Size: item.DeclaredSize, SHA256: item.SHA256}
+		out[i] = ManifestItem{ID: item.ID, Sequence: item.Sequence, RelativePath: item.RelativePath, DisplayName: item.DisplayName, Size: item.DeclaredSize, LastModifiedMs: item.LastModifiedMs, SHA256: item.SHA256}
 	}
 	return out
 }
@@ -419,8 +419,8 @@ func (c *Coordinator) CreateBatch(sessionKey string, manifest BatchManifest) (Ba
 		batch.Items = append(batch.Items, TransferItem{
 			ID: itemID, BatchID: batchID, Sequence: sequence,
 			RelativePath: item.RelativePath, DisplayName: item.DisplayName,
-			DeclaredSize: item.Size, State: itemState,
-			SHA256: item.SHA256,
+			DeclaredSize: item.Size, LastModifiedMs: item.LastModifiedMs,
+			State: itemState, SHA256: item.SHA256,
 		})
 	}
 	c.batches[batchID] = &coordinatorBatch{batch: batch}
