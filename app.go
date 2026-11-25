@@ -151,17 +151,19 @@ type TextMessageView struct {
 // in flight or finished). Received file paths are deliberately not part of
 // the projection: the UI names uploads by their opaque ID and state.
 type UploadView struct {
-	ID             string    `json:"id"`
-	Name           string    `json:"name"`
-	Size           int64     `json:"size"`
-	Created        time.Time `json:"created"`
-	State          string    `json:"state"`
-	Uploaded       int64     `json:"uploaded"`
-	Speed          float64   `json:"speed"`
-	SHA256         string    `json:"sha256,omitempty"`
-	Reason         string    `json:"reason,omitempty"`
-	StorageFits    bool      `json:"storageFits"`
-	StorageWarning string    `json:"storageWarning,omitempty"`
+	ID              string    `json:"id"`
+	Name            string    `json:"name"`
+	Size            int64     `json:"size"`
+	Created         time.Time `json:"created"`
+	State           string    `json:"state"`
+	Uploaded        int64     `json:"uploaded"`
+	Speed           float64   `json:"speed"`
+	SHA256          string    `json:"sha256,omitempty"`
+	Reason          string    `json:"reason,omitempty"`
+	Resumable       bool      `json:"resumable,omitempty"`
+	CommittedOffset int64     `json:"committedOffset,omitempty"`
+	StorageFits     bool      `json:"storageFits"`
+	StorageWarning  string    `json:"storageWarning,omitempty"`
 }
 
 type DownloadView struct {
@@ -211,6 +213,7 @@ type BatchItemView struct {
 	DeclaredSize int64  `json:"declaredSize"`
 	Transferred  int64  `json:"transferred"`
 	State        string `json:"state"`
+	Resumable    bool   `json:"resumable,omitempty"`
 	SHA256       string `json:"sha256,omitempty"`
 	Error        string `json:"error,omitempty"`
 }
@@ -251,6 +254,7 @@ type App struct {
 
 	store         *transfer.Store
 	quota         *transfer.QuotaManager
+	recoveryDir   string
 	settingsStore *settings.Store
 	sessions      *session.Manager
 	transfers     *transfer.Service
@@ -357,6 +361,7 @@ func NewApp() (*App, error) {
 	a := &App{
 		store:         store,
 		quota:         quota,
+		recoveryDir:   filepath.Join(dataDir, "recovery"),
 		settingsStore: settingsStore,
 		transfers:     transfer.NewService(transfer.Config{Store: store, Quota: quota}),
 		coordinator:   transfer.NewCoordinator(transfer.CoordinatorConfig{}),
@@ -651,7 +656,8 @@ func (a *App) ensureServer(listen string) error {
 // out a token before the server is reachable. Callers must hold srvMu.
 func (a *App) startServerLocked(listen string) error {
 	srv := server.New(server.Config{
-		ListenAddr: listen,
+		ListenAddr:  listen,
+		RecoveryDir: a.recoveryDir,
 		Services: &server.Services{
 			Sessions:       a.sessions,
 			Transfers:      a.transfers,
@@ -1370,6 +1376,72 @@ func (a *App) CancelBatch(id string) error {
 	return nil
 }
 
+// PauseBatch suspends an active or interrupted incoming batch while preserving
+// its durably committed partial bytes and staging sidecars for resumption.
+func (a *App) PauseBatch(id string) (BatchView, error) {
+	a.batchMu.Lock()
+	defer a.batchMu.Unlock()
+	key, err := a.findBatchSession(id)
+	if err != nil {
+		return BatchView{}, err
+	}
+	v, contentIDs, err := a.coordinator.PauseBatch(key, id)
+	if err != nil {
+		return BatchView{}, err
+	}
+	for _, cid := range contentIDs {
+		_ = a.transfers.Pause(cid)
+	}
+	return batchView(v), nil
+}
+
+// ResumeBatch re-enables a paused or interrupted batch so clients can continue
+// streaming from their authoritative HEAD offsets.
+func (a *App) ResumeBatch(id string) (BatchView, error) {
+	a.batchMu.Lock()
+	defer a.batchMu.Unlock()
+	key, err := a.findBatchSession(id)
+	if err != nil {
+		return BatchView{}, err
+	}
+	v, contentIDs, err := a.coordinator.ResumeBatch(key, id)
+	if err != nil {
+		return BatchView{}, err
+	}
+	for _, cid := range contentIDs {
+		_ = a.transfers.Resume(cid)
+	}
+	return batchView(v), nil
+}
+
+// DiscardBatch explicitly discards unfinished partial uploads in a batch,
+// deleting .part/.meta files and releasing storage quota reservations.
+func (a *App) DiscardBatch(id string) error {
+	a.batchMu.Lock()
+	defer a.batchMu.Unlock()
+	key, err := a.findBatchSession(id)
+	if err != nil {
+		return err
+	}
+	v, contentIDs, err := a.coordinator.DiscardBatch(key, id)
+	if err != nil {
+		return err
+	}
+	for _, cid := range contentIDs {
+		_ = a.transfers.Discard(cid)
+	}
+	a.discardEmptyRoot(v)
+	return nil
+}
+
+// DiscardUpload explicitly discards a standalone interrupted or paused upload.
+func (a *App) DiscardUpload(id string) error {
+	if err := a.requireStandalone(id); err != nil {
+		return err
+	}
+	return a.transfers.Discard(id)
+}
+
 // listBatches merges the coordinator's batch records over every session
 // the coordinator has ever tracked — including sessions that already
 // ended — and projects the ones passing filter. A session ending used to
@@ -1587,7 +1659,8 @@ func (a *App) hasActiveTransfers() bool {
 			return true
 		}
 		for _, u := range a.transfers.List() {
-			if u.State == transfer.StateUploading || u.State == transfer.StateApproved {
+			if u.State == transfer.StateUploading || u.State == transfer.StateApproved ||
+				u.State == transfer.StateInterrupted || u.State == transfer.StatePaused {
 				return true
 			}
 		}
@@ -1599,7 +1672,9 @@ func (a *App) hasActiveTransfers() bool {
 				for _, b := range batches {
 					if b.State == transfer.BatchStateTransferring ||
 						b.State == transfer.BatchStateQueued ||
-						b.State == transfer.BatchStateApproved {
+						b.State == transfer.BatchStateApproved ||
+						b.State == transfer.BatchStateInterrupted ||
+						b.State == transfer.BatchStatePaused {
 						return true
 					}
 				}
@@ -1763,16 +1838,18 @@ func (a *App) enrichPendingBatchStorage(v BatchView) BatchView {
 
 func uploadView(u transfer.Upload) UploadView {
 	return UploadView{
-		ID:          u.ID,
-		Name:        u.Name,
-		Size:        u.Size,
-		Created:     u.Created,
-		State:       string(u.State),
-		Uploaded:    u.Uploaded,
-		Speed:       u.Speed,
-		SHA256:      u.SHA256,
-		Reason:      u.Reason,
-		StorageFits: true,
+		ID:              u.ID,
+		Name:            u.Name,
+		Size:            u.Size,
+		Created:         u.Created,
+		State:           string(u.State),
+		Uploaded:        u.Uploaded,
+		Speed:           u.Speed,
+		SHA256:          u.SHA256,
+		Reason:          u.Reason,
+		Resumable:       u.Resumable,
+		CommittedOffset: u.CommittedOffset,
+		StorageFits:     true,
 	}
 }
 
@@ -1812,7 +1889,8 @@ func batchView(b transfer.BatchView) BatchView {
 			ID: item.ID, BatchID: item.BatchID, Sequence: item.Sequence,
 			RelativePath: item.RelativePath, DisplayName: item.DisplayName,
 			DeclaredSize: item.DeclaredSize, Transferred: item.Transferred,
-			State: string(item.State), SHA256: item.SHA256, Error: item.Error,
+			State: string(item.State), Resumable: item.Resumable,
+			SHA256: item.SHA256, Error: item.Error,
 		})
 	}
 	return BatchView{

@@ -41,9 +41,10 @@ const DefaultReceiveSubpath = "Downloads/Flitnix"
 // are safe for concurrent use; PartFile instances are used by exactly one
 // streaming goroutine.
 type Store struct {
-	mu   sync.RWMutex
-	dir  string
-	link func(oldname, newname string) error
+	mu      sync.RWMutex
+	dir     string
+	link    func(oldname, newname string) error
+	metaKey []byte
 }
 
 // StoreConfig configures a Store.
@@ -51,6 +52,11 @@ type StoreConfig struct {
 	// Dir is the receive directory. Empty selects
 	// DefaultReceiveSubpath under the user's home directory.
 	Dir string
+
+	// MetaKey optionally sets the 32-byte HMAC-SHA256 key used to authenticate
+	// resumable staging metadata sidecars (.meta). When empty, an ephemeral
+	// cryptographic key is generated until SetMetaKey installs a durable key.
+	MetaKey []byte
 }
 
 // NewStore resolves the receive directory. The directory itself is created
@@ -69,7 +75,16 @@ func NewStore(cfg StoreConfig) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("transfer: cannot resolve receive directory %q: %w", dir, err)
 	}
-	return &Store{dir: abs}, nil
+	var key []byte
+	if len(cfg.MetaKey) > 0 {
+		key = append([]byte(nil), cfg.MetaKey...)
+	} else {
+		key = make([]byte, 32)
+		if _, rerr := rand.Read(key); rerr != nil {
+			return nil, fmt.Errorf("transfer: generating ephemeral metadata key: %w", rerr)
+		}
+	}
+	return &Store{dir: abs, metaKey: key}, nil
 }
 
 // Dir returns the absolute receive directory.
@@ -77,6 +92,25 @@ func (s *Store) Dir() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.dir
+}
+
+// SetMetaKey installs the key used to authenticate resumable .meta sidecars.
+func (s *Store) SetMetaKey(key []byte) error {
+	if len(key) < 16 {
+		return errors.New("transfer: metadata authentication key is too short")
+	}
+	copied := append([]byte(nil), key...)
+	s.mu.Lock()
+	s.metaKey = copied
+	s.mu.Unlock()
+	return nil
+}
+
+// MetaKey returns a copy of the active metadata authentication key.
+func (s *Store) MetaKey() []byte {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]byte(nil), s.metaKey...)
 }
 
 // SetDir updates the receive directory. Empty resets to DefaultReceiveSubpath.
@@ -454,6 +488,9 @@ func (p *PartFile) Name() string { return p.name }
 // PartPath returns the absolute path of the part file, for diagnostics and
 // desktop UI only.
 func (p *PartFile) PartPath() string { return p.path }
+
+// FinalDir returns the parent directory where the published file will land.
+func (p *PartFile) FinalDir() string { return p.finalDir }
 
 // Write appends bytes to the part file.
 func (p *PartFile) Write(b []byte) (int, error) {

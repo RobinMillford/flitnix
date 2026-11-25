@@ -46,12 +46,15 @@ func upIf(name string) net.Interface {
 // whose network source is injectable. tests re-point a.source at fakes.
 func newTestApp(t *testing.T) *App {
 	t.Helper()
+	cfgDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfgDir)
+	t.Setenv("AppData", cfgDir)
 	a, err := NewApp()
 	if err != nil {
 		t.Fatalf("NewApp: %v", err)
 	}
 	a.startup(context.Background())
-	t.Cleanup(a.stopServer)
+	t.Cleanup(func() { a.shutdown(context.Background()) })
 	return a
 }
 

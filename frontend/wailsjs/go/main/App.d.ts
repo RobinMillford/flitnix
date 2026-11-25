@@ -41,6 +41,10 @@ export function DeleteGuestTemplate(arg1:string):Promise<void>;
 
 export function DenyPairing(arg1:string):Promise<void>;
 
+export function DiscardBatch(arg1:string):Promise<void>;
+
+export function DiscardUpload(arg1:string):Promise<void>;
+
 export function DownloadUpdate():Promise<update.Progress>;
 
 export function DuplicateGuestTemplate(arg1:string,arg2:string):Promise<guest.Template>;
@@ -93,6 +97,8 @@ export function OpenDownloadFolder():Promise<void>;
 
 export function OpenGuestFolder():Promise<void>;
 
+export function PauseBatch(arg1:string):Promise<main.BatchView>;
+
 export function PickExportDestination():Promise<string>;
 
 export function PickFilesForSharing():Promise<Array<main.SharedFileView>>;
@@ -124,6 +130,8 @@ export function RemoveExpectedParticipant(arg1:string):Promise<void>;
 export function RemoveTrustedDevice(arg1:string):Promise<void>;
 
 export function ResetSettings():Promise<main.SettingsView>;
+
+export function ResumeBatch(arg1:string):Promise<main.BatchView>;
 
 export function RevokeGuest(arg1:string):Promise<void>;
 

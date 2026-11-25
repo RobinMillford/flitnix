@@ -137,6 +137,10 @@ type Config struct {
 	// intentionally opt-in so embedded page-only and unit-test servers retain
 	// their existing in-memory behavior.
 	RecoveryDir string
+
+	// StagingTTL overrides the retention window before Phase 10 startup recovery
+	// reclaims abandoned resumable staging files. 0 selects transfer.DefaultStagingTTL.
+	StagingTTL time.Duration
 }
 
 // Services bundles the collaborators the API endpoints need. The desktop
@@ -282,6 +286,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	if err := s.Recover(); err != nil {
 		return err
 	}
+	defer func() { _ = s.CloseRecovery() }()
 	ln, err := s.bind()
 	if err != nil {
 		return err

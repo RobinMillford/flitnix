@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -146,6 +147,7 @@ func runServeCLI(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	addr := fs.String("addr", server.DefaultListenAddr, "listen address (host:port)")
 	receiveDir := fs.String("dir", "", "directory to store received files (default: ~/Downloads/Flitnix)")
+	recoveryDir := fs.String("recovery-dir", filepath.Join(resolveDataDir(), "recovery"), "durable state directory for session and upload recovery (empty disables recovery)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -180,8 +182,9 @@ func runServeCLI(args []string, stdout, stderr io.Writer) int {
 	}
 
 	srv := server.New(server.Config{
-		ListenAddr: *addr,
-		Services:   svcs,
+		ListenAddr:  *addr,
+		Services:    svcs,
+		RecoveryDir: *recoveryDir,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

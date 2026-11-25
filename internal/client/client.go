@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -297,9 +298,11 @@ func (c *Client) WaitForApproval(ctx context.Context, batchID string, pollInterv
 	}
 }
 
-// StreamItem streams the payload for one approved item via PUT /api/batches/{batchID}/items/{itemID}/content.
-// Memory use is bounded by streaming chunks directly from the local filesystem.
-// SHA-256 is calculated inline and compared against the server's returned digest.
+// StreamItem streams the payload for one approved item. It queries HEAD for
+// resumable PATCH chunk support first (resuming from the server's durable
+// Upload-Offset when available), and falls back cleanly to single-pass PUT if
+// the endpoint does not advertise HEAD/PATCH support.
+// SHA-256 is verified over the complete local file against the server's digest.
 func (c *Client) StreamItem(ctx context.Context, batchID, itemID, localPath string, onProgress func(written, total int64)) (ItemResult, error) {
 	f, err := os.Open(localPath)
 	if err != nil {
@@ -313,9 +316,165 @@ func (c *Client) StreamItem(ctx context.Context, batchID, itemID, localPath stri
 	}
 	declaredSize := info.Size()
 
+	reqURL := fmt.Sprintf("%s/api/batches/%s/items/%s/content", c.target.BaseURL, url.PathEscape(batchID), url.PathEscape(itemID))
+	headReq, err := http.NewRequestWithContext(ctx, http.MethodHead, reqURL, nil)
+	if err == nil {
+		headReq.Header.Set("Authorization", "Bearer "+c.target.Token())
+		headReq.Header.Set("Host", c.target.Host)
+		headResp, herr := c.httpClient.Do(headReq)
+		if herr == nil {
+			headResp.Body.Close()
+			if headResp.StatusCode == http.StatusOK {
+				offset, oerr := strconv.ParseInt(strings.TrimSpace(headResp.Header.Get("Upload-Offset")), 10, 64)
+				if oerr == nil && offset >= 0 && offset <= declaredSize {
+					chunkSize := transfer.DefaultChunkSize
+					if cs, cerr := strconv.ParseInt(strings.TrimSpace(headResp.Header.Get("Upload-Chunk-Size")), 10, 64); cerr == nil && cs > 0 {
+						chunkSize = cs
+					}
+					return c.streamItemChunks(ctx, f, localPath, reqURL, declaredSize, offset, chunkSize, onProgress)
+				}
+			}
+			if headResp.StatusCode == http.StatusUnauthorized {
+				return ItemResult{}, ErrUnauthorized
+			}
+		}
+	}
+
+	return c.streamItemPut(ctx, f, localPath, reqURL, declaredSize, onProgress)
+}
+
+func (c *Client) streamItemChunks(ctx context.Context, f *os.File, localPath, reqURL string, declaredSize, offset, chunkSize int64, onProgress func(written, total int64)) (ItemResult, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return ItemResult{}, err
+	}
+	h := sha256.New()
+	if offset > 0 {
+		if _, err := io.CopyN(h, f, offset); err != nil {
+			return ItemResult{}, fmt.Errorf("client: hashing resumed prefix of %s: %w", localPath, err)
+		}
+	}
+	if onProgress != nil {
+		onProgress(offset, declaredSize)
+	}
+
+	var lastResult struct {
+		Written int64              `json:"written"`
+		SHA256  string             `json:"sha256"`
+		Batch   transfer.BatchView `json:"batch"`
+	}
+
+	for offset < declaredSize || (declaredSize == 0 && offset == 0) {
+		lenChunk := chunkSize
+		if declaredSize-offset < lenChunk {
+			lenChunk = declaredSize - offset
+		}
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			return ItemResult{}, err
+		}
+		chunkReader := io.LimitReader(f, lenChunk)
+		pr := io.TeeReader(chunkReader, h)
+		req, err := http.NewRequestWithContext(ctx, http.MethodPatch, reqURL, &chunkProgressReader{
+			r:          pr,
+			base:       offset,
+			total:      declaredSize,
+			onProgress: onProgress,
+		})
+		if err != nil {
+			return ItemResult{}, err
+		}
+		req.Header.Set("Authorization", "Bearer "+c.target.Token())
+		req.Header.Set("Host", c.target.Host)
+		req.Header.Set("Content-Type", "application/offset+octet-stream")
+		req.Header.Set("Upload-Offset", strconv.FormatInt(offset, 10))
+		req.ContentLength = lenChunk
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return ItemResult{}, fmt.Errorf("client: chunk streaming failed for %s at offset %d: %w", filepath.Base(localPath), offset, err)
+		}
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode == http.StatusUnauthorized {
+			return ItemResult{}, ErrUnauthorized
+		}
+		if resp.StatusCode == http.StatusNoContent {
+			nextOffset := offset + lenChunk
+			if srvOff, serr := strconv.ParseInt(strings.TrimSpace(resp.Header.Get("Upload-Offset")), 10, 64); serr == nil && srvOff >= 0 {
+				nextOffset = srvOff
+			}
+			offset = nextOffset
+			if onProgress != nil {
+				onProgress(offset, declaredSize)
+			}
+			continue
+		}
+		if resp.StatusCode == http.StatusOK {
+			if len(respBody) > 0 {
+				if err := json.Unmarshal(respBody, &lastResult); err != nil {
+					return ItemResult{}, fmt.Errorf("client: invalid stream result JSON: %w", err)
+				}
+			}
+			offset = declaredSize
+			break
+		}
+
+		var errResp struct {
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(respBody, &errResp)
+		msg := errResp.Error
+		if msg == "" {
+			msg = string(respBody)
+		}
+		return ItemResult{}, fmt.Errorf("%w: HTTP %d: %s", ErrServerFault, resp.StatusCode, msg)
+	}
+
+	if declaredSize == 0 && lastResult.SHA256 == "" {
+		return ItemResult{}, fmt.Errorf("%w: empty upload completed without digest", ErrServerFault)
+	}
+
+	localSHA := fmt.Sprintf("%x", h.Sum(nil))
+	if lastResult.Written != declaredSize {
+		return ItemResult{}, fmt.Errorf("%w: %s written %d bytes, expected %d", ErrSizeMismatch, filepath.Base(localPath), lastResult.Written, declaredSize)
+	}
+	if !strings.EqualFold(localSHA, lastResult.SHA256) {
+		return ItemResult{}, fmt.Errorf("%w: %s local=%s remote=%s", ErrIntegrityMismatch, filepath.Base(localPath), localSHA, lastResult.SHA256)
+	}
+	return ItemResult{
+		Written:     lastResult.Written,
+		SHA256:      lastResult.SHA256,
+		LocalSHA256: localSHA,
+		Verified:    true,
+		Batch:       lastResult.Batch,
+	}, nil
+}
+
+type chunkProgressReader struct {
+	r          io.Reader
+	base       int64
+	read       int64
+	total      int64
+	onProgress func(written, total int64)
+}
+
+func (c *chunkProgressReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if n > 0 {
+		c.read += int64(n)
+		if c.onProgress != nil {
+			c.onProgress(c.base+c.read, c.total)
+		}
+	}
+	return n, err
+}
+
+func (c *Client) streamItemPut(ctx context.Context, f *os.File, localPath, reqURL string, declaredSize int64, onProgress func(written, total int64)) (ItemResult, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return ItemResult{}, err
+	}
 	hashingReader := NewHashingReader(f, declaredSize, onProgress)
 
-	reqURL := fmt.Sprintf("%s/api/batches/%s/items/%s/content", c.target.BaseURL, url.PathEscape(batchID), url.PathEscape(itemID))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, reqURL, hashingReader)
 	if err != nil {
 		return ItemResult{}, err

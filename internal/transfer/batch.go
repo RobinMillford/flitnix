@@ -32,6 +32,8 @@ const (
 	BatchStatePending      BatchState = "pending"
 	BatchStateApproved     BatchState = "approved"
 	BatchStateTransferring BatchState = "transferring"
+	BatchStateInterrupted  BatchState = "interrupted"
+	BatchStatePaused       BatchState = "paused"
 	BatchStateCompleted    BatchState = "completed"
 	BatchStateFailed       BatchState = "failed"
 	BatchStateCanceled     BatchState = "canceled"
@@ -56,10 +58,13 @@ const (
 	ItemStatePending      ItemState = "pending"
 	ItemStateApproved     ItemState = "approved"
 	ItemStateTransferring ItemState = "transferring"
+	ItemStateInterrupted  ItemState = "interrupted"
+	ItemStatePaused       ItemState = "paused"
 	ItemStateCompleted    ItemState = "completed"
 	ItemStateFailed       ItemState = "failed"
 	ItemStateCanceled     ItemState = "canceled"
 	ItemStateRejected     ItemState = "rejected"
+	ItemStateDiscarded    ItemState = "discarded"
 )
 
 // TransferBatch is the internal batch record. SessionKey and the item
@@ -290,6 +295,7 @@ type ItemView struct {
 	DeclaredSize int64     `json:"declaredSize"`
 	Transferred  int64     `json:"transferred"`
 	State        ItemState `json:"state"`
+	Resumable    bool      `json:"resumable,omitempty"`
 	SHA256       string    `json:"sha256,omitempty"`
 	Error        string    `json:"error,omitempty"`
 }
@@ -309,10 +315,11 @@ func (b TransferBatch) View() BatchView {
 }
 
 func (i TransferItem) View() ItemView {
+	resumable := i.Transferred > 0 && (i.State == ItemStateInterrupted || i.State == ItemStatePaused || i.State == ItemStateQueued || i.State == ItemStateTransferring)
 	return ItemView{
 		ID: i.ID, BatchID: i.BatchID, Sequence: i.Sequence,
 		RelativePath: i.RelativePath, DisplayName: i.DisplayName,
 		DeclaredSize: i.DeclaredSize, Transferred: i.Transferred,
-		State: i.State, SHA256: i.SHA256, Error: i.Error,
+		State: i.State, Resumable: resumable, SHA256: i.SHA256, Error: i.Error,
 	}
 }
