@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Browseable Shared-Folder Explorer (Phase 1 — G31)**:
+  - Assigned opaque per-item IDs inside shared folders (`transfer.SourceItem.ID`) and added strictly confined hierarchical folder browsing (`GET /api/sources/{id}/items?prefix=&cursor=&limit=`) without exposing host filesystem paths.
+  - Extended `POST /api/download-grants` with selective folder item IDs (`sourceId` + `itemIds`): downloading one file streams directly with full G2 byte-range resumption (`Accept-Ranges: bytes`), while selecting multiple files across subdirectories streams a targeted ZIP archive.
+  - Built an interactive mobile shared-folder explorer in `index.html`, `styles.css`, and `app.js` with `Browse` buttons, breadcrumb navigation, pagination, and multi-file checkboxes across subdirectories.
 - **Resumable HTTP Byte-Range Downloads (Phase 1 — G2)**:
   - Enabled `Accept-Ranges: bytes`, strong file-metadata validators (`ETag: "flit-<size>-<mtime_ns>-<file_id>"`), `Range` (`206 Partial Content`), `If-Range` verification (with `200 OK` full fallback on mismatch or weak validators), `416 Range Not Satisfiable`, and `HEAD` support across mutable single-file download grants (`/api/downloads/{id}`) and direct file downloads (`/api/files/{id}/download`), while keeping OS-immutable Tier 1 (`"sha256-..."`) and Tier 3 dynamic ZIP (`Accept-Ranges: none`) contracts intact.
   - Added mid-stream file-mutation and atomic-replacement guards (`fileMatchesSnapshot`) so modified or swapped source files cleanly abort live streams instead of serving spliced bytes.

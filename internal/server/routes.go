@@ -324,6 +324,7 @@ func newAPIMux(services *Services, stall time.Duration, grants *DownloadGrantSto
 	mux.HandleFunc("GET /api/files", serveFilesList(services))
 	mux.HandleFunc("GET /api/files/{id}/download", serveFileDownload(services, stall))
 	mux.HandleFunc("GET /api/sources", serveSourcesList(services))
+	mux.HandleFunc("GET /api/sources/{id}/items", serveSourceItems(services))
 	mux.HandleFunc("POST /api/download-grants", createDownloadGrant(services, grants))
 	mux.HandleFunc("GET /api/download-progress/{id}", serveDownloadProgress(services, grants))
 	mux.HandleFunc("POST /api/text", handleTextMessageSend(services))
