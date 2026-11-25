@@ -374,6 +374,13 @@ func (s *DownloadGrantStore) authorizeContinuation(id, ticket string) (downloadG
 	cont.ActiveStreams++
 
 	p := s.progress[cont.ProgressID]
+	if p != nil {
+		p.mu.Lock()
+		if p.State != progressCompleted {
+			p.State, p.Error, p.Updated = progressTransferring, "", now
+		}
+		p.mu.Unlock()
+	}
 	grant := downloadGrant{
 		ID:                 cont.GrantID,
 		Secret:             cont.Ticket,

@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Resumable HTTP Byte-Range Downloads (Phase 1 — G2)**:
+  - Enabled `Accept-Ranges: bytes`, strong file-metadata validators (`ETag: "flit-<size>-<mtime_ns>-<file_id>"`), `Range` (`206 Partial Content`), `If-Range` verification (with `200 OK` full fallback on mismatch or weak validators), `416 Range Not Satisfiable`, and `HEAD` support across mutable single-file download grants (`/api/downloads/{id}`) and direct file downloads (`/api/files/{id}/download`), while keeping OS-immutable Tier 1 (`"sha256-..."`) and Tier 3 dynamic ZIP (`Accept-Ranges: none`) contracts intact.
+  - Added mid-stream file-mutation and atomic-replacement guards (`fileMatchesSnapshot`) so modified or swapped source files cleanly abort live streams instead of serving spliced bytes.
+  - Upgraded mobile File System Access (`showSaveFilePicker`) streaming downloads in `app.js` with bounded automatic byte-range resumption (`Range` + `If-Range`) and incremental SHA-256 verification.
 - **Automatic Stream Retry & Wi-Fi Roaming Recovery (Phase 1 — G7)**:
   - Implemented `RetryPolicy` and error classification (`internal/client/retry.go`) with jittered exponential backoff (`1s`, `2s`, `4s`, `8s`, `15s` ±20%), `/ping` reachability probing, and automatic `HEAD` + `PATCH` offset recovery in Go CLI (`internal/client`, `send_cli.go`).
   - Added bounded automatic chunk retry and `"Reconnecting — attempt X/Y"` progress UI in the mobile browser (`app.js`) with immediate `online` event wakeup and non-destructive batch sibling preservation.

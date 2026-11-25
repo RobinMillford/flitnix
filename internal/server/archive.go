@@ -480,12 +480,17 @@ func publicDownloadError(err error) string {
 // converts raw filesystem errors into path-free ones, and reports progress
 // in throttled batches (never per write).
 type guardedReader struct {
-	r       io.Reader
-	ctx     context.Context
-	sess    *session.Session
-	p       *archiveProgress
-	pending int64
-	last    time.Time
+	r          io.Reader
+	f          *os.File
+	snap       fileSnapshot
+	ctx        context.Context
+	sess       *session.Session
+	p          *archiveProgress
+	pending    int64
+	sinceCheck int64
+	checked    bool
+	last       time.Time
+	lastCheck  time.Time
 }
 
 func (g *guardedReader) Read(b []byte) (int, error) {
@@ -495,15 +500,27 @@ func (g *guardedReader) Read(b []byte) (int, error) {
 	if g.sess != nil && g.sess.Status() == session.StatusRevoked {
 		return 0, errDownloadSession
 	}
+	if g.f != nil && g.snap.Info != nil && (!g.checked || g.sinceCheck >= progressFlushBytes || time.Since(g.lastCheck) >= progressFlushEvery) {
+		g.checked = true
+		g.sinceCheck = 0
+		g.lastCheck = time.Now()
+		if !fileMatchesSnapshot(g.f, g.snap) {
+			return 0, errSourceChanged
+		}
+	}
 	n, err := g.r.Read(b)
 	if err != nil && err != io.EOF {
 		err = errSourceUnavailable
 	}
 	if n > 0 {
 		g.pending += int64(n)
+		g.sinceCheck += int64(n)
 		if g.pending >= progressFlushBytes || time.Since(g.last) >= progressFlushEvery {
 			g.flush()
 		}
+	}
+	if err == io.EOF && g.f != nil && g.snap.Info != nil && !fileMatchesSnapshot(g.f, g.snap) {
+		return n, errSourceChanged
 	}
 	return n, err
 }
@@ -791,7 +808,7 @@ func serveArchiveDownload(svcs *Services, grants *DownloadGrantStore, stall time
 		}
 		defer f.Close()
 
-		if info.Size() != entry.Size {
+		if info.Size() != entry.Size && (!isContinuation || r.Header.Get("If-Range") == "") {
 			http.Error(w, "source changed", http.StatusGone)
 			finishProgressWithDigest(progress, errSourceChanged, "")
 			return
@@ -839,9 +856,34 @@ func serveArchiveDownload(svcs *Services, grants *DownloadGrantStore, stall time
 			return
 		}
 
-		// Tier 2: Ordinary mutable file - bypass http.ServeContent, explicitly ignore Range/If-Range
-		h.Set("Accept-Ranges", "none")
-		started, err := streamSingleFileWithHandle(r.Context(), r.Method, w, out, grant, progress, f, info.Size())
+		// Tier 2: Mutable single file with strong metadata ETag, HTTP Range/If-Range resumption,
+		// and mid-stream mutation protection.
+		snap := captureFileSnapshot(f, entry.Path, info)
+		h.Set("ETag", snap.ETag)
+		h.Set("Accept-Ranges", "bytes")
+		if shouldUseRangeServeContent(r, snap.ETag, info.ModTime()) {
+			seeker := &guardedRangeSeeker{
+				f:         f,
+				snap:      snap,
+				ctx:       r.Context(),
+				sess:      grant.Sess,
+				p:         progress,
+				downloads: svcs.Downloads,
+			}
+			h.Set("Content-Type", "application/octet-stream")
+			http.ServeContent(w, r, grant.Filename, info.ModTime(), seeker)
+			seeker.flush()
+			if seeker.err != nil {
+				finishProgressWithDigest(progress, seeker.err, "")
+				abortResponse()
+				return
+			}
+			if seeker.read == info.Size() || (seeker.curOffset == info.Size() && progressProcessedAtLeast(progress, info.Size())) {
+				finishProgressWithDigest(progress, nil, "")
+			}
+			return
+		}
+		started, err := streamSingleFileWithSnapshot(r.Context(), r.Method, w, out, grant, progress, f, snap)
 		if err != nil && !started {
 			finishProgressWithDigest(progress, err, "")
 		}
@@ -914,12 +956,18 @@ func streamSingleFile(ctx context.Context, w http.ResponseWriter, out io.Writer,
 		http.Error(w, "source changed", http.StatusGone)
 		return false, errSourceChanged
 	}
-	return streamSingleFileWithHandle(ctx, http.MethodGet, w, out, grant, progress, f, info.Size())
+	snap := captureFileSnapshot(f, entry.Path, info)
+	return streamSingleFileWithSnapshot(ctx, http.MethodGet, w, out, grant, progress, f, snap)
 }
 
 // streamSingleFileWithHandle serves one regular file with a Content-Length so a short
-// body is detectable by the browser. It bypasses http.ServeContent and ignores Range headers.
+// body is detectable by the browser.
 func streamSingleFileWithHandle(ctx context.Context, method string, w http.ResponseWriter, out io.Writer, grant downloadGrant, progress *archiveProgress, f *os.File, size int64) (started bool, err error) {
+	return streamSingleFileWithSnapshot(ctx, method, w, out, grant, progress, f, fileSnapshot{Size: size})
+}
+
+func streamSingleFileWithSnapshot(ctx context.Context, method string, w http.ResponseWriter, out io.Writer, grant downloadGrant, progress *archiveProgress, f *os.File, snap fileSnapshot) (started bool, err error) {
+	size := snap.Size
 	h := w.Header()
 	h.Set("Content-Type", "application/octet-stream")
 	h.Set("Content-Length", strconv.FormatInt(size, 10))
@@ -932,7 +980,7 @@ func streamSingleFileWithHandle(ctx context.Context, method string, w http.Respo
 
 	streamHasher := sha256.New()
 	teeOut := io.MultiWriter(out, streamHasher)
-	src := &guardedReader{r: io.LimitReader(f, size), ctx: ctx, sess: grant.Sess, p: progress}
+	src := &guardedReader{r: io.LimitReader(f, size), f: f, snap: snap, ctx: ctx, sess: grant.Sess, p: progress}
 	bufPtr := transfer.GetCopyBuffer()
 	defer transfer.PutCopyBuffer(bufPtr)
 	buf := *bufPtr
@@ -942,7 +990,7 @@ func streamSingleFileWithHandle(ctx context.Context, method string, w http.Respo
 		finishProgressWithDigest(progress, err, "")
 		return true, err
 	}
-	if n != size {
+	if n != size || (snap.Info != nil && !fileMatchesSnapshot(f, snap)) {
 		finishProgressWithDigest(progress, errSourceChanged, "")
 		return true, errSourceChanged
 	}

@@ -1416,6 +1416,26 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 		defer f.Close()
 
 		size := info.Size()
+		snap := captureFileSnapshot(f, sf.Path, info)
+
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("ETag", snap.ETag)
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Content-Disposition", contentDisposition(sf.Name))
+
+		useRange := shouldUseRangeServeContent(r, snap.ETag, info.ModTime())
+		if r.Method == http.MethodHead {
+			if useRange {
+				seeker := &guardedRangeSeeker{f: f, snap: snap, ctx: r.Context(), sess: sess}
+				http.ServeContent(w, r, sf.Name, info.ModTime(), seeker)
+				return
+			}
+			w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 
 		var downloadID string
 		if svcs.Downloads != nil {
@@ -1435,19 +1455,38 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 				defer pLease.Release()
 			}
 		}
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-		w.Header().Set("Accept-Ranges", "none")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("Content-Disposition", contentDisposition(sf.Name))
-		w.Header().Set("Trailer", "Content-Digest, X-Content-SHA256")
-		w.WriteHeader(http.StatusOK)
 
-		// Pin for the streaming duration, then stream. Writes carry a
-		// rolling stall deadline: a receiver that stops draining a live
-		// download is cut after the stall window.
+		// Pin for the streaming duration, then stream.
 		sess.Begin()
 		defer sess.End()
+
+		if useRange {
+			seeker := &guardedRangeSeeker{
+				f:          f,
+				snap:       snap,
+				ctx:        r.Context(),
+				sess:       sess,
+				downloads:  svcs.Downloads,
+				downloadID: downloadID,
+			}
+			http.ServeContent(w, r, sf.Name, info.ModTime(), seeker)
+			seeker.flush()
+			if seeker.err != nil {
+				_ = forceClose(w, f)
+				if svcs.Downloads != nil {
+					svcs.Downloads.Fail(downloadID, publicDownloadError(seeker.err), seeker.read)
+				}
+				return
+			}
+			if svcs.Downloads != nil {
+				svcs.Downloads.Finish(downloadID, seeker.read)
+			}
+			return
+		}
+
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+		w.Header().Set("Trailer", "Content-Digest, X-Content-SHA256")
+		w.WriteHeader(http.StatusOK)
 
 		out := &stallWriter{
 			w:     w,
@@ -1460,8 +1499,10 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 		buf := *bufPtr
 		streamHasher := sha256.New()
 		var written int64
+		var sinceCheck int64
 		var lastReported int64
 		var lastProgressTime time.Time
+		lastCheck := time.Now()
 		for written < size {
 			// A direct download is an authenticated transfer, so a session
 			// that was revoked while the body was streaming must stop here
@@ -1479,11 +1520,23 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 				}
 				return
 			}
+			if sinceCheck >= progressFlushBytes || time.Since(lastCheck) >= progressFlushEvery {
+				sinceCheck = 0
+				lastCheck = time.Now()
+				if !fileMatchesSnapshot(f, snap) {
+					_ = forceClose(w, f)
+					if svcs.Downloads != nil {
+						svcs.Downloads.Fail(downloadID, errSourceChanged.Error(), written)
+					}
+					return
+				}
+			}
 			n, rerr := f.Read(buf)
 			if n > 0 {
 				streamHasher.Write(buf[:n])
 				wn, werr := out.Write(buf[:n])
 				written += int64(wn)
+				sinceCheck += int64(wn)
 				now := time.Now()
 				if svcs.Downloads != nil && (written-lastReported >= 256*1024 || now.Sub(lastProgressTime) >= 250*time.Millisecond || written == size) {
 					svcs.Downloads.Progress(downloadID, written)
@@ -1500,6 +1553,13 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 			}
 			if rerr != nil {
 				if rerr == io.EOF && written == size {
+					if !fileMatchesSnapshot(f, snap) {
+						_ = forceClose(w, f)
+						if svcs.Downloads != nil {
+							svcs.Downloads.Fail(downloadID, errSourceChanged.Error(), written)
+						}
+						return
+					}
 					break
 				}
 				// Short file (shrank mid-stream) or a disk read error:
