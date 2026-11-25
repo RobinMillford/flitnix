@@ -151,15 +151,17 @@ type TextMessageView struct {
 // in flight or finished). Received file paths are deliberately not part of
 // the projection: the UI names uploads by their opaque ID and state.
 type UploadView struct {
-	ID       string    `json:"id"`
-	Name     string    `json:"name"`
-	Size     int64     `json:"size"`
-	Created  time.Time `json:"created"`
-	State    string    `json:"state"`
-	Uploaded int64     `json:"uploaded"`
-	Speed    float64   `json:"speed"`
-	SHA256   string    `json:"sha256,omitempty"`
-	Reason   string    `json:"reason,omitempty"`
+	ID             string    `json:"id"`
+	Name           string    `json:"name"`
+	Size           int64     `json:"size"`
+	Created        time.Time `json:"created"`
+	State          string    `json:"state"`
+	Uploaded       int64     `json:"uploaded"`
+	Speed          float64   `json:"speed"`
+	SHA256         string    `json:"sha256,omitempty"`
+	Reason         string    `json:"reason,omitempty"`
+	StorageFits    bool      `json:"storageFits"`
+	StorageWarning string    `json:"storageWarning,omitempty"`
 }
 
 type DownloadView struct {
@@ -228,6 +230,8 @@ type BatchView struct {
 	StartedAt          time.Time       `json:"startedAt,omitempty"`
 	CompletedAt        time.Time       `json:"completedAt,omitempty"`
 	Error              string          `json:"error,omitempty"`
+	StorageFits        bool            `json:"storageFits"`
+	StorageWarning     string          `json:"storageWarning,omitempty"`
 }
 
 // SettingsView is the UI projection of persistent user settings.
@@ -246,6 +250,7 @@ type App struct {
 	ctx context.Context
 
 	store         *transfer.Store
+	quota         *transfer.QuotaManager
 	settingsStore *settings.Store
 	sessions      *session.Manager
 	transfers     *transfer.Service
@@ -345,14 +350,19 @@ func NewApp() (*App, error) {
 		fmt.Fprintf(os.Stderr, "flitnix: pairing lockout persistence warning: %v\n", err)
 	}
 
+	quota := transfer.NewQuotaManager(transfer.QuotaConfig{DefaultDir: store.Dir()})
+	guestMgr := guest.NewManager()
+	guestMgr.SetQuotaManager(quota)
+
 	a := &App{
 		store:         store,
+		quota:         quota,
 		settingsStore: settingsStore,
-		transfers:     transfer.NewService(transfer.Config{Store: store}),
+		transfers:     transfer.NewService(transfer.Config{Store: store, Quota: quota}),
 		coordinator:   transfer.NewCoordinator(transfer.CoordinatorConfig{}),
 		registry:      transfer.NewRegistry(),
 		downloads:     transfer.NewDownloadRegistry(),
-		guestMgr:      guest.NewManager(),
+		guestMgr:      guestMgr,
 		textStore:     textmsg.NewStore(),
 		auditStore:    auditStore,
 		templateStore: templateStore,
@@ -1048,7 +1058,12 @@ func (a *App) ListSessions() []SessionView {
 
 // ListPendingUploads returns the uploads awaiting the desktop's decision.
 func (a *App) ListPendingUploads() []UploadView {
-	return uploadViews(a.transfers.ListPending())
+	list := a.transfers.ListPending()
+	out := make([]UploadView, 0, len(list))
+	for _, u := range list {
+		out = append(out, a.uploadViewWithStorage(u))
+	}
+	return out
 }
 
 // RecentUploads returns every live and recently finished standalone upload,
@@ -1089,7 +1104,7 @@ func (a *App) ApproveUpload(id string) (UploadView, error) {
 	if err != nil {
 		return UploadView{}, err
 	}
-	return uploadView(up), nil
+	return a.uploadViewWithStorage(up), nil
 }
 
 // RejectUpload refuses the pending upload with the given ID.
@@ -1129,9 +1144,13 @@ func (a *App) requireStandalone(id string) error {
 // decision. A batch leaves this list the moment it is approved, rejected,
 // canceled or ended with its session.
 func (a *App) ListPendingBatches() []BatchView {
-	return a.listBatches(func(v transfer.BatchView) bool {
+	views := a.listBatches(func(v transfer.BatchView) bool {
 		return v.ApprovalState == transfer.ApprovalPending && v.State == transfer.BatchStatePending
 	})
+	for i := range views {
+		views[i] = a.enrichPendingBatchStorage(views[i])
+	}
+	return views
 }
 
 func (a *App) ListBatches() []BatchView {
@@ -1260,6 +1279,9 @@ func (a *App) ApproveBatch(id string) (BatchView, error) {
 			transfer.ErrInvalidTransition)
 	}
 	if err := a.transfers.DecideBatchItems(ids, true); err != nil {
+		if errors.Is(err, transfer.ErrInsufficientStorage) {
+			return BatchView{}, err
+		}
 		// Some record was not pending (for example, it was canceled with its
 		// session). Nothing was approved, and a batch that cannot be released
 		// whole must not stay pending, so close it out in both subsystems.
@@ -1623,6 +1645,9 @@ func (a *App) SaveSettings(view SettingsView) error {
 		if err := a.store.SetDir(s.DownloadDir); err != nil {
 			return err
 		}
+		if a.quota != nil {
+			a.quota.SetDefaultDir(a.store.Dir())
+		}
 	}
 	if a.netMonitor != nil {
 		_, _ = a.RefreshNetwork()
@@ -1645,8 +1670,20 @@ func (a *App) ResetSettings() (SettingsView, error) {
 	}
 	if a.store != nil {
 		_ = a.store.SetDir("")
+		if a.quota != nil {
+			a.quota.SetDefaultDir(a.store.Dir())
+		}
 	}
 	return a.GetSettings(), nil
+}
+
+// GetStorageStatus returns free disk space, active transfer reservations,
+// and available transfer headroom for the effective receive directory.
+func (a *App) GetStorageStatus() transfer.StorageStatus {
+	if a.quota == nil {
+		return transfer.InspectStorageUnknown(a.ReceiveDirectory())
+	}
+	return a.quota.Status(a.ReceiveDirectory())
 }
 
 // SelectDownloadDirectory opens the native directory dialog for choosing the download directory.
@@ -1689,17 +1726,53 @@ func sessionView(s *session.Session, token string) SessionView {
 	}
 }
 
+func (a *App) uploadViewWithStorage(u transfer.Upload) UploadView {
+	v := uploadView(u)
+	v.StorageFits = true
+	if u.State == transfer.StatePending && a.transfers != nil {
+		fits, st := a.transfers.CheckStorageFit([]string{u.ID}, u.Size)
+		v.StorageFits = fits
+		if !fits {
+			v.StorageWarning = fmt.Sprintf("Insufficient disk space (%d bytes headroom)", st.HeadroomBytes)
+		}
+	}
+	return v
+}
+
+func (a *App) enrichPendingBatchStorage(v BatchView) BatchView {
+	v.StorageFits = true
+	if v.ApprovalState == string(transfer.ApprovalPending) && a.transfers != nil {
+		var ids []string
+		if key, err := a.findBatchSession(v.ID); err == nil {
+			for _, item := range v.Items {
+				if item.State == string(transfer.ItemStatePending) {
+					if cid, cidErr := a.coordinator.ItemContentID(key, v.ID, item.ID); cidErr == nil && cid != "" {
+						ids = append(ids, cid)
+					}
+				}
+			}
+		}
+		fits, st := a.transfers.CheckStorageFit(ids, v.DeclaredTotalBytes)
+		v.StorageFits = fits
+		if !fits {
+			v.StorageWarning = fmt.Sprintf("Exceeds available disk headroom (%d bytes available)", st.HeadroomBytes)
+		}
+	}
+	return v
+}
+
 func uploadView(u transfer.Upload) UploadView {
 	return UploadView{
-		ID:       u.ID,
-		Name:     u.Name,
-		Size:     u.Size,
-		Created:  u.Created,
-		State:    string(u.State),
-		Uploaded: u.Uploaded,
-		Speed:    u.Speed,
-		SHA256:   u.SHA256,
-		Reason:   u.Reason,
+		ID:          u.ID,
+		Name:        u.Name,
+		Size:        u.Size,
+		Created:     u.Created,
+		State:       string(u.State),
+		Uploaded:    u.Uploaded,
+		Speed:       u.Speed,
+		SHA256:      u.SHA256,
+		Reason:      u.Reason,
+		StorageFits: true,
 	}
 }
 
@@ -1748,7 +1821,7 @@ func batchView(b transfer.BatchView) BatchView {
 		DeclaredTotalBytes: b.DeclaredTotalBytes, TransferredBytes: b.TransferredBytes,
 		State: string(b.State), ApprovalState: string(b.ApprovalState),
 		CreatedAt: b.CreatedAt, StartedAt: b.StartedAt, CompletedAt: b.CompletedAt,
-		Error: b.Error,
+		Error: b.Error, StorageFits: true,
 	}
 }
 

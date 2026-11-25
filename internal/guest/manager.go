@@ -3,11 +3,14 @@ package guest
 import (
 	"sync"
 	"time"
+
+	"github.com/itsyamin/flitnix/internal/transfer"
 )
 
 type Manager struct {
 	mu         sync.RWMutex
 	activeRoom *Room
+	quota      *transfer.QuotaManager
 	stopTicker chan struct{}
 	closeOnce  sync.Once
 	done       chan struct{}
@@ -20,6 +23,14 @@ func NewManager() *Manager {
 	}
 	go m.expiryLoop()
 	return m
+}
+
+// SetQuotaManager attaches a shared storage quota manager used by future
+// created guest rooms when RoomConfig.Quota is nil.
+func (m *Manager) SetQuotaManager(q *transfer.QuotaManager) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.quota = q
 }
 
 func (m *Manager) expiryLoop() {
@@ -72,6 +83,9 @@ func (m *Manager) CreateRoomWithConfig(cfg RoomConfig) (*Room, error) {
 		m.activeRoom.End()
 	}
 
+	if cfg.Quota == nil {
+		cfg.Quota = m.quota
+	}
 	r, err := NewRoomWithConfig(cfg)
 	if err != nil {
 		return nil, err

@@ -9,6 +9,7 @@ import {devices} from '../models';
 import {audit} from '../models';
 import {doctor} from '../models';
 import {power} from '../models';
+import {transfer} from '../models';
 
 export function AddDroppedSources(arg1:Array<string>):Promise<Array<main.SharedSourceView>>;
 
@@ -61,6 +62,8 @@ export function GetNetworkState():Promise<netenv.NetworkState>;
 export function GetPairingStatus():Promise<devices.PairingStatusView>;
 
 export function GetSettings():Promise<main.SettingsView>;
+
+export function GetStorageStatus():Promise<transfer.StorageStatus>;
 
 export function ListAuditEvents(arg1:audit.Filter):Promise<main.AuditListResult>;
 

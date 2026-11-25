@@ -124,6 +124,10 @@ type Config struct {
 
 	// Limits bounds concurrent uploads. Zero values select defaults.
 	Limits Limits
+
+	// Quota tracks storage headroom and reservations across concurrent uploads.
+	// When nil, NewService initializes a default QuotaManager bound to Store.Dir().
+	Quota *QuotaManager
 }
 
 // Service owns the upload approval machine. All methods are safe for
@@ -133,6 +137,7 @@ type Config struct {
 type Service struct {
 	store  *Store
 	limits Limits
+	quota  *QuotaManager
 
 	mu      sync.Mutex
 	uploads map[string]*upload
@@ -150,12 +155,31 @@ func NewService(cfg Config) *Service {
 		limits.MaxActive = defaultMaxActiveUploads
 	}
 
-	return &Service{store: cfg.Store, limits: limits, uploads: make(map[string]*upload)}
+	quota := cfg.Quota
+	if quota == nil {
+		defaultDir := ""
+		if cfg.Store != nil {
+			defaultDir = cfg.Store.Dir()
+		}
+		quota = NewQuotaManager(QuotaConfig{DefaultDir: defaultDir})
+	}
+
+	return &Service{store: cfg.Store, limits: limits, quota: quota, uploads: make(map[string]*upload)}
 }
 
 // Store exposes the configured storage boundary to the server composition
 // layer for batch-root allocation.
 func (s *Service) Store() *Store { return s.store }
+
+// Quota exposes the service's storage quota and reservation manager.
+func (s *Service) Quota() *QuotaManager { return s.quota }
+
+func (s *Service) targetDir() string {
+	if s.store != nil {
+		return s.store.Dir()
+	}
+	return ""
+}
 
 // Upload is a consistent copy of one upload record for callers outside the
 // package (HTTP handlers, the desktop UI).
@@ -346,6 +370,15 @@ func (s *Service) DeclareBatchItemWithDigest(sessionKey, root, relativePath, raw
 	return s.declare(sessionKey, rawName, root, relativePath, size, true, expectedSHA256, deviceID)
 }
 
+// DeclareBatchItemPreReserved records a batch item whose storage capacity was
+// already atomically reserved by an enclosing batch reservation.
+func (s *Service) DeclareBatchItemPreReserved(sessionKey, root, relativePath, rawName string, size int64, expectedSHA256, deviceID string) (Upload, error) {
+	if (root == "") != (relativePath == "") {
+		return Upload{}, ErrInvalidUpload
+	}
+	return s.declareWithQuota(sessionKey, rawName, root, relativePath, size, true, expectedSHA256, deviceID, false)
+}
+
 // DeclarePath records a folder item whose server-selected root and validated
 // relative path determine its eventual publication location.
 func (s *Service) DeclarePath(sessionKey, root, relativePath, rawName string, size int64) (Upload, error) {
@@ -356,6 +389,10 @@ func (s *Service) DeclarePath(sessionKey, root, relativePath, rawName string, si
 }
 
 func (s *Service) declare(sessionKey, rawName, root, relativePath string, size int64, managed bool, expectedSHA256, deviceID string) (Upload, error) {
+	return s.declareWithQuota(sessionKey, rawName, root, relativePath, size, managed, expectedSHA256, deviceID, true)
+}
+
+func (s *Service) declareWithQuota(sessionKey, rawName, root, relativePath string, size int64, managed bool, expectedSHA256, deviceID string, reserveQuota bool) (Upload, error) {
 	if sessionKey == "" {
 		return Upload{}, ErrWrongSession
 	}
@@ -391,6 +428,11 @@ func (s *Service) declare(sessionKey, rawName, root, relativePath string, size i
 	id, err := newID()
 	if err != nil {
 		return Upload{}, err
+	}
+	if reserveQuota && s.quota != nil {
+		if _, qerr := s.quota.CheckAvailable(s.targetDir(), size); qerr != nil {
+			return Upload{}, qerr
+		}
 	}
 	u := &upload{
 		id:             id,
@@ -497,9 +539,17 @@ func (s *Service) Decide(id string, approve bool) (Upload, error) {
 		return u.snapshotLocked(), fmt.Errorf("%w: current state is %q", ErrAlreadyDecided, u.state)
 	}
 	if approve {
+		if s.quota != nil {
+			if qerr := s.quota.Reserve(u.id, u.session, s.targetDir(), u.size); qerr != nil {
+				return u.snapshotLocked(), qerr
+			}
+		}
 		u.state = StateApproved
 	} else {
 		u.state = StateRejected
+		if s.quota != nil {
+			s.quota.Release(u.id)
+		}
 	}
 	return u.snapshotLocked(), nil
 }
@@ -540,9 +590,18 @@ func (s *Service) DecideBatchItems(ids []string, approve bool) error {
 			u.mu.Unlock()
 		}
 	}()
+	var quotaItems []QuotaBatchItem
+	var sessionKey string
 	for _, u := range records {
 		if u.state != StatePending {
 			return fmt.Errorf("%w: current state is %q", ErrAlreadyDecided, u.state)
+		}
+		sessionKey = u.session
+		quotaItems = append(quotaItems, QuotaBatchItem{ID: u.id, Bytes: u.size})
+	}
+	if approve && s.quota != nil {
+		if qerr := s.quota.ReserveBatch(sessionKey, s.targetDir(), quotaItems); qerr != nil {
+			return qerr
 		}
 	}
 	next := StateRejected
@@ -551,6 +610,9 @@ func (s *Service) DecideBatchItems(ids []string, approve bool) error {
 	}
 	for _, u := range records {
 		u.state = next
+	}
+	if !approve && s.quota != nil {
+		s.quota.ReleaseIDs(ids)
 	}
 	return nil
 }
@@ -618,8 +680,19 @@ func (s *Service) SubmitContentWithPublish(id, sessionKey string, body io.Reader
 	u.uploaded.Store(0)
 	u.mu.Unlock()
 
-	result, serr := streamBody(body, sink, u.size, func(written int64) {
+	var spaceCheck func(writtenSoFar, nextBytes int64) error
+	if s.quota != nil {
+		targetDir := s.targetDir()
+		spaceCheck = func(writtenSoFar, nextBytes int64) error {
+			return s.quota.CheckWrite(id, targetDir, writtenSoFar, nextBytes)
+		}
+	}
+
+	result, serr := streamBodyWithSpaceCheck(body, sink, u.size, func(written int64) {
 		u.uploaded.Store(written)
+		if s.quota != nil {
+			s.quota.Advance(id, written)
+		}
 		u.mu.Lock()
 		now := time.Now()
 		if elapsed := now.Sub(u.lastAt).Seconds(); elapsed > 0 {
@@ -631,7 +704,7 @@ func (s *Service) SubmitContentWithPublish(id, sessionKey string, body io.Reader
 		if onProgress != nil {
 			onProgress(u.snapshot())
 		}
-	})
+	}, spaceCheck)
 
 	if serr != nil {
 		_ = sink.Abort()
@@ -641,11 +714,20 @@ func (s *Service) SubmitContentWithPublish(id, sessionKey string, body io.Reader
 		if u.state == StateCanceled {
 			// Cancel decided the fate during streaming: keep the
 			// canceled status honest rather than overwriting failed.
+			if s.quota != nil {
+				s.quota.Release(id)
+			}
 			u.mu.Unlock()
 			return ContentResult{}, fmt.Errorf("%w: %v", ErrCanceled, serr)
 		}
 		u.state = StateFailed
+		if s.quota != nil {
+			s.quota.Release(id)
+		}
 		u.mu.Unlock()
+		if errors.Is(serr, ErrInsufficientStorage) {
+			return ContentResult{}, serr
+		}
 		return ContentResult{}, fmt.Errorf("%s: %w", u.name, serr)
 	}
 
@@ -656,6 +738,9 @@ func (s *Service) SubmitContentWithPublish(id, sessionKey string, body io.Reader
 		u.sink = nil
 		u.reason = fmt.Sprintf("digest mismatch: expected %s, got %s", u.expectedSHA256, result.HexSHA256())
 		u.state = StateFailed
+		if s.quota != nil {
+			s.quota.Release(id)
+		}
 		u.mu.Unlock()
 		return ContentResult{}, ErrDigestMismatch
 	}
@@ -673,6 +758,9 @@ func (s *Service) SubmitContentWithPublish(id, sessionKey string, body io.Reader
 		u.state = StateCanceled
 		u.reason = "canceled"
 		u.sink = nil
+		if s.quota != nil {
+			s.quota.Release(id)
+		}
 		u.mu.Unlock()
 		_ = sink.Abort()
 		return ContentResult{}, fmt.Errorf("%w: canceled before publication", ErrCanceled)
@@ -689,6 +777,9 @@ func (s *Service) SubmitContentWithPublish(id, sessionKey string, body io.Reader
 			u.state = StateCanceled
 			u.reason = "canceled"
 			u.sink = nil
+			if s.quota != nil {
+				s.quota.Release(id)
+			}
 			u.mu.Unlock()
 			_ = sink.Abort()
 			return ContentResult{}, fmt.Errorf("%w: canceled before publication: %v", ErrCanceled, err)
@@ -704,6 +795,9 @@ func (s *Service) SubmitContentWithPublish(id, sessionKey string, body io.Reader
 		// The data arrived intact but atomic publication failed; keep
 		// the record failed and surface the store's precise error.
 		u.reason = cerr.Error()
+		if s.quota != nil {
+			s.quota.Release(id)
+		}
 		if u.state == StateCanceled {
 			// Cancel decided the fate during the commit (its abort won
 			// the publication race): keep the canceled status honest
@@ -713,11 +807,17 @@ func (s *Service) SubmitContentWithPublish(id, sessionKey string, body io.Reader
 		}
 		u.state = StateFailed
 		u.mu.Unlock()
+		if errors.Is(cerr, ErrInsufficientStorage) {
+			return ContentResult{}, cerr
+		}
 		return ContentResult{}, fmt.Errorf("%s: %w", u.name, cerr)
 	}
 	u.state = StateCompleted
 	u.published = final
 	u.sha256 = result.HexSHA256()
+	if s.quota != nil {
+		s.quota.Release(id)
+	}
 	u.mu.Unlock()
 	return ContentResult{Written: result.Written, SHA256: result.HexSHA256(), Path: final}, nil
 }
@@ -783,10 +883,16 @@ func (s *Service) Cancel(id string) error {
 	switch u.state {
 	case StatePending, StateApproved:
 		u.state = StateCanceled
+		if s.quota != nil {
+			s.quota.Release(u.id)
+		}
 		u.mu.Unlock()
 	case StateUploading:
 		sink := u.sink
 		u.state = StateCanceled
+		if s.quota != nil {
+			s.quota.Release(u.id)
+		}
 		u.mu.Unlock()
 		if sink != nil {
 			_ = sink.Abort()
@@ -827,11 +933,17 @@ func (s *Service) CancelSession(sessionKey string) {
 		case StatePending, StateApproved:
 			u.pub = pubCancelReserved
 			u.state = StateCanceled
+			if s.quota != nil {
+				s.quota.Release(u.id)
+			}
 			u.mu.Unlock()
 		case StateUploading:
 			sink := u.sink
 			u.pub = pubCancelReserved
 			u.state = StateCanceled
+			if s.quota != nil {
+				s.quota.Release(u.id)
+			}
 			u.mu.Unlock()
 			if sink != nil {
 				_ = sink.Abort()
@@ -865,11 +977,23 @@ func (s *Service) AbortActiveUploads() {
 		u.pub = pubCancelReserved
 		u.state = StateFailed
 		u.reason = "transfer interrupted: network connection lost or interface changed"
+		if s.quota != nil {
+			s.quota.Release(u.id)
+		}
 		u.mu.Unlock()
 		if sink != nil {
 			_ = sink.Abort()
 		}
 	}
+}
+
+// CheckStorageFit reports whether the given upload IDs (or fallbackBytes when
+// unreserved) currently fit in the target receive directory headroom.
+func (s *Service) CheckStorageFit(ids []string, fallbackBytes int64) (bool, StorageStatus) {
+	if s.quota == nil {
+		return true, StorageStatus{Status: StorageStatusUnknown}
+	}
+	return s.quota.CheckExistingFit(s.targetDir(), ids, fallbackBytes)
 }
 
 // Get returns a consistent copy of one upload record.

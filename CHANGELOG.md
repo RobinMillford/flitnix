@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+- **Storage Quota & Disk-Space Protection (Phase 1 — G26)**:
+  - Cross-platform filesystem free-space probing (`unix.Statfs` / `GetDiskFreeSpaceEx`) with configurable minimum disk reserve buffer (`BufferReserveBytes`, default `1 GiB`) and optional hard receive cap (`MaxReceiveBytes`).
+  - Atomic `QuotaManager` headroom reservations at transfer approval (and auto-approve / guest-room admission), plus mid-stream 4 MiB headroom checks and `ENOSPC` / `ERROR_DISK_FULL` mapping to HTTP `507 Insufficient Storage` (`code: "insufficient_storage"`).
+  - Desktop Storage Headroom telemetry in Settings and Approval Inbox (fit/exceeds status indicators) and clear mobile error reporting (`507`) when desktop storage is full.
+  - Note: History auto-retention policies are intentionally deferred to Phase 3 (G6).
+
+---
+
 ## [0.2.7.4] - 2026-11-10
 
 ### Fixed

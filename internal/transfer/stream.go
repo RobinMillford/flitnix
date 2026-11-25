@@ -73,6 +73,10 @@ func (r StreamResult) HexSHA256() string { return hex.EncodeToString(r.SHA256[:]
 // Size bounds: declared must be >= 0 (negative sizes are rejected here so
 // even a corrupted metadata record cannot desynchronize the accounting).
 func streamBody(r io.Reader, sink contentSink, declared int64, onProgress func(written int64)) (StreamResult, error) {
+	return streamBodyWithSpaceCheck(r, sink, declared, onProgress, nil)
+}
+
+func streamBodyWithSpaceCheck(r io.Reader, sink contentSink, declared int64, onProgress func(written int64), onSpaceCheck func(writtenSoFar, nextBytes int64) error) (StreamResult, error) {
 	if declared < 0 {
 		return StreamResult{}, fmt.Errorf("transfer: approved size is negative (%d)", declared)
 	}
@@ -81,6 +85,7 @@ func streamBody(r io.Reader, sink contentSink, declared int64, onProgress func(w
 	buf := make([]byte, streamCopySize)
 	var res StreamResult
 	lastReported := int64(-1)
+	lastSpaceCheck := int64(-diskCheckInterval)
 
 	for res.Written < declared {
 		n, rerr := r.Read(buf)
@@ -91,11 +96,20 @@ func streamBody(r io.Reader, sink contentSink, declared int64, onProgress func(w
 				// never saw a size for.
 				return res, fmt.Errorf("%w: approved %d, got %d+%d", ErrSizeExceeded, declared, res.Written, n)
 			}
+			if onSpaceCheck != nil && (res.Written == 0 || res.Written-lastSpaceCheck >= diskCheckInterval) {
+				if serr := onSpaceCheck(res.Written, int64(n)); serr != nil {
+					return res, serr
+				}
+				lastSpaceCheck = res.Written
+			}
 			wn, werr := sink.Write(buf[:n])
 			if werr == nil && wn < n {
 				werr = io.ErrShortWrite
 			}
 			if werr != nil {
+				if IsNoSpaceError(werr) {
+					return res, fmt.Errorf("%w: %v", ErrInsufficientStorage, werr)
+				}
 				return res, fmt.Errorf("transfer: writing received data: %w", werr)
 			}
 			hasher.Write(buf[:n])

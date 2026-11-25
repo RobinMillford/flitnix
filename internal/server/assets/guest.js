@@ -815,6 +815,9 @@
         if (res.status === 409) {
           throw new Error("File already exists. In this room, duplicate file names are rejected.");
         }
+        if (res.status === 507) {
+          throw new Error("Desktop storage is low. Free up disk space before sending these files.");
+        }
         if (!res.ok) throw new Error("Upload declaration rejected (" + res.status + ")");
         return res.json();
       })
@@ -906,6 +909,10 @@
       if (res.status >= 200 && res.status < 300) {
         job.state = "completed";
         job.transferred = job.size;
+        updateJobUI(job);
+      } else if (res.status === 507) {
+        job.state = "failed";
+        job.error = "Desktop storage is low. Free up disk space before sending these files.";
         updateJobUI(job);
       } else {
         job.state = "failed";

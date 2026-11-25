@@ -870,9 +870,13 @@
           return;
         }
         job.phase = "failed";
-        job.err = (!err || !err.status || err.status >= 500)
-          ? "Could not reach the desktop. Check the Wi-Fi connection and retry."
-          : (err.message || "The desktop refuses this batch.");
+        if (err && err.status === 507) {
+          job.err = "Desktop storage is low. Free up disk space before sending these files.";
+        } else {
+          job.err = (!err || !err.status || err.status >= 500)
+            ? "Could not reach the desktop. Check the Wi-Fi connection and retry."
+            : (err.message || "The desktop refuses this batch.");
+        }
         job.retryable = true;
         paint(job);
       });
@@ -1105,6 +1109,11 @@
       if (job.removed || appState.ended) throw { aborted: true };
       if (res.status === 401) { endUnauthorized(errorCode(res)); throw { aborted: true }; }
       if (res.status >= 200 && res.status < 300) { diagnoseUpload("completed", job); return; }
+      if (res.status === 507) {
+        var lowErr = new Error("Desktop storage is low. Free up disk space before sending these files.");
+        lowErr.status = 507;
+        throw lowErr;
+      }
       var msg = "Upload failed (" + res.status + ")";
       try { var parsed = JSON.parse(res.responseText); if (parsed && parsed.error) msg = parsed.error; } catch (e) {}
       throw new Error(msg);

@@ -298,6 +298,9 @@ func (s *Store) OpenPart(name string) (*PartFile, error) {
 			if os.IsExist(err) {
 				continue // virtually impossible; retry with a new suffix
 			}
+			if IsNoSpaceError(err) {
+				return nil, fmt.Errorf("%w: %v", ErrInsufficientStorage, err)
+			}
 			return nil, fmt.Errorf("transfer: cannot create temporary file in %s: %w", dir, err)
 		}
 		if err := s.protectPartFile(f, path); err != nil {
@@ -415,6 +418,9 @@ func (s *Store) OpenPartPath(root, relativePath string) (*PartFile, error) {
 			if os.IsExist(err) {
 				continue
 			}
+			if IsNoSpaceError(err) {
+				return nil, fmt.Errorf("%w: %v", ErrInsufficientStorage, err)
+			}
 			return nil, fmt.Errorf("transfer: cannot create temporary folder file: %w", err)
 		}
 		if err := s.protectPartFile(f, path); err != nil {
@@ -475,6 +481,9 @@ func (p *PartFile) Commit() (string, error) {
 	if err := p.f.Sync(); err != nil {
 		p.f.Close()
 		_ = os.Remove(p.path)
+		if IsNoSpaceError(err) {
+			return "", fmt.Errorf("%w: %v", ErrInsufficientStorage, err)
+		}
 		return "", fmt.Errorf("transfer: fsync of received data failed: %w", err)
 	}
 	if err := p.f.Close(); err != nil {

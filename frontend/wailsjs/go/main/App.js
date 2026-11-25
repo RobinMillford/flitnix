@@ -106,6 +106,10 @@ export function GetSettings() {
   return window['go']['main']['App']['GetSettings']();
 }
 
+export function GetStorageStatus() {
+  return window['go']['main']['App']['GetStorageStatus']();
+}
+
 export function ListAuditEvents(arg1) {
   return window['go']['main']['App']['ListAuditEvents'](arg1);
 }
