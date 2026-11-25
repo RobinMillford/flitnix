@@ -19,6 +19,24 @@
 var active = Object.create(null);
 var DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024;
 
+function parseRetryAfterMs(value, now) {
+  // Mirrors the Go client's ParseRetryAfter: delta seconds or an HTTP date;
+  // malformed, negative and missing values yield 0; huge values clamp to
+  // the maximum automatic wait (5 minutes).
+  if (value === null || value === undefined) return 0;
+  var s = String(value).trim();
+  if (!s) return 0;
+  var secs = Number(s);
+  if (isNaN(secs)) {
+    var t = Date.parse(s);
+    if (isNaN(t)) return 0;
+    secs = (t - (now || Date.now())) / 1000;
+  }
+  if (!isFinite(secs) || secs < 0) return 0;
+  if (secs > 86400) return 300000;
+  return Math.round(secs * 1000);
+}
+
 self.onmessage = function (ev) {
   var msg = ev.data;
   if (!msg || !msg.type) return;
@@ -112,14 +130,15 @@ function startResumableUpload(msg) {
     }
   }
 
-  function finishDone(status, text) {
+  function finishDone(status, text, retryAfterMs) {
     if (active[id] === state) delete active[id];
     self.postMessage({
       type: "done",
       uploadId: id,
       status: status,
       responseText: text || "",
-      offset: offset
+      offset: offset,
+      retryAfterMs: typeof retryAfterMs === "number" ? retryAfterMs : 0
     });
   }
 
@@ -165,7 +184,7 @@ function startResumableUpload(msg) {
         startUpload(msg);
         return;
       }
-      finishDone(xhr.status, xhr.responseText || "");
+      finishDone(xhr.status, xhr.responseText || "", parseRetryAfterMs(xhr.getResponseHeader("Retry-After")));
     };
     xhr.onerror = function () { finishError("network", ""); };
     xhr.ontimeout = function () { finishError("timeout", ""); };
@@ -236,7 +255,7 @@ function startResumableUpload(msg) {
       if (!isNaN(hdrOff) && hdrOff >= 0 && hdrOff <= total) {
         offset = hdrOff;
       }
-      finishDone(xhr.status, xhr.responseText || "");
+      finishDone(xhr.status, xhr.responseText || "", parseRetryAfterMs(xhr.getResponseHeader("Retry-After")));
     };
     xhr.onerror = function () { finishError("network", ""); };
     xhr.ontimeout = function () { finishError("timeout", ""); };

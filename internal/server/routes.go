@@ -706,6 +706,7 @@ func handleUploadDeclare(svcs *Services, _ time.Duration) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "invalid filename or size")
 			return
 		case errors.Is(err, transfer.ErrNoCapacity):
+			w.Header().Set("Retry-After", "1")
 			writeError(w, http.StatusServiceUnavailable,
 				"too many pending uploads; wait for the desktop to decide on the existing ones")
 			return
@@ -1359,6 +1360,7 @@ func writeUploadStreamError(w http.ResponseWriter, err error) {
 	case errors.Is(err, transfer.ErrInsufficientStorage):
 		writeInsufficientStorage(w)
 	case errors.Is(err, transfer.ErrNoCapacity):
+		w.Header().Set("Retry-After", "1")
 		writeError(w, http.StatusServiceUnavailable, "too many concurrent uploads")
 	case errors.Is(err, transfer.ErrSizeExceeded):
 		writeError(w, http.StatusBadRequest, "body exceeds the approved size")

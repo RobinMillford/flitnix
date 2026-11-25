@@ -22,6 +22,24 @@
   var pending = Object.create(null);
   var nextId = 1;
 
+  function parseRetryAfterMs(value, now) {
+    // Mirrors the Go client's ParseRetryAfter: delta seconds or an HTTP date;
+    // malformed, negative and missing values yield 0; huge values clamp to
+    // the maximum automatic wait (5 minutes).
+    if (value === null || value === undefined) return 0;
+    var s = String(value).trim();
+    if (!s) return 0;
+    var secs = Number(s);
+    if (isNaN(secs)) {
+      var t = Date.parse(s);
+      if (isNaN(t)) return 0;
+      secs = (t - (now || Date.now())) / 1000;
+    }
+    if (!isFinite(secs) || secs < 0) return 0;
+    if (secs > 86400) return 300000;
+    return Math.round(secs * 1000);
+  }
+
   function workerAvailable() {
     return !workerBroken && typeof Worker !== "undefined";
   }
@@ -68,7 +86,12 @@
       }
       delete pending[msg.uploadId];
       if (msg.type === "done") {
-        entry.resolve({ status: msg.status, responseText: msg.responseText || "", offset: msg.offset });
+        entry.resolve({
+          status: msg.status,
+          responseText: msg.responseText || "",
+          offset: msg.offset,
+          retryAfterMs: typeof msg.retryAfterMs === "number" ? msg.retryAfterMs : 0
+        });
       } else if (msg.type === "error") {
         entry.reject(transportError(msg.kind, msg.message, msg.offset));
       }
@@ -198,7 +221,12 @@
             fallback.promise.then(resolve, reject);
             return;
           }
-          resolve({ status: xhr.status, responseText: xhr.responseText || "", offset: offset });
+          resolve({
+            status: xhr.status,
+            responseText: xhr.responseText || "",
+            offset: offset,
+            retryAfterMs: parseRetryAfterMs(xhr.getResponseHeader("Retry-After"))
+          });
         };
         xhr.onerror = function () { reject(transportError("network", "", offset)); };
         xhr.ontimeout = function () { reject(transportError("timeout", "", offset)); };
@@ -259,7 +287,12 @@
           }
           var hdrOff = parseInt(xhr.getResponseHeader("Upload-Offset") || "", 10);
           if (!isNaN(hdrOff) && hdrOff >= 0 && hdrOff <= total) offset = hdrOff;
-          resolve({ status: xhr.status, responseText: xhr.responseText || "", offset: offset });
+          resolve({
+            status: xhr.status,
+            responseText: xhr.responseText || "",
+            offset: offset,
+            retryAfterMs: parseRetryAfterMs(xhr.getResponseHeader("Retry-After"))
+          });
         };
         xhr.onerror = function () { reject(transportError("network", "", offset)); };
         xhr.ontimeout = function () { reject(transportError("timeout", "", offset)); };
@@ -316,6 +349,7 @@
 
   global.FlitnixUpload = {
     stream: stream,
-    streamResumable: streamResumable
+    streamResumable: streamResumable,
+    parseRetryAfterMs: parseRetryAfterMs
   };
 })(typeof self !== "undefined" ? self : this);
