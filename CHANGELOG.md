@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Automatic Stream Retry & Wi-Fi Roaming Recovery (Phase 1 — G7)**:
+  - Implemented `RetryPolicy` and error classification (`internal/client/retry.go`) with jittered exponential backoff (`1s`, `2s`, `4s`, `8s`, `15s` ±20%), `/ping` reachability probing, and automatic `HEAD` + `PATCH` offset recovery in Go CLI (`internal/client`, `send_cli.go`).
+  - Added bounded automatic chunk retry and `"Reconnecting — attempt X/Y"` progress UI in the mobile browser (`app.js`) with immediate `online` event wakeup and non-destructive batch sibling preservation.
+  - Preserved sessions, coordinator batches, and resumable staging across temporary Wi-Fi drops and IP roaming (`handleNetworkChange` + `AbortActiveUploads` interruption handling).
 - **Resumable Chunked Uploads & Crash-Safe Offset Recovery (Phase 1 — G1)**:
   - Implemented `HEAD` / `PATCH` resumable chunked upload endpoints on `/api/batches/{batchID}/items/{itemID}/content` and `/api/uploads/{id}/content` using `Upload-Offset`, `Upload-Length`, `Upload-Chunk-Size`, and `409 Conflict` offset-mismatch reconciliation while keeping legacy `PUT` streams compatible.
   - Added crash-safe chunk durability (`fsync(.part)` → HMAC-authenticated `.meta.tmp` with incremental SHA-256 hash state → `fsync` → atomic rename → `syncDir`) using an installation-derived `staging-meta-v1` subkey, rolling back uncommitted torn tails automatically.

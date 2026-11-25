@@ -16,6 +16,9 @@
   var MAX_PROGRESS_FAILURES = 20; // consecutive failed progress polls before giving up
   var PAINT_MIN_MS = 200;       // upload progress repaint throttle
   var CANCEL_RETRIES = 3;       // DELETE attempts before showing the real state
+  var MAX_AUTO_RETRIES = 6;     // bounded automatic reconnect attempts on transient drops
+  var RETRY_BASE_MS = 1000;     // 1s, 2s, 4s, 8s, 15s jittered exponential backoff
+  var RETRY_MAX_MS = 15000;
   var FIREFOX_LARGE_UPLOAD_BYTES = 256 * 1024 * 1024;
 
   // ------------------------------------------------------------------
@@ -493,6 +496,11 @@
       case "waiting": return "Waiting for approval on the desktop…";
       case "sending": return "Uploading…";
       case "resuming": return "Resuming upload…";
+      case "reconnecting":
+        if (job.reconnectAttempt && job.reconnectMax) {
+          return "Reconnecting — attempt " + job.reconnectAttempt + "/" + job.reconnectMax;
+        }
+        return "Reconnecting…";
       case "interrupted": return "Interrupted — ready to resume";
       case "paused": return "Paused";
       case "verifying": return "Verifying…";
@@ -513,6 +521,7 @@
     var r = job.refs;
     var text = phaseText(job);
     var active = job.phase === "sending" || job.phase === "resuming" ||
+                 job.phase === "reconnecting" ||
                  job.phase === "interrupted" || job.phase === "paused" ||
                  job.phase === "verifying" || job.phase === "done" ||
                  (job.phase === "canceling" && job.uploaded > 0);
@@ -547,8 +556,8 @@
     }
     // Button is state-dependent.
     var label, action;
-    if (job.phase === "sending" || job.phase === "resuming" || job.phase === "queued" ||
-        job.phase === "declaring" || job.phase === "waiting" || job.phase === "verifying") {
+    if (job.phase === "sending" || job.phase === "resuming" || job.phase === "reconnecting" ||
+        job.phase === "queued" || job.phase === "declaring" || job.phase === "waiting" || job.phase === "verifying") {
       label = "Cancel"; action = function () { requestCancel(job); };
     } else if (job.phase === "canceling") {
       label = "Canceling…"; action = function () { /* in flight */ };
@@ -609,7 +618,8 @@
         // object again. File objects are the only large references a
         // job holds and can then be released at the terminal phase.
         file: f, name: f.name, size: f.size, id: null, phase: "queued", uploaded: 0,
-        failures: 0, retryable: false, err: null,
+        failures: 0, autoRetries: 0, reconnectAttempt: 0, reconnectMax: MAX_AUTO_RETRIES,
+        retryable: false, err: null,
         xhr: null, timer: null, removed: false, cancelRequested: false,
         cancelInFlight: false,
         el: null, refs: null, btnAction: null, batchID: null, itemID: null,
@@ -665,12 +675,14 @@
       paint(job);
       return;
     }
-    if (job.phase === "waiting" || job.phase === "sending") {
+    if (job.phase === "waiting" || job.phase === "sending" || job.phase === "resuming" || job.phase === "reconnecting") {
       job.cancelRequested = true;
       job.phase = "canceling";
+      if (job.timer) { clearTimeout(job.timer); job.timer = null; }
       if (job.xhr) {
         try { job.xhr.abort(); } catch (e) { /* gone */ }
       }
+      setReconnecting(false, "upload");
       paint(job);
       cancelDeclaredItem(job, 1);
       return;
@@ -788,6 +800,8 @@
     if (appState.ended || !job.file) return;
     job.err = null;
     job.failures = 0;
+    job.autoRetries = 0;
+    job.reconnectAttempt = 0;
     job.speed = 0;
     job.eta = 0;
     job.retryable = false;
@@ -945,15 +959,15 @@
           phase = "failed"; err = "The desktop declined this file."; retryable = false; job.resumable = false; break;
         case "failed":
           phase = "failed"; err = item.error || "Transfer failed."; retryable = true; job.resumable = false; break;
-        case "interrupted":
-          decided = false;
-          if (!cancelPending && job.phase !== "resuming" && job.phase !== "sending") {
-            phase = "interrupted";
-            err = item.error || "Interrupted — ready to resume.";
-            retryable = true;
-            job.resumable = true;
-          }
-          break;
+      case "interrupted":
+        decided = false;
+        if (!cancelPending && job.phase !== "resuming" && job.phase !== "sending" && job.phase !== "reconnecting") {
+          phase = "interrupted";
+          err = item.error || "Interrupted — ready to resume.";
+          retryable = true;
+          job.resumable = true;
+        }
+        break;
         case "paused":
           decided = false;
           if (!cancelPending) {
@@ -1024,7 +1038,7 @@
       if (!head) {
         activeBatch = null; pumpBusy = false; syncWakeLock(); pump(); return;
       }
-      if (head.phase === "canceling" || head.phase === "interrupted" || head.phase === "paused") {
+      if (head.phase === "canceling" || head.phase === "interrupted" || head.phase === "paused" || head.phase === "reconnecting") {
         watchBatch(); return;
       }
       if (head.phase === "waiting" &&
@@ -1059,9 +1073,58 @@
     });
   }
 
+  function retryBackoffMs(attempt) {
+    var base = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * Math.pow(2, Math.max(0, attempt - 1)));
+    var jitter = 0.8 + 0.4 * Math.random();
+    return Math.round(base * jitter);
+  }
+
+  function scheduleAutoRetry(job, e) {
+    job.autoRetries = (job.autoRetries || 0) + 1;
+    if (job.autoRetries > MAX_AUTO_RETRIES || !job.file) {
+      setReconnecting(false, "upload");
+      job.phase = "interrupted";
+      job.err = (e && e.message) || "Upload interrupted — tap Resume to continue.";
+      job.retryable = true;
+      job.resumable = true;
+      paint(job);
+      pumpBusy = false;
+      syncWakeLock();
+      return;
+    }
+    job.phase = "reconnecting";
+    job.reconnectAttempt = job.autoRetries;
+    job.reconnectMax = MAX_AUTO_RETRIES;
+    job.resumable = true;
+    job.retryable = true;
+    job.err = null;
+    setReconnecting(true, "upload");
+    paint(job);
+
+    waitThen(job, retryBackoffMs(job.autoRetries), function () {
+      if (job.removed || appState.ended || job.cancelRequested || !activeBatch) {
+        setReconnecting(false, "upload");
+        return;
+      }
+      fetch("/ping", { cache: "no-store" }).then(function (pingRes) {
+        if (job.removed || appState.ended || job.cancelRequested) return;
+        if (!pingRes.ok) throw new Error("ping failed");
+        setReconnecting(false, "upload");
+        job.phase = "resuming";
+        paint(job);
+        sendBatchItem(job);
+      }).catch(function () {
+        if (job.removed || appState.ended || job.cancelRequested) return;
+        scheduleAutoRetry(job, e);
+      });
+    });
+  }
+
   function sendBatchItem(job) {
     putBatchContent(job).then(function () {
       if (job.phase === "done" || job.phase === "canceled" || job.phase === "discarded") return;
+      setReconnecting(false, "upload");
+      job.autoRetries = 0;
       job.phase = "done"; job.err = null; job.resumable = false; paint(job);
       if (activeBatch) {
         activeBatch.jobs.forEach(function (other) {
@@ -1074,12 +1137,14 @@
       if (!activeBatch || job.removed || appState.ended) return;
       if (job.phase === "done" || job.phase === "canceled" || job.phase === "discarded") return;
       if (job.cancelRequested) {
+        setReconnecting(false, "upload");
         job.phase = "canceling"; job.err = null; job.retryable = false;
         paint(job);
         if (activeBatch) watchBatch();
         return;
       }
       if (e && e.aborted) {
+        setReconnecting(false, "upload");
         job.phase = "canceled"; job.err = "Upload canceled."; job.resumable = false;
         job.batchID = null; job.itemID = null; job.uploaded = 0;
         activeBatch.jobs.forEach(function (other) {
@@ -1095,6 +1160,11 @@
         if (typeof e.offset === "number" && e.offset > job.uploaded) {
           job.uploaded = e.offset;
         }
+        if (e.transient) {
+          scheduleAutoRetry(job, e);
+          return;
+        }
+        setReconnecting(false, "upload");
         job.phase = e.paused ? "paused" : "interrupted";
         job.err = (e && e.message) || "Upload interrupted — tap Resume to continue.";
         job.retryable = true;
@@ -1178,9 +1248,10 @@
         pauseErr.offset = typeof res.offset === "number" ? res.offset : job.uploaded;
         throw pauseErr;
       }
-      if (code === "chunk_interrupted" || code === "stall" || res.status === 408) {
-        var intErr = new Error("Upload interrupted — tap Resume to continue from saved bytes.");
+      if (code === "chunk_interrupted" || code === "stall" || res.status === 408 || res.status === 502 || res.status === 503 || res.status === 504) {
+        var intErr = new Error("Upload interrupted — reconnecting to continue from saved bytes.");
         intErr.resumable = true;
+        intErr.transient = true;
         intErr.offset = typeof res.offset === "number" ? res.offset : job.uploaded;
         throw intErr;
       }
@@ -1196,14 +1267,16 @@
       var off = (err && typeof err.offset === "number") ? err.offset : job.uploaded;
       if (err && err.timeout) {
         diagnoseUpload("timeout", job);
-        var tErr = new Error("Upload timed out. Saved bytes are preserved — tap Resume to continue.");
+        var tErr = new Error("Upload timed out. Saved bytes are preserved — reconnecting.");
         tErr.resumable = true;
+        tErr.transient = true;
         tErr.offset = off;
         throw tErr;
       }
       diagnoseUpload("network-error", job);
-      var nErr = new Error("Network error while uploading. Saved bytes are preserved — tap Resume to continue.");
+      var nErr = new Error("Network error while uploading. Saved bytes are preserved — reconnecting.");
       nErr.resumable = true;
+      nErr.transient = true;
       nErr.offset = off;
       throw nErr;
     });

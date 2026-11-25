@@ -163,6 +163,13 @@ func runSendCLIWithStdin(args []string, stdin *os.File, stdout, stderr io.Writer
 	defer stop()
 
 	cli := client.NewClient(target)
+	if !*quiet && !*jsonOutput {
+		policy := client.DefaultRetryPolicy()
+		policy.OnRetry = func(attempt, maxAttempts int, delay time.Duration, err error) {
+			fmt.Fprintf(stderr, "\nReconnecting — attempt %d/%d (retrying in %s)...\n", attempt, maxAttempts, delay.Round(100*time.Millisecond))
+		}
+		cli.SetRetryPolicy(policy)
+	}
 
 	pingCtx, pingCancel := context.WithTimeout(ctx, 4*time.Second)
 	pingErr := cli.Ping(pingCtx)
