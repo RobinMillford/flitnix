@@ -300,8 +300,18 @@ func (s *Store) ReopenPartForAppend(partPath string, committedOffset int64) (*os
 // CommitResumablePart atomically hard-links partPath to a collision-safe final path
 // in finalDir, then cleans up partPath, metaPath, and meta temp files.
 func (s *Store) CommitResumablePart(partPath, metaPath, finalDir, finalName string) (string, error) {
+	return s.CommitResumablePartWithModTime(partPath, metaPath, finalDir, finalName, 0)
+}
+
+// CommitResumablePartWithModTime atomically publishes partPath while preserving an
+// optional Unix-millisecond modification timestamp when enabled on the Store.
+func (s *Store) CommitResumablePartWithModTime(partPath, metaPath, finalDir, finalName string, modTimeMs int64) (string, error) {
 	if !s.withinDir(partPath) || !s.withinDir(finalDir) {
 		return "", fmt.Errorf("transfer: refusing to commit outside receive directory")
+	}
+	if modTimeMs > 0 && s.PreserveModTimes() {
+		modTime := time.UnixMilli(modTimeMs)
+		_ = os.Chtimes(partPath, modTime, modTime)
 	}
 	for n := 0; n < commitVariants; n++ {
 		final := filepath.Join(finalDir, variantName(finalName, n))
@@ -510,6 +520,7 @@ type RestoreUploadOpts struct {
 	Root            string
 	RelativePath    string
 	Size            int64
+	LastModifiedMs  int64
 	ExpectedSHA256  string
 	State           State
 	Reason          string
@@ -559,6 +570,7 @@ func (s *Service) RestoreApprovedUpload(opts RestoreUploadOpts) error {
 		relativePath:    opts.RelativePath,
 		session:         opts.SessionKey,
 		size:            opts.Size,
+		lastModifiedMs:  opts.LastModifiedMs,
 		created:         created,
 		managed:         opts.BatchLinked,
 		seq:             s.nextSeq,
@@ -799,6 +811,7 @@ func (s *Service) SubmitChunk(
 	var partPath, metaPath, finalDir, name, root, relPath string
 	var createdAt time.Time
 	var expectedSHA, batchID, itemID string
+	var lastModMs int64
 
 	name = u.name
 	root = u.root
@@ -807,6 +820,7 @@ func (s *Service) SubmitChunk(
 	expectedSHA = u.expectedSHA256
 	batchID = u.batchID
 	itemID = u.itemID
+	lastModMs = u.lastModifiedMs
 
 	metaKey := s.store.MetaKey()
 	if u.partPath == "" {
@@ -850,6 +864,7 @@ func (s *Service) SubmitChunk(
 			FinalName:       name,
 			PartRelPath:     filepath.ToSlash(partRel),
 			DeclaredSize:    u.size,
+			LastModifiedMs:  lastModMs,
 			CommittedOffset: 0,
 			ChunkSize:       DefaultChunkSize,
 			ExpectedSHA256:  expectedSHA,
@@ -1070,6 +1085,7 @@ func (s *Service) SubmitChunk(
 		FinalName:       name,
 		PartRelPath:     filepath.ToSlash(partRel),
 		DeclaredSize:    u.size,
+		LastModifiedMs:  lastModMs,
 		CommittedOffset: newOffset,
 		ChunkSize:       DefaultChunkSize,
 		ExpectedSHA256:  expectedSHA,
@@ -1184,7 +1200,7 @@ func (s *Service) SubmitChunk(
 	u.pub = pubPublishing
 	u.mu.Unlock()
 
-	finalPath, cerr := s.store.CommitResumablePart(partPath, metaPath, finalDir, name)
+	finalPath, cerr := s.store.CommitResumablePartWithModTime(partPath, metaPath, finalDir, name, lastModMs)
 	u.mu.Lock()
 	if cerr != nil {
 		u.reason = cerr.Error()

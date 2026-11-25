@@ -909,6 +909,7 @@ export namespace main {
 	    downloadDir: string;
 	    effectiveDir: string;
 	    autoStartSession: boolean;
+	    preserveModTimes: boolean;
 	    preferredInterface: string;
 
 	    static createFrom(source: any = {}) {
@@ -923,6 +924,7 @@ export namespace main {
 	        this.downloadDir = source["downloadDir"];
 	        this.effectiveDir = source["effectiveDir"];
 	        this.autoStartSession = source["autoStartSession"];
+	        this.preserveModTimes = source["preserveModTimes"] !== undefined ? source["preserveModTimes"] : true;
 	        this.preferredInterface = source["preferredInterface"];
 	    }
 	}

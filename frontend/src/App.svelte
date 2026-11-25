@@ -83,12 +83,13 @@
 
   // Persistent Settings state
   let settingsState: main.SettingsView = {
-    version: 1,
+    version: 2,
     theme: getInitialTheme(),
     locale: 'system',
     downloadDir: '',
     effectiveDir: '',
     autoStartSession: false,
+    preserveModTimes: true,
     preferredInterface: ''
   }
   let settingsSavedAlert = ''

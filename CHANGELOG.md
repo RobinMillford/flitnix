@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Original Modification Timestamp Preservation (Phase 1 — G22)**:
+  - Propagated validated sender modification timestamps (`lastModifiedMs`) from the mobile browser (`File.lastModified`) and Go CLI (`client.BuildManifest`) through `POST /api/batches` and `POST /api/uploads`, persisting them in recovery journals and resumable `.meta` sidecars across pauses and restarts.
+  - Applied `os.Chtimes` atomically to staged `.part` files prior to publication in both single-pass `PUT` and resumable `PATCH` commits so received files retain their original capture/edit dates immediately upon appearing on disk.
+  - Added the `"Preserve original file dates"` setting (`PreserveModTimes`, default ON) in `internal/settings`, Wails bindings, and `SettingsView.svelte`.
 - **Browseable Shared-Folder Explorer (Phase 1 — G31)**:
   - Assigned opaque per-item IDs inside shared folders (`transfer.SourceItem.ID`) and added strictly confined hierarchical folder browsing (`GET /api/sources/{id}/items?prefix=&cursor=&limit=`) without exposing host filesystem paths.
   - Extended `POST /api/download-grants` with selective folder item IDs (`sourceId` + `itemIds`): downloading one file streams directly with full G2 byte-range resumption (`Accept-Ranges: bytes`), while selecting multiple files across subdirectories streams a targeted ZIP archive.

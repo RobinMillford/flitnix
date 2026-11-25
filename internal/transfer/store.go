@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/itsyamin/flitnix/internal/secfile"
 )
@@ -41,10 +43,11 @@ const DefaultReceiveSubpath = "Downloads/Flitnix"
 // are safe for concurrent use; PartFile instances are used by exactly one
 // streaming goroutine.
 type Store struct {
-	mu      sync.RWMutex
-	dir     string
-	link    func(oldname, newname string) error
-	metaKey []byte
+	mu               sync.RWMutex
+	dir              string
+	link             func(oldname, newname string) error
+	metaKey          []byte
+	preserveModTimes atomic.Bool
 }
 
 // StoreConfig configures a Store.
@@ -84,7 +87,20 @@ func NewStore(cfg StoreConfig) (*Store, error) {
 			return nil, fmt.Errorf("transfer: generating ephemeral metadata key: %w", rerr)
 		}
 	}
-	return &Store{dir: abs, metaKey: key}, nil
+	st := &Store{dir: abs, metaKey: key}
+	st.preserveModTimes.Store(true)
+	return st, nil
+}
+
+// SetPreserveModTimes controls whether committed uploads adopt the sender's
+// original modification timestamp when available.
+func (s *Store) SetPreserveModTimes(enabled bool) {
+	s.preserveModTimes.Store(enabled)
+}
+
+// PreserveModTimes reports whether original modification timestamp preservation is active.
+func (s *Store) PreserveModTimes() bool {
+	return s.preserveModTimes.Load()
 }
 
 // Dir returns the absolute receive directory.
@@ -293,14 +309,23 @@ func (s *Store) withinDir(path string) bool {
 // Commit on success, Abort on any failure or cancellation. A PartFile is
 // used by exactly one goroutine at a time.
 type PartFile struct {
-	store    *Store
-	f        *os.File
-	path     string // absolute path of the part file
-	name     string // sanitized final filename candidate
-	finalDir string
+	store     *Store
+	f         *os.File
+	path      string // absolute path of the part file
+	name      string // sanitized final filename candidate
+	finalDir  string
+	modTimeMs int64
 
 	mu      sync.Mutex
 	decided bool // commit or abort already decided the fate of the part file
+}
+
+// SetModTimeMs records an optional sender modification timestamp (Unix ms) to apply
+// atomically prior to publishing the part file.
+func (p *PartFile) SetModTimeMs(ms int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.modTimeMs = ms
 }
 
 // OpenPart creates a unique part file for the sanitized name in the receive
@@ -526,6 +551,10 @@ func (p *PartFile) Commit() (string, error) {
 	if err := p.f.Close(); err != nil {
 		_ = os.Remove(p.path)
 		return "", fmt.Errorf("transfer: closing received file failed: %w", err)
+	}
+	if p.modTimeMs > 0 && p.store.PreserveModTimes() {
+		modTime := time.UnixMilli(p.modTimeMs)
+		_ = os.Chtimes(p.path, modTime, modTime)
 	}
 
 	for n := 0; n < commitVariants; n++ {
