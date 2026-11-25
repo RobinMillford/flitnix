@@ -13,6 +13,7 @@ import (
 	"mime"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -66,8 +67,54 @@ func serveSourcesList(svcs *Services) http.HandlerFunc {
 	}
 }
 
+func serveSourceItems(svcs *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess := sessionFrom(r)
+		if sess == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		q := r.URL.Query()
+		prefix := q.Get("prefix")
+		cursor := 0
+		if rawCursor := q.Get("cursor"); rawCursor != "" {
+			v, err := strconv.Atoi(rawCursor)
+			if err != nil || v < 0 {
+				writeError(w, http.StatusBadRequest, "invalid cursor")
+				return
+			}
+			cursor = v
+		}
+		limit := transfer.DefaultSourceBrowseLimit
+		if rawLimit := q.Get("limit"); rawLimit != "" {
+			v, err := strconv.Atoi(rawLimit)
+			if err != nil || v <= 0 {
+				writeError(w, http.StatusBadRequest, "invalid limit")
+				return
+			}
+			limit = v
+		}
+		page, err := svcs.Registry.BrowseSource(r.PathValue("id"), prefix, cursor, limit)
+		if err != nil {
+			switch {
+			case errors.Is(err, transfer.ErrInvalidBrowsePrefix):
+				writeError(w, http.StatusBadRequest, "invalid browse prefix")
+			case errors.Is(err, transfer.ErrNotFound):
+				writeError(w, http.StatusNotFound, "shared source or path not found")
+			default:
+				writeError(w, http.StatusInternalServerError, "could not browse shared source")
+			}
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusOK, page)
+	}
+}
+
 type createGrantRequest struct {
 	SourceIDs []string `json:"sourceIds"`
+	SourceID  string   `json:"sourceId,omitempty"`
+	ItemIDs   []string `json:"itemIds,omitempty"`
 }
 type createGrantResponse struct {
 	DownloadURL string `json:"downloadUrl"`
@@ -96,33 +143,81 @@ func createDownloadGrant(svcs *Services, grants *DownloadGrantStore) http.Handle
 			return
 		}
 		var req createGrantRequest
-		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 128*1024)).Decode(&req) != nil || len(req.SourceIDs) == 0 || len(req.SourceIDs) > maxGrantSources {
+		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 512*1024)).Decode(&req) != nil {
 			writeError(w, http.StatusBadRequest, "invalid source selection")
 			return
 		}
-		sources := make([]archiveSource, 0, len(req.SourceIDs))
-		seen := make(map[string]bool, len(req.SourceIDs))
-		for _, id := range req.SourceIDs {
-			if id == "" || seen[id] {
+
+		var sources []archiveSource
+		if len(req.ItemIDs) > 0 {
+			sourceID := req.SourceID
+			if sourceID == "" && len(req.SourceIDs) == 1 {
+				sourceID = req.SourceIDs[0]
+			}
+			if sourceID == "" || (len(req.SourceIDs) > 1) || (req.SourceID != "" && len(req.SourceIDs) == 1 && req.SourceIDs[0] != req.SourceID) {
 				writeError(w, http.StatusBadRequest, "invalid source selection")
 				return
 			}
-			seen[id] = true
-			if source, ok := svcs.Registry.GetSource(id); ok {
-				planned := archiveSource{Kind: source.Kind, Name: source.Name, Items: source.Items, Empty: source.EmptyDirs}
-				if source.Kind == transfer.SourceKindFile && len(source.Items) == 1 {
-					if f, ok := svcs.Registry.Get(source.ID); ok {
-						planned.File = f
-					} else {
-						planned.File = transfer.SharedFile{ID: source.ID, Name: source.Name, Path: source.Items[0].Path, Size: source.Items[0].Size}
-					}
+			source, resolved, err := svcs.Registry.ResolveSourceItems(sourceID, req.ItemIDs)
+			if err != nil {
+				if errors.Is(err, transfer.ErrNotFound) {
+					writeError(w, http.StatusNotFound, "source item not found")
+					return
 				}
-				sources = append(sources, planned)
-			} else if file, ok := svcs.Registry.Get(id); ok {
-				sources = append(sources, archiveSource{Kind: transfer.SourceKindFile, Name: file.Name, File: file})
-			} else {
-				writeError(w, http.StatusNotFound, "source not found")
+				writeError(w, http.StatusBadRequest, "invalid source selection")
 				return
+			}
+			if len(resolved) == 1 {
+				name := cleanDownloadName(path.Base(resolved[0].RelativePath))
+				if name == "" {
+					name = "download"
+				}
+				sources = []archiveSource{{
+					Kind: transfer.SourceKindFile,
+					Name: name,
+					File: transfer.SharedFile{
+						ID:   resolved[0].ID,
+						Name: name,
+						Path: resolved[0].Path,
+						Size: resolved[0].Size,
+					},
+				}}
+			} else {
+				sources = []archiveSource{{
+					Kind:  transfer.SourceKindFolder,
+					Name:  source.Name,
+					Items: resolved,
+				}}
+			}
+		} else {
+			if len(req.SourceIDs) == 0 || len(req.SourceIDs) > maxGrantSources {
+				writeError(w, http.StatusBadRequest, "invalid source selection")
+				return
+			}
+			sources = make([]archiveSource, 0, len(req.SourceIDs))
+			seen := make(map[string]bool, len(req.SourceIDs))
+			for _, id := range req.SourceIDs {
+				if id == "" || seen[id] {
+					writeError(w, http.StatusBadRequest, "invalid source selection")
+					return
+				}
+				seen[id] = true
+				if source, ok := svcs.Registry.GetSource(id); ok {
+					planned := archiveSource{Kind: source.Kind, Name: source.Name, Items: source.Items, Empty: source.EmptyDirs}
+					if source.Kind == transfer.SourceKindFile && len(source.Items) == 1 {
+						if f, ok := svcs.Registry.Get(source.ID); ok {
+							planned.File = f
+						} else {
+							planned.File = transfer.SharedFile{ID: source.ID, Name: source.Name, Path: source.Items[0].Path, Size: source.Items[0].Size}
+						}
+					}
+					sources = append(sources, planned)
+				} else if file, ok := svcs.Registry.Get(id); ok {
+					sources = append(sources, archiveSource{Kind: transfer.SourceKindFile, Name: file.Name, File: file})
+				} else {
+					writeError(w, http.StatusNotFound, "source not found")
+					return
+				}
 			}
 		}
 		grant, progress, err := grants.create(sess, sources, grantFilename(sources))

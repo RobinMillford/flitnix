@@ -69,9 +69,20 @@
   var queueEl = document.getElementById("queue");
   var filesEl = document.getElementById("files");
   var filesEmptyEl = document.getElementById("files-empty");
+  var folderNavEl = document.getElementById("folder-nav");
   var refreshBtn = document.getElementById("refresh-btn");
   var downloadSelectedBtn = document.getElementById("download-selected-btn");
   var filesRefreshGeneration = 0;
+  var browseState = {
+    source: null,
+    prefix: "",
+    items: [],
+    totalEntries: 0,
+    hasMore: false,
+    nextCursor: null,
+    selected: {},
+    itemNames: {}
+  };
 
   var textForm = document.getElementById("text-form");
   var textInput = document.getElementById("text-input");
@@ -1292,10 +1303,20 @@
     refreshBtn.textContent = "Loading…";
     api("/api/sources").then(function (data) {
       if (appState.ended || generation !== filesRefreshGeneration) return;
-      drawFiles(data || []);
+      var list = Array.isArray(data) ? data : [];
+      if (browseState.source) {
+        var stillShared = list.filter(function (s) { return s && s.id === browseState.source.id; })[0];
+        if (stillShared) {
+          browseState.source = stillShared;
+          return loadFolderPage(stillShared, browseState.prefix, 0, false);
+        }
+        resetBrowseState();
+      }
+      drawFiles(list);
     }).catch(function (err) {
       if (appState.ended || (err && err.silent)) return;
       if (generation === filesRefreshGeneration) {
+        resetBrowseState();
         drawFiles([]);
         filesEmptyEl.textContent = err.message || "Could not load the desktop files.";
       }
@@ -1307,7 +1328,26 @@
     });
   }
 
+  function resetBrowseState() {
+    browseState.source = null;
+    browseState.prefix = "";
+    browseState.items = [];
+    browseState.totalEntries = 0;
+    browseState.hasMore = false;
+    browseState.nextCursor = null;
+    browseState.selected = {};
+    browseState.itemNames = {};
+    if (folderNavEl) {
+      folderNavEl.hidden = true;
+      folderNavEl.textContent = "";
+    }
+  }
+
   function drawFiles(list) {
+    if (folderNavEl) {
+      folderNavEl.hidden = true;
+      folderNavEl.textContent = "";
+    }
     filesEl.textContent = "";
     var items = (Array.isArray(list) ? list : []).filter(function (f) {
       return f && f.id && f.name && (f.kind === "file" || f.kind === "folder");
@@ -1324,6 +1364,7 @@
     items.forEach(function (f) {
       filesEl.appendChild(fileRow(f));
     });
+    updateDownloadSelection();
   }
 
   function fileRow(f) {
@@ -1340,12 +1381,171 @@
     check.setAttribute("aria-label", "Select " + f.name);
     check.addEventListener("change", updateDownloadSelection);
     li.appendChild(check);
+    li.appendChild(left);
+    var actions = el("div", "file-item__actions");
+    if (f.kind === "folder") {
+      var browseBtn = el("button", "btn btn--small btn--ghost", "Browse");
+      browseBtn.type = "button";
+      browseBtn.setAttribute("aria-label", "Browse folder " + f.name);
+      browseBtn.addEventListener("click", function () {
+        resetBrowseState();
+        browseState.source = f;
+        loadFolderPage(f, "", 0, false);
+      });
+      actions.appendChild(browseBtn);
+    }
     var btn = el("button", "btn btn--small");
     btn.type = "button";
     btn.textContent = "Download";
     btn.addEventListener("click", function () { downloadSources([f], btn); });
+    actions.appendChild(btn);
+    li.appendChild(actions);
+    return li;
+  }
+
+  function loadFolderPage(source, prefix, cursor, append) {
+    var url = "/api/sources/" + encodeURIComponent(source.id) + "/items?prefix=" + encodeURIComponent(prefix || "") +
+      "&cursor=" + encodeURIComponent(String(cursor || 0)) + "&limit=200";
+    return api(url).then(function (page) {
+      if (appState.ended) return;
+      browseState.source = source;
+      browseState.prefix = page.prefix || "";
+      browseState.totalEntries = page.totalEntries || 0;
+      browseState.hasMore = Boolean(page.hasMore);
+      browseState.nextCursor = typeof page.nextCursor === "number" ? page.nextCursor : null;
+      var newItems = Array.isArray(page.items) ? page.items : [];
+      browseState.items = append ? browseState.items.concat(newItems) : newItems;
+      newItems.forEach(function (entry) {
+        if (entry && entry.id) {
+          browseState.itemNames[entry.id] = entry.name;
+        }
+      });
+      renderFolderView();
+    }).catch(function (err) {
+      if (appState.ended || (err && err.silent)) return;
+      filesEmptyEl.hidden = false;
+      filesEmptyEl.textContent = (err && err.message) || "Could not open folder.";
+    });
+  }
+
+  function renderFolderBreadcrumbs() {
+    if (!folderNavEl || !browseState.source) return;
+    folderNavEl.hidden = false;
+    folderNavEl.textContent = "";
+
+    var backBtn = el("button", "btn btn--small btn--ghost", "← All shared");
+    backBtn.type = "button";
+    backBtn.addEventListener("click", function () {
+      resetBrowseState();
+      refreshFiles();
+    });
+    folderNavEl.appendChild(backBtn);
+
+    var crumbs = el("nav", "breadcrumbs");
+    crumbs.setAttribute("aria-label", "Folder path");
+
+    function addCrumb(label, targetPrefix, isCurrent) {
+      var b = el("button", "breadcrumb-btn", label);
+      b.type = "button";
+      if (isCurrent) {
+        b.setAttribute("aria-current", "location");
+        b.disabled = true;
+      } else {
+        b.addEventListener("click", function () {
+          loadFolderPage(browseState.source, targetPrefix, 0, false);
+        });
+      }
+      crumbs.appendChild(b);
+    }
+
+    var segs = browseState.prefix ? browseState.prefix.split("/").filter(Boolean) : [];
+    addCrumb(browseState.source.name, "", segs.length === 0);
+    var acc = "";
+    segs.forEach(function (seg, idx) {
+      acc = acc ? (acc + "/" + seg) : seg;
+      crumbs.appendChild(el("span", "breadcrumb-sep", "/"));
+      var target = acc;
+      addCrumb(seg, target, idx === segs.length - 1);
+    });
+    folderNavEl.appendChild(crumbs);
+  }
+
+  function renderFolderView() {
+    renderFolderBreadcrumbs();
+    filesEl.textContent = "";
+    var entries = browseState.items || [];
+    filesEmptyEl.hidden = entries.length > 0;
+    if (!entries.length) {
+      filesEmptyEl.textContent = "This folder is empty.";
+    }
+    var actions = document.getElementById("file-actions");
+    if (actions) actions.hidden = false;
+    downloadSelectedBtn.hidden = false;
+
+    entries.forEach(function (entry) {
+      filesEl.appendChild(browseEntryRow(entry));
+    });
+
+    if (browseState.hasMore && browseState.nextCursor !== null) {
+      var moreLi = el("li", "");
+      var moreBtn = el("button", "btn btn--small btn--ghost browse-load-more",
+        "Load more (" + entries.length + " / " + browseState.totalEntries + ")");
+      moreBtn.type = "button";
+      moreBtn.addEventListener("click", function () {
+        moreBtn.disabled = true;
+        moreBtn.textContent = "Loading…";
+        loadFolderPage(browseState.source, browseState.prefix, browseState.nextCursor, true);
+      });
+      moreLi.appendChild(moreBtn);
+      filesEl.appendChild(moreLi);
+    }
+    updateDownloadSelection();
+  }
+
+  function browseEntryRow(entry) {
+    var li = el("li", "file-item");
+    var left = el("div", "file-item__meta");
+    if (entry.kind === "dir") {
+      left.appendChild(el("span", "file-item__name", "📁 " + entry.name + "/"));
+      left.appendChild(el("span", "file-item__size",
+        (entry.itemCount || 0) + " items · " + fmtBytes(entry.totalBytes || 0)));
+      li.appendChild(left);
+      var openBtn = el("button", "btn btn--small btn--ghost", "Open");
+      openBtn.type = "button";
+      openBtn.setAttribute("aria-label", "Open folder " + entry.name);
+      openBtn.addEventListener("click", function () {
+        loadFolderPage(browseState.source, entry.path, 0, false);
+      });
+      li.appendChild(openBtn);
+      return li;
+    }
+
+    var check = document.createElement("input");
+    check.type = "checkbox";
+    check.className = "source-check browse-item-check";
+    check.value = entry.id;
+    check.checked = Boolean(browseState.selected[entry.id]);
+    check.setAttribute("aria-label", "Select " + entry.name);
+    check.addEventListener("change", function () {
+      if (check.checked) {
+        browseState.selected[entry.id] = true;
+      } else {
+        delete browseState.selected[entry.id];
+      }
+      updateDownloadSelection();
+    });
+    li.appendChild(check);
+
+    left.appendChild(el("span", "file-item__name", entry.name));
+    left.appendChild(el("span", "file-item__size", fmtBytes(entry.size || 0)));
     li.appendChild(left);
-    li.appendChild(btn);
+
+    var dlBtn = el("button", "btn btn--small", "Download");
+    dlBtn.type = "button";
+    dlBtn.addEventListener("click", function () {
+      downloadSelectedFolderItems(browseState.source, [entry.id], [{ id: entry.id, name: entry.name }], dlBtn);
+    });
+    li.appendChild(dlBtn);
     return li;
   }
 
@@ -1441,7 +1641,9 @@
         card.setMessage("Verification failed — Checksum mismatch! Actual: " + actualDigest.slice(0, 16) + "…, Expected: " + wantDigest.slice(0, 16) + "…");
         var retry = el("button", "btn btn--small", "Retry Download");
         retry.type = "button";
-        retry.addEventListener("click", function () { downloadSources(sources, btn); });
+        retry.addEventListener("click", function () {
+          if (card && card.retry) card.retry(); else downloadSources(sources, btn);
+        });
         card.setActions([retry]);
       }
     }
@@ -1502,13 +1704,21 @@
   }
 
   function downloadSources(sources, btn) {
+    return runDownloadGrant({ sourceIds: sources.map(function (source) { return source.id; }) }, sources, btn);
+  }
+
+  function downloadSelectedFolderItems(source, itemIds, displaySources, btn) {
+    return runDownloadGrant({ sourceId: source.id, itemIds: itemIds }, displaySources, btn);
+  }
+
+  function runDownloadGrant(grantBody, sources, btn) {
     btn.disabled = true;
     var prev = btn.textContent;
     btn.textContent = "Preparing…";
     fetch("/api/download-grants", {
       method: "POST",
       headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
-      body: JSON.stringify({ sourceIds: sources.map(function (source) { return source.id; }) }),
+      body: JSON.stringify(grantBody),
       cache: "no-store"
     }).then(function (res) {
       if (res.status === 401) {
@@ -1533,6 +1743,9 @@
         activeDownloads[dlKey] = true;
         syncWakeLock();
         var card = renderDownloadIntegrityCard(grant, sources, btn);
+        if (card) {
+          card.retry = function () { runDownloadGrant(grantBody, sources, btn); };
+        }
 
         // Check if browser supports showSaveFilePicker in secure context
         if (typeof window.showSaveFilePicker === "function") {
@@ -1583,7 +1796,9 @@
                         card.setMessage("Verification failed — Streamed checksum mismatch!");
                         var retry = el("button", "btn btn--small", "Retry Download");
                         retry.type = "button";
-                        retry.addEventListener("click", function () { downloadSources(sources, btn); });
+                        retry.addEventListener("click", function () {
+                          if (card && card.retry) card.retry(); else downloadSources(sources, btn);
+                        });
                         card.setActions([retry]);
                       }
                     } else if (card) {
@@ -1778,8 +1993,15 @@
   }
 
   function updateDownloadSelection() {
+    if (browseState.source) {
+      var ids = Object.keys(browseState.selected);
+      downloadSelectedBtn.disabled = ids.length === 0;
+      downloadSelectedBtn.textContent = ids.length > 0 ? ("Download selected (" + ids.length + ")") : "Download selected";
+      return;
+    }
     var selected = filesEl.querySelectorAll(".source-check:checked");
     downloadSelectedBtn.disabled = selected.length === 0;
+    downloadSelectedBtn.textContent = "Download selected";
   }
 
   // Follows one archive/file download. It polls only while the download is
@@ -1806,7 +2028,9 @@
             if (sources && btn) {
               var retryBtn = el("button", "btn btn--small", "Retry Download");
               retryBtn.type = "button";
-              retryBtn.addEventListener("click", function () { downloadSources(sources, btn); });
+              retryBtn.addEventListener("click", function () {
+                if (card && card.retry) card.retry(); else downloadSources(sources, btn);
+              });
               card.setActions([retryBtn]);
             }
           }
@@ -1839,7 +2063,9 @@
             verifyLabel.appendChild(fileInput);
             var redownloadBtn = el("button", "btn btn--small btn--ghost", "Download Again");
             redownloadBtn.type = "button";
-            redownloadBtn.addEventListener("click", function () { downloadSources(sources, btn); });
+            redownloadBtn.addEventListener("click", function () {
+              if (card && card.retry) card.retry(); else downloadSources(sources, btn);
+            });
             card.setActions([verifyLabel, redownloadBtn]);
           }
           return;
@@ -2063,6 +2289,13 @@
     });
     refreshBtn.addEventListener("click", refreshFiles);
     downloadSelectedBtn.addEventListener("click", function () {
+      if (browseState.source) {
+        var ids = Object.keys(browseState.selected);
+        if (!ids.length) return;
+        var label = ids.length === 1 ? (browseState.itemNames[ids[0]] || "selected file") : (browseState.source.name + ".zip");
+        downloadSelectedFolderItems(browseState.source, ids, [{ id: ids[0], name: label }], downloadSelectedBtn);
+        return;
+      }
       var selected = Array.prototype.slice.call(filesEl.querySelectorAll(".source-check:checked"));
       var sources = selected.map(function (input) {
         return { id: input.value, name: input.getAttribute("aria-label") || "selected source" };
