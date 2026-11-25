@@ -692,9 +692,12 @@ func handleUploadDeclare(svcs *Services, _ time.Duration) http.HandlerFunc {
 		switch {
 		case err == nil:
 			if meta.LastModifiedMs > 0 {
-				if mErr := svcs.Transfers.SetUploadModTime(up.ID, meta.LastModifiedMs); mErr == nil {
-					up.LastModifiedMs = meta.LastModifiedMs
+				if mErr := svcs.Transfers.SetUploadModTime(up.ID, meta.LastModifiedMs); mErr != nil {
+					_ = svcs.Transfers.Cancel(up.ID)
+					writeError(w, http.StatusBadRequest, "invalid lastModifiedMs")
+					return
 				}
+				up.LastModifiedMs = meta.LastModifiedMs
 			}
 			if autoApproveUpload {
 				if decidedUp, decErr := svcs.Transfers.Decide(up.ID, true); decErr == nil {
@@ -1053,7 +1056,10 @@ func handleBatchCreate(svcs *Services) http.HandlerFunc {
 				return
 			}
 			if item.LastModifiedMs > 0 {
-				_ = svcs.Transfers.SetUploadModTime(up.ID, item.LastModifiedMs)
+				if mErr := svcs.Transfers.SetUploadModTime(up.ID, item.LastModifiedMs); mErr != nil {
+					abort(fmt.Errorf("%w: invalid lastModifiedMs: %v", transfer.ErrInvalidBatch, mErr))
+					return
+				}
 			}
 			declared = append(declared, up.ID)
 			quotaItems = append(quotaItems, transfer.QuotaBatchItem{ID: up.ID, Bytes: item.DeclaredSize})
