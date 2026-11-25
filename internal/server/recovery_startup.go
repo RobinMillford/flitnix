@@ -154,8 +154,32 @@ func installCoordinatorRecovery(store *recovery.Store, svcs *Services) error {
 		return nil
 	}
 	for _, record := range store.State().Batches {
-		if err := svcs.Coordinator.RestoreBatch(batchFromRecord(record)); err != nil {
+		b := batchFromRecord(record)
+		if err := svcs.Coordinator.RestoreBatch(b); err != nil {
 			return fmt.Errorf("restore batch %s: %w", record.ID, err)
+		}
+		if svcs.Transfers != nil && svcs.Transfers.Quota() != nil &&
+			b.Direction == transfer.DirectionPhoneToDesktop &&
+			b.ApprovalState == transfer.ApprovalApproved &&
+			b.State != transfer.BatchStateCompleted &&
+			b.State != transfer.BatchStateCanceled &&
+			b.State != transfer.BatchStateRejected &&
+			b.State != transfer.BatchStateFailed {
+			targetDir := ""
+			if svcs.Transfers.Store() != nil {
+				targetDir = svcs.Transfers.Store().Dir()
+			}
+			for _, item := range b.Items {
+				if item.State == transfer.ItemStateCompleted || item.State == transfer.ItemStateCanceled ||
+					item.State == transfer.ItemStateRejected || item.State == transfer.ItemStateFailed {
+					continue
+				}
+				resID := item.ContentID
+				if resID == "" {
+					resID = item.ID
+				}
+				svcs.Transfers.Quota().RestoreReservation(resID, b.SessionKey, targetDir, item.DeclaredSize, item.Transferred)
+			}
 		}
 	}
 	svcs.Coordinator.SetPersistHook(func(ev transfer.LifecycleEvent) error {

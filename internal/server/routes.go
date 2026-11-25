@@ -694,6 +694,9 @@ func handleUploadDeclare(svcs *Services, _ time.Duration) http.HandlerFunc {
 			writeError(w, http.StatusServiceUnavailable,
 				"too many pending uploads; wait for the desktop to decide on the existing ones")
 			return
+		case errors.Is(err, transfer.ErrInsufficientStorage):
+			writeInsufficientStorage(w)
+			return
 		default:
 			writeError(w, http.StatusInternalServerError, "upload declaration failed")
 			return
@@ -955,16 +958,44 @@ func handleBatchCreate(svcs *Services) http.HandlerFunc {
 			}
 		}
 
+		var quotaTempID string
+		if quota := svcs.Transfers.Quota(); quota != nil {
+			dir := svcs.Transfers.Store().Dir()
+			if autoApproveBatch {
+				tempID, qidErr := transfer.NewOpaqueID()
+				if qidErr != nil {
+					writeBatchError(w, qidErr)
+					return
+				}
+				quotaTempID = "batch-pending:" + tempID
+				if qerr := quota.Reserve(quotaTempID, sess.Key(), dir, validated.TotalBytes); qerr != nil {
+					writeBatchError(w, qerr)
+					return
+				}
+			} else {
+				if _, qerr := quota.CheckAvailable(dir, validated.TotalBytes); qerr != nil {
+					writeBatchError(w, qerr)
+					return
+				}
+			}
+		}
+
 		var resolvedRoot string
 		if manifest.Kind == transfer.BatchKindFolder {
 			resolvedRoot, err = svcs.Transfers.Store().AllocateFolderRoot(manifest.RootName)
 			if err != nil {
+				if quotaTempID != "" {
+					svcs.Transfers.Quota().Release(quotaTempID)
+				}
 				writeBatchError(w, err)
 				return
 			}
 		}
 		view, err := svcs.Coordinator.CreateBatch(sess.Key(), manifest)
 		if err != nil {
+			if quotaTempID != "" {
+				svcs.Transfers.Quota().Release(quotaTempID)
+			}
 			// Undo the on-disk root reservation: the batch will never
 			// exist, so the empty directory must not linger on the
 			// desktop's receive disk.
@@ -977,7 +1008,11 @@ func handleBatchCreate(svcs *Services) http.HandlerFunc {
 		// requests. A failure part-way must leave nothing behind: cancel the
 		// records already declared as well as the batch itself.
 		declared := make([]string, 0, len(view.Items))
+		quotaItems := make([]transfer.QuotaBatchItem, 0, len(view.Items))
 		abort := func(cause error) {
+			if quotaTempID != "" {
+				svcs.Transfers.Quota().Release(quotaTempID)
+			}
 			// A failed reserve loop cannot have streamed content in the
 			// pre-approval window (content needs an approved item), so
 			// the discard sees an empty directory; nothing is removed
@@ -996,16 +1031,21 @@ func handleBatchCreate(svcs *Services) http.HandlerFunc {
 			if manifest.Kind == transfer.BatchKindFolder {
 				root, relative = resolvedRoot, item.RelativePath
 			}
-			up, declareErr := svcs.Transfers.DeclareBatchItemWithDigest(sess.Key(), root, relative, item.DisplayName, item.DeclaredSize, item.SHA256, authDeviceID)
+			up, declareErr := svcs.Transfers.DeclareBatchItemPreReserved(sess.Key(), root, relative, item.DisplayName, item.DeclaredSize, item.SHA256, authDeviceID)
 			if declareErr != nil {
 				abort(declareErr)
 				return
 			}
 			declared = append(declared, up.ID)
+			quotaItems = append(quotaItems, transfer.QuotaBatchItem{ID: up.ID, Bytes: item.DeclaredSize})
 			if mapErr := svcs.Coordinator.SetItemContentID(sess.Key(), view.ID, item.ID, up.ID); mapErr != nil {
 				abort(mapErr)
 				return
 			}
+		}
+		if quotaTempID != "" {
+			svcs.Transfers.Quota().Replace(quotaTempID, sess.Key(), svcs.Transfers.Store().Dir(), quotaItems)
+			quotaTempID = ""
 		}
 		if autoApproveBatch {
 			if decErr := svcs.Transfers.DecideBatchItems(declared, true); decErr != nil {
@@ -1253,6 +1293,13 @@ func failBatch(svcs *Services, sessionKey string, lease transfer.TransferLease, 
 	}
 }
 
+func writeInsufficientStorage(w http.ResponseWriter) {
+	writeJSON(w, http.StatusInsufficientStorage, map[string]string{
+		"code":  "insufficient_storage",
+		"error": "Desktop storage is low. Free up disk space before sending these files.",
+	})
+}
+
 func writeBatchError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, transfer.ErrBatchNotFound), errors.Is(err, transfer.ErrItemNotFound),
@@ -1264,6 +1311,8 @@ func writeBatchError(w http.ResponseWriter, err error) {
 	case errors.Is(err, transfer.ErrInvalidBatch), errors.Is(err, transfer.ErrInvalidFilename),
 		errors.Is(err, transfer.ErrInvalidRelativePath):
 		writeError(w, http.StatusBadRequest, "invalid batch manifest")
+	case errors.Is(err, transfer.ErrInsufficientStorage):
+		writeInsufficientStorage(w)
 	case errors.Is(err, transfer.ErrNoCapacity):
 		writeError(w, http.StatusServiceUnavailable, "transfer capacity unavailable")
 	default:
@@ -1275,7 +1324,8 @@ func writeBatchError(w http.ResponseWriter, err error) {
 // error. Once streaming begins the response has not been committed yet, so
 // precise codes stay possible: sender-caused stream faults are the client's
 // fault (400), state-machine refusals are conflicts (409 or 404), capacity
-// caps are the server's load condition (503), disk trouble is ours (500).
+// caps are the server's load condition (503), disk exhaustion is 507, and
+// other disk trouble is ours (500).
 func writeUploadStreamError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, transfer.ErrUploadNotFound), errors.Is(err, transfer.ErrWrongSession):
@@ -1287,6 +1337,8 @@ func writeUploadStreamError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "upload is no longer in the content-accepting state")
 	case errors.Is(err, transfer.ErrCanceled):
 		writeError(w, http.StatusConflict, "upload was canceled by the desktop")
+	case errors.Is(err, transfer.ErrInsufficientStorage):
+		writeInsufficientStorage(w)
 	case errors.Is(err, transfer.ErrNoCapacity):
 		writeError(w, http.StatusServiceUnavailable, "too many concurrent uploads")
 	case errors.Is(err, transfer.ErrSizeExceeded):

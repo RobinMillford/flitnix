@@ -1,6 +1,6 @@
 <script lang="ts">
-  import type { main, netenv, version, power } from '../../wailsjs/go/models'
-  import { openExternalURL } from '../utils'
+  import type { main, netenv, version, power, transfer } from '../../wailsjs/go/models'
+  import { openExternalURL, formatBytes } from '../utils'
   import logoUrl from '../assets/images/logo-universal.png'
 
   export let settingsState: main.SettingsView
@@ -14,6 +14,8 @@
   export let settingsSavedAlert: string = ''
   export let settingsError: string = ''
   export let sleepInhibition: power.Status | null = null
+  export let storageStatus: transfer.StorageStatus | null = null
+  export let onRefreshStorage: () => void = () => {}
 
   export let handleSelectDownloadDir: () => void = () => {}
   export let handleOpenDownloadFolder: () => void = () => {}
@@ -163,6 +165,76 @@
           </div>
         </div>
         <span class="setting-hint">Effective path: <code>{settingsState.effectiveDir || settingsState.downloadDir}</code></span>
+      </div>
+
+      <div class="card-section-head" style="margin-top: 22px;">
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+          <div>
+            <h4>Storage Headroom & Protection</h4>
+            <p>Incoming transfers check available space and hold temporary reservations to prevent filling your disk.</p>
+          </div>
+          <button type="button" class="button secondary small" on:click={onRefreshStorage}>
+            Refresh Space
+          </button>
+        </div>
+      </div>
+
+      <div class="setting-row">
+        {#if storageStatus}
+          <div class="storage-card">
+            <div class="storage-card-head">
+              <span class="status-tag {storageStatus.status === 'critical' ? 'fail' : storageStatus.status === 'low' ? 'warn' : storageStatus.available ? 'ready' : 'neutral'}">
+                {#if !storageStatus.available}
+                  Storage Unknown
+                {:else if storageStatus.status === 'critical'}
+                  Critical Space
+                {:else if storageStatus.status === 'low'}
+                  Low Disk Space
+                {:else}
+                  Healthy
+                {/if}
+              </span>
+              <span class="storage-target-note">
+                {storageStatus.targetExists ? 'Directory ready' : 'Directory created on first transfer'}
+                {#if storageStatus.probeDir && !storageStatus.targetExists}
+                  · Checking parent <code>{storageStatus.probeDir}</code>
+                {/if}
+              </span>
+            </div>
+
+            {#if storageStatus.available}
+              {@const usedPct = storageStatus.totalBytes > 0 ? Math.min(100, Math.round((storageStatus.usedBytes / storageStatus.totalBytes) * 100)) : 0}
+              <div class="storage-bar-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={usedPct}>
+                <div class="storage-bar-fill {storageStatus.status}" style="width: {usedPct}%"></div>
+              </div>
+
+              <div class="storage-metrics-grid tabular">
+                <div>
+                  <span class="metric-label">Available Headroom</span>
+                  <strong>{formatBytes(storageStatus.headroomBytes)}</strong>
+                </div>
+                <div>
+                  <span class="metric-label">OS Free Space</span>
+                  <strong>{formatBytes(storageStatus.freeBytes)}</strong>
+                </div>
+                <div>
+                  <span class="metric-label">Active Reservations</span>
+                  <strong>{formatBytes(storageStatus.reservedBytes)}</strong>
+                </div>
+                <div>
+                  <span class="metric-label">Total Volume</span>
+                  <strong>{formatBytes(storageStatus.totalBytes)}</strong>
+                </div>
+              </div>
+            {:else}
+              <p class="setting-hint">
+                Disk capacity metrics are unavailable for this filesystem{storageStatus.error ? ` (${storageStatus.error})` : ''}. Transfers remain permitted, with OS write-error protection active.
+              </p>
+            {/if}
+          </div>
+        {:else}
+          <span class="setting-hint">Checking disk headroom…</span>
+        {/if}
       </div>
     </div>
 
@@ -644,5 +716,73 @@
     justify-content: space-between;
     align-items: center;
     box-shadow: var(--shadow-sm);
+  }
+
+  .storage-card {
+    background: var(--bg-surface-elevated);
+    border: 1px solid var(--border-base);
+    border-radius: var(--radius-md, 10px);
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .storage-card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .storage-target-note {
+    font-size: 11.5px;
+    color: var(--text-secondary);
+  }
+
+  .storage-bar-track {
+    width: 100%;
+    height: 8px;
+    border-radius: 999px;
+    background: var(--bg-app);
+    overflow: hidden;
+    border: 1px solid var(--border-subtle);
+  }
+
+  .storage-bar-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 999px;
+    transition: width 200ms ease;
+  }
+
+  .storage-bar-fill.low {
+    background: var(--warning, #f59e0b);
+  }
+
+  .storage-bar-fill.critical {
+    background: var(--danger, #ef4444);
+  }
+
+  .storage-metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+  }
+
+  .storage-metrics-grid div {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .metric-label {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+
+  .storage-metrics-grid strong {
+    font-size: 13.5px;
   }
 </style>

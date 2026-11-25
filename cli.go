@@ -157,7 +157,8 @@ func runServeCLI(args []string, stdout, stderr io.Writer) int {
 	}
 
 	sessMgr := session.NewManager(session.Config{})
-	transfers := transfer.NewService(transfer.Config{Store: store})
+	quota := transfer.NewQuotaManager(transfer.QuotaConfig{DefaultDir: store.Dir()})
+	transfers := transfer.NewService(transfer.Config{Store: store, Quota: quota})
 	coord := transfer.NewCoordinator(transfer.CoordinatorConfig{})
 	reg := transfer.NewRegistry()
 	dls := transfer.NewDownloadRegistry()

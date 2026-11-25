@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { main, netenv } from '../../wailsjs/go/models'
+  import type { main, netenv, transfer } from '../../wailsjs/go/models'
   import { formatBytes, percent, speed, calcEta, fmtTime, openExternalURL } from '../utils'
   import ProgressBar from '../components/ProgressBar.svelte'
 
@@ -11,6 +11,7 @@
   export let downloads: main.DownloadView[] = []
   export let files: main.SharedFileView[] = []
   export let sources: main.SharedSourceView[] = []
+  export let storageStatus: transfer.StorageStatus | null = null
   export let interfaces: netenv.View[] = []
   export let networkState: netenv.NetworkState | null = null
   export let refreshingNetwork: boolean = false
@@ -553,24 +554,41 @@
             <span class="eyebrow-blue">Receive from Phone</span>
             <h3>Approval Inbox</h3>
           </div>
-          <span class="count-pill">{pending.length + pendingBatches.length}</span>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            {#if storageStatus}
+              <span class="storage-pill {storageStatus.status === 'critical' ? 'danger' : storageStatus.status === 'low' ? 'warn' : ''}" title="Available receive disk space">
+                {storageStatus.available ? `${formatBytes(storageStatus.headroomBytes)} free` : 'Disk space unknown'}
+              </span>
+            {/if}
+            <span class="count-pill">{pending.length + pendingBatches.length}</span>
+          </div>
         </div>
         <p class="column-desc">Review and confirm transfer requests before files are written to disk.</p>
 
         <div class="inbox-requests-list">
           {#each pending as u (u.id)}
-            <div class="inbox-request-item">
+            <div class="inbox-request-item" class:storage-blocked={u.storageFits === false}>
               <div class="request-icon">↙</div>
               <div class="request-info">
                 <strong>{u.name}</strong>
-                <span class="tabular">{formatBytes(u.size)} · Pending Approval</span>
+                <span class="tabular">
+                  {formatBytes(u.size)} · Pending Approval
+                  {#if u.storageFits === false}
+                    · <strong class="storage-warn-inline">Insufficient disk space</strong>
+                  {:else if storageStatus?.available}
+                    · Fits on disk
+                  {/if}
+                </span>
+                {#if u.storageWarning}
+                  <span class="storage-warn-inline">{u.storageWarning}</span>
+                {/if}
               </div>
               <div class="request-actions">
                 <button
                   type="button"
                   class="button success small"
                   on:click={() => decide(u, true)}
-                  disabled={isBusy(`approve:${u.id}`)}
+                  disabled={isBusy(`approve:${u.id}`) || u.storageFits === false}
                 >
                   Approve
                 </button>
@@ -587,18 +605,28 @@
           {/each}
 
           {#each pendingBatches as b (b.id)}
-            <div class="inbox-request-item batch-item">
+            <div class="inbox-request-item batch-item" class:storage-blocked={b.storageFits === false}>
               <div class="request-icon">↙</div>
               <div class="request-info">
                 <strong>Batch: {batchName(b)}</strong>
-                <span class="tabular">{formatBytes(b.declaredTotalBytes)} · {b.totalItemCount} files</span>
+                <span class="tabular">
+                  {formatBytes(b.declaredTotalBytes)} · {b.totalItemCount} files
+                  {#if b.storageFits === false}
+                    · <strong class="storage-warn-inline">Exceeds free disk space</strong>
+                  {:else if storageStatus?.available}
+                    · Fits on disk
+                  {/if}
+                </span>
+                {#if b.storageWarning}
+                  <span class="storage-warn-inline">{b.storageWarning}</span>
+                {/if}
               </div>
               <div class="request-actions">
                 <button
                   type="button"
                   class="button success small"
                   on:click={() => decideBatch(b, true)}
-                  disabled={isBusy(`approve-batch:${b.id}`)}
+                  disabled={isBusy(`approve-batch:${b.id}`) || b.storageFits === false}
                 >
                   Approve
                 </button>
@@ -1511,6 +1539,35 @@
   .request-actions {
     display: flex;
     gap: 6px;
+  }
+
+  .storage-pill {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--bg-surface-elevated);
+    border: 1px solid var(--border-base);
+    color: var(--text-secondary);
+  }
+
+  .storage-pill.warn {
+    color: var(--warning-text, #f59e0b);
+    border-color: var(--warning, #f59e0b);
+  }
+
+  .storage-pill.danger {
+    color: var(--danger-text, #ef4444);
+    border-color: var(--danger, #ef4444);
+  }
+
+  .inbox-request-item.storage-blocked {
+    border-color: var(--danger, #ef4444);
+  }
+
+  .storage-warn-inline {
+    color: var(--danger-text, #ef4444);
+    font-weight: 600;
   }
 
   .empty-state-compact {

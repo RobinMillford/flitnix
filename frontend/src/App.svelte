@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { t, setLocale, tFn } from './i18n'
-  import type { main, netenv, doctor, guest, audit, devices, power, version, update } from '../wailsjs/go/models'
+  import type { main, netenv, doctor, guest, audit, devices, power, version, update, transfer } from '../wailsjs/go/models'
   import { OnFileDrop, OnFileDropOff, EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
   import logoUrl from './assets/images/logo-universal.png'
   import { createRefreshScheduler } from './refreshScheduler'
@@ -35,7 +35,7 @@
     ListTrustedDevices, RemoveTrustedDevice, SetDeviceAutoApprove,
     ApprovePairing, DenyPairing, GetPairingStatus, ReArmPairing,
     GetSettings, SaveSettings, ResetSettings, SelectDownloadDirectory, OpenDownloadFolder,
-    SleepInhibition, GetAppVersion, CheckForUpdates
+    GetStorageStatus, SleepInhibition, GetAppVersion, CheckForUpdates
   } from '../wailsjs/go/main/App.js'
 
   const validTabs = ['personal', 'guest', 'templates', 'devices', 'history', 'audit', 'settings'] as const
@@ -78,6 +78,7 @@
   let pairingActionLoading = false
   let rearmingLoading = false
   let sleepInhibition: power.Status | null = null
+  let storageStatus: transfer.StorageStatus | null = null
 
   // Persistent Settings state
   let settingsState: main.SettingsView = {
@@ -248,9 +249,9 @@
       ListSessions(), ListPendingUploads(), RecentUploads(), RecentDownloads(),
       ListSharedFiles(), ListSharedSources(), ReceiveDirectory(), ServerAddress(),
       ListPendingBatches(), ListBatches(), GetGuestRoomState(), GetPairingStatus(),
-      SleepInhibition()
+      SleepInhibition(), GetStorageStatus()
     ]),
-    ([s, p, u, d, f, sourceList, dir, addr, b, allBatches, grState, pStatus, sleepStatus]) => {
+    ([s, p, u, d, f, sourceList, dir, addr, b, allBatches, grState, pStatus, sleepStatus, stStatus]) => {
       sessions = s ?? []; pending = p ?? []; uploads = u ?? []; downloads = d ?? []
       files = f ?? []; sources = sourceList ?? []; pendingBatches = b ?? []
       batches = allBatches ?? []
@@ -258,6 +259,7 @@
       guestRoomState = grState ?? null
       pairingStatus = pStatus ?? null
       sleepInhibition = sleepStatus ?? null
+      storageStatus = stStatus ?? null
       if (!guestDestDir && dir) guestDestDir = dir
 
       const currentPendingTotal = (pending?.length ?? 0) + (pendingBatches?.length ?? 0) + (guestRoomState?.pendingUploads?.length ?? 0)
@@ -869,6 +871,14 @@
     }
   }
 
+  async function refreshStorageStatus(): Promise<void> {
+    try {
+      storageStatus = await GetStorageStatus()
+    } catch {
+      // non-fatal background refresh
+    }
+  }
+
   async function handleSaveSettings(): Promise<void> {
     savingSettings = true
     settingsSavedAlert = ''
@@ -880,6 +890,7 @@
       const reloaded = await GetSettings()
       settingsState = reloaded
       receiveDir = reloaded.effectiveDir
+      await refreshStorageStatus()
       settingsSavedAlert = 'Settings saved successfully.'
       setTimeout(() => { settingsSavedAlert = '' }, 3000)
     } catch (err) {
@@ -898,6 +909,7 @@
       applyTheme(defaults.theme)
       setLocale(defaults.locale || 'system')
       receiveDir = defaults.effectiveDir
+      await refreshStorageStatus()
       settingsSavedAlert = 'Settings restored to defaults.'
       setTimeout(() => { settingsSavedAlert = '' }, 3000)
     } catch (err) {
@@ -1335,6 +1347,7 @@
               {downloads}
               {files}
               {sources}
+              {storageStatus}
               {interfaces}
               {networkState}
               {refreshingNetwork}
@@ -1469,6 +1482,8 @@
               {settingsSavedAlert}
               {settingsError}
               {sleepInhibition}
+              {storageStatus}
+              onRefreshStorage={refreshStorageStatus}
               {handleSelectDownloadDir}
               {handleOpenDownloadFolder}
               {handleSaveSettings}
