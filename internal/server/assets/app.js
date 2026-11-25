@@ -19,6 +19,7 @@
   var MAX_AUTO_RETRIES = 6;     // bounded automatic reconnect attempts on transient drops
   var RETRY_BASE_MS = 1000;     // 1s, 2s, 4s, 8s, 15s jittered exponential backoff
   var RETRY_MAX_MS = 15000;
+  var MAX_AUTO_RETRY_WAIT_MS = 5 * 60 * 1000; // matches Go: MaxAutoRetryWait
   var FIREFOX_LARGE_UPLOAD_BYTES = 256 * 1024 * 1024;
 
   // ------------------------------------------------------------------
@@ -507,11 +508,13 @@
       case "waiting": return "Waiting for approval on the desktop…";
       case "sending": return "Uploading…";
       case "resuming": return "Resuming upload…";
-      case "reconnecting":
-        if (job.reconnectAttempt && job.reconnectMax) {
-          return "Reconnecting — attempt " + job.reconnectAttempt + "/" + job.reconnectMax;
-        }
-        return "Reconnecting…";
+      case "reconnecting": {
+        var recText = job.reconnectAttempt && job.reconnectMax
+          ? "Reconnecting — attempt " + job.reconnectAttempt + "/" + job.reconnectMax
+          : "Reconnecting…";
+        if (job.err) recText += " · " + job.err;
+        return recText;
+      }
       case "interrupted": return "Interrupted — ready to resume";
       case "paused": return "Paused";
       case "verifying": return "Verifying…";
@@ -1093,6 +1096,19 @@
     return Math.round(base * jitter);
   }
 
+  // Server-requested delay via the Retry-After header (delta seconds or HTTP
+  // date); 0 when absent/invalid. Parsing lives in upload-client.js so the
+  // worker and page share one policy.
+  function retryAfterMsOf(e) {
+    if (!e || typeof e.retryAfterMs !== "number" || e.retryAfterMs <= 0) return 0;
+    return e.retryAfterMs;
+  }
+
+  function formatRetryAfterMs(ms) {
+    if (ms >= 60000) return Math.round(ms / 1000 / 60) + " min";
+    return Math.round(ms / 100) / 10 + " s";
+  }
+
   function scheduleAutoRetry(job, e) {
     job.autoRetries = (job.autoRetries || 0) + 1;
     if (job.autoRetries > MAX_AUTO_RETRIES || !job.file) {
@@ -1115,7 +1131,22 @@
     setReconnecting(true, "upload");
     paint(job);
 
-    waitThen(job, retryBackoffMs(job.autoRetries), function () {
+    // Honor any server-requested Retry-After: the wait is the longer of the
+    // jittered backoff and the server request. Past MAX_AUTO_RETRY_WAIT_MS the
+    // item stays deferred (manual retry via the Resume button) instead of
+    // retrying earlier than the server asked.
+    var delay = retryBackoffMs(job.autoRetries);
+    var ra = retryAfterMsOf(e);
+    if (ra > delay) delay = ra;
+    if (delay > MAX_AUTO_RETRY_WAIT_MS) {
+      job.err = "Server asked to retry after " + formatRetryAfterMs(delay) +
+        " — tap Resume when ready.";
+      paint(job);
+      setReconnecting(false, "upload");
+      return;
+    }
+
+    waitThen(job, delay, function () {
       if (job.removed || appState.ended || job.cancelRequested || !activeBatch) {
         setReconnecting(false, "upload");
         return;
@@ -1253,6 +1284,7 @@
         lowErr.status = 507;
         lowErr.resumable = true;
         lowErr.offset = typeof res.offset === "number" ? res.offset : job.uploaded;
+        lowErr.retryAfterMs = retryAfterMsOf(res);
         throw lowErr;
       }
       if (code === "paused") {
@@ -1262,11 +1294,14 @@
         pauseErr.offset = typeof res.offset === "number" ? res.offset : job.uploaded;
         throw pauseErr;
       }
-      if (code === "chunk_interrupted" || code === "stall" || res.status === 408 || res.status === 502 || res.status === 503 || res.status === 504) {
+      if (code === "chunk_interrupted" || code === "stall" ||
+          res.status === 408 || res.status === 429 ||
+          res.status === 502 || res.status === 503 || res.status === 504) {
         var intErr = new Error("Upload interrupted — reconnecting to continue from saved bytes.");
         intErr.resumable = true;
         intErr.transient = true;
         intErr.offset = typeof res.offset === "number" ? res.offset : job.uploaded;
+        intErr.retryAfterMs = retryAfterMsOf(res);
         throw intErr;
       }
       var msg = "Upload failed (" + res.status + ")";
@@ -1821,10 +1856,13 @@
                 });
               }
 
-              function scheduleRetry(errMsg) {
+              function scheduleRetry(errMsg, retryAfterMs) {
                 retries += 1;
                 var base = Math.min(15000, 1000 * Math.pow(2, retries - 1));
                 var delay = Math.round(base * (0.8 + Math.random() * 0.4));
+                // Honor a server-requested Retry-After (never shorter than the
+                // jittered backoff; the caller rejects waits beyond the cap).
+                if (typeof retryAfterMs === "number" && retryAfterMs > delay) delay = retryAfterMs;
                 if (card) {
                   card.setBadge("Reconnecting…", "badge--waiting");
                   card.setMessage("Interrupted (" + errMsg + ") — resuming from " + formatBytes(received) + " (attempt " + retries + "/" + MAX_DL_RETRIES + ")…");
@@ -1849,6 +1887,8 @@
                   if (!resp.ok) {
                     var httpErr = new Error("HTTP " + resp.status);
                     httpErr.status = resp.status;
+                    httpErr.retryAfterMs = window.FlitnixUpload ?
+                      FlitnixUpload.parseRetryAfterMs(resp.headers && resp.headers.get("Retry-After"), Date.now()) : 0;
                     throw httpErr;
                   }
                   var respETag = resp.headers ? resp.headers.get("ETag") : "";
@@ -1882,9 +1922,15 @@
                   return consumeBody(resp);
                 }).catch(function (err) {
                   if (appState.ended) throw err;
+                  var retryAfterMs = err && typeof err.retryAfterMs === "number" ? err.retryAfterMs : 0;
                   var retryable = !(err && (err.fatal || err.status === 401 || err.status === 403 || err.status === 404 || err.status === 410));
                   if (retryable && retries < MAX_DL_RETRIES && received > 0) {
-                    return scheduleRetry(err && err.message ? err.message : "network error");
+                    if (retryAfterMs > MAX_AUTO_RETRY_WAIT_MS) {
+                      // Deferred: the server asked for a longer wait than the
+                      // automatic policy allows — surface it instead of retrying early.
+                      throw new Error("Server requested retry after " + formatRetryAfterMs(retryAfterMs));
+                    }
+                    return scheduleRetry(err && err.message ? err.message : "network error", retryAfterMs);
                   }
                   throw err;
                 });

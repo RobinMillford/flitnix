@@ -331,7 +331,10 @@ func (c *Client) StreamItem(ctx context.Context, batchID, itemID, localPath stri
 			if !IsRetryableError(headErr) || attempt >= policy.MaxRetries {
 				return ItemResult{}, headErr
 			}
-			delay := BackoffDelay(attempt+1, policy.BaseDelay, policy.MaxDelay, nil)
+			delay, derr := c.retryDelayOrDeferred(headErr, attempt+1, policy)
+			if derr != nil {
+				return ItemResult{}, derr
+			}
 			if policy.OnRetry != nil {
 				policy.OnRetry(attempt+1, policy.MaxRetries, delay, headErr)
 			}
@@ -379,6 +382,7 @@ func (c *Client) probeHead(ctx context.Context, reqURL string, declaredSize int6
 	}
 	return 0, 0, false, &HTTPStatusError{
 		StatusCode: headResp.StatusCode,
+		RetryAfter: RetryAfterHeader(headResp.Header),
 		Message:    fmt.Sprintf("HEAD returned HTTP %d", headResp.StatusCode),
 	}
 }
@@ -418,7 +422,10 @@ func (c *Client) streamItemChunks(ctx context.Context, f *os.File, localPath, re
 			return false, cause
 		}
 		consecutiveRetries++
-		delay := BackoffDelay(consecutiveRetries, policy.BaseDelay, policy.MaxDelay, nil)
+		delay, derr := c.retryDelayOrDeferred(cause, consecutiveRetries, policy)
+		if derr != nil {
+			return false, derr
+		}
 		if policy.OnRetry != nil {
 			policy.OnRetry(consecutiveRetries, policy.MaxRetries, delay, cause)
 		}
@@ -529,6 +536,7 @@ func (c *Client) streamItemChunks(ctx context.Context, f *os.File, localPath, re
 		httpErr := &HTTPStatusError{
 			StatusCode: resp.StatusCode,
 			Code:       errResp.Code,
+			RetryAfter: RetryAfterHeader(resp.Header),
 			Message:    msg,
 		}
 		if errResp.Code == "offset_mismatch" {
