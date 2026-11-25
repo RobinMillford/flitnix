@@ -32,7 +32,7 @@
 
   $: allHistoryItems = [
     // Batches
-    ...batches.filter(b => ['completed', 'failed', 'canceled', 'rejected'].includes(b.state)).map(b => ({
+    ...batches.filter(b => ['completed', 'failed', 'canceled', 'rejected', 'discarded'].includes(b.state)).map(b => ({
       id: b.id,
       name: b.rootName || `Batch (${b.totalItemCount} files)`,
       direction: 'batch' as const,
@@ -45,7 +45,7 @@
       error: b.error
     })),
     // Single uploads
-    ...uploads.filter(u => !['pending', 'approved', 'uploading'].includes(u.state)).map(u => ({
+    ...uploads.filter(u => !['pending', 'approved', 'uploading', 'interrupted', 'paused'].includes(u.state)).map(u => ({
       id: u.id,
       name: u.name,
       direction: 'incoming' as const,

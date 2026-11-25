@@ -21,8 +21,9 @@
 
   import {
     StartSession, EndSession, ListSessions, ListPendingUploads, RecentUploads,
-    RecentDownloads, ApproveUpload, RejectUpload, CancelUpload,
+    RecentDownloads, ApproveUpload, RejectUpload, CancelUpload, DiscardUpload,
     ListPendingBatches, ListBatches, ApproveBatch, RejectBatch, CancelBatch,
+    PauseBatch, ResumeBatch, DiscardBatch,
     PickFilesForSharing, PickFolderForSharing, AddDroppedSources,
     ListSharedFiles, ListSharedSources, RevokeSharedFile, RevokeSharedSource, ReceiveDirectory,
     ListNetworkInterfaces, SessionQR, ServerAddress, GetNetworkState, RefreshNetwork,
@@ -446,6 +447,42 @@
     setBusy(k, true)
     CancelUpload(id).then(() => {
       liveAnnouncement = tFn('announcements.uploadCanceled')
+      refresh()
+    }).catch((e) => report(e, k)).finally(() => setBusy(k, false))
+  }
+
+  function pauseBatch(batch: main.BatchView): void {
+    const k = `pause-batch:${batch.id}`; if (isBusy(k)) return
+    setBusy(k, true)
+    PauseBatch(batch.id).then(() => {
+      liveAnnouncement = 'Transfer paused'
+      refresh()
+    }).catch((e) => report(e, k)).finally(() => setBusy(k, false))
+  }
+
+  function resumeBatch(batch: main.BatchView): void {
+    const k = `resume-batch:${batch.id}`; if (isBusy(k)) return
+    setBusy(k, true)
+    ResumeBatch(batch.id).then(() => {
+      liveAnnouncement = 'Transfer ready to resume'
+      refresh()
+    }).catch((e) => report(e, k)).finally(() => setBusy(k, false))
+  }
+
+  function discardBatch(batch: main.BatchView): void {
+    const k = `discard-batch:${batch.id}`; if (isBusy(k)) return
+    setBusy(k, true)
+    DiscardBatch(batch.id).then(() => {
+      liveAnnouncement = 'Partial upload discarded'
+      refresh()
+    }).catch((e) => report(e, k)).finally(() => setBusy(k, false))
+  }
+
+  function discardUpload(id: string): void {
+    const k = `discard-upload:${id}`; if (isBusy(k)) return
+    setBusy(k, true)
+    DiscardUpload(id).then(() => {
+      liveAnnouncement = 'Partial upload discarded'
       refresh()
     }).catch((e) => report(e, k)).finally(() => setBusy(k, false))
   }
@@ -1376,6 +1413,10 @@
               {decideBatch}
               {cancelUpload}
               {cancelBatch}
+              {pauseBatch}
+              {resumeBatch}
+              {discardBatch}
+              {discardUpload}
               {sendTextAction}
               {clearTextAction}
               {copyTextToClipboard}

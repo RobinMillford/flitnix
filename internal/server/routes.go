@@ -312,10 +312,14 @@ func newAPIMux(services *Services, stall time.Duration, grants *DownloadGrantSto
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/uploads", handleUploadDeclare(services, stall))
 	mux.HandleFunc("GET /api/uploads/{id}", handleUploadStatus(services))
+	mux.HandleFunc("HEAD /api/uploads/{id}/content", handleUploadHead(services))
+	mux.HandleFunc("PATCH /api/uploads/{id}/content", handleUploadPatch(services, stall))
 	mux.HandleFunc("PUT /api/uploads/{id}/content", handleUploadContent(services, stall))
 	mux.HandleFunc("POST /api/batches", handleBatchCreate(services))
 	mux.HandleFunc("GET /api/batches/{id}", handleBatchStatus(services))
 	mux.HandleFunc("DELETE /api/batches/{id}/items/{itemID}", handleBatchItemCancel(services))
+	mux.HandleFunc("HEAD /api/batches/{batchID}/items/{itemID}/content", handleBatchHead(services))
+	mux.HandleFunc("PATCH /api/batches/{batchID}/items/{itemID}/content", handleBatchPatch(services, stall))
 	mux.HandleFunc("PUT /api/batches/{batchID}/items/{itemID}/content", handleBatchContent(services, stall))
 	mux.HandleFunc("GET /api/files", serveFilesList(services))
 	mux.HandleFunc("GET /api/files/{id}/download", serveFileDownload(services, stall))
@@ -1038,6 +1042,7 @@ func handleBatchCreate(svcs *Services) http.HandlerFunc {
 			}
 			declared = append(declared, up.ID)
 			quotaItems = append(quotaItems, transfer.QuotaBatchItem{ID: up.ID, Bytes: item.DeclaredSize})
+			svcs.Transfers.SetBatchContext(up.ID, view.ID, item.ID)
 			if mapErr := svcs.Coordinator.SetItemContentID(sess.Key(), view.ID, item.ID, up.ID); mapErr != nil {
 				abort(mapErr)
 				return

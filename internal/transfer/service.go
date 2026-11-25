@@ -16,13 +16,16 @@ import (
 type State string
 
 const (
-	StatePending   State = "pending"   // metadata received, awaiting the desktop user's decision
-	StateApproved  State = "approved"  // approved; exactly one content upload is now allowed
-	StateRejected  State = "rejected"  // refused by the desktop user; no content will be uploaded
-	StateUploading State = "uploading" // content stream in progress
-	StateCompleted State = "completed" // received fully, published in the receive directory
-	StateFailed    State = "failed"    // transfer terminated with an error
-	StateCanceled  State = "canceled"  // canceled by the desktop (shutdown or session end)
+	StatePending     State = "pending"     // metadata received, awaiting the desktop user's decision
+	StateApproved    State = "approved"    // approved; content upload is allowed
+	StateRejected    State = "rejected"    // refused by the desktop user; no content will be uploaded
+	StateUploading   State = "uploading"   // content stream in progress
+	StateInterrupted State = "interrupted" // stream dropped mid-transfer with durable partial bytes preserved
+	StatePaused      State = "paused"      // paused by user; partial bytes preserved
+	StateCompleted   State = "completed"   // received fully, published in the receive directory
+	StateFailed      State = "failed"      // transfer terminated with an error
+	StateCanceled    State = "canceled"    // canceled by the desktop (shutdown or session end)
+	StateDiscarded   State = "discarded"   // partial upload explicitly discarded by user
 )
 
 var (
@@ -201,8 +204,10 @@ type Upload struct {
 	// never offered as an independent approval request.
 	BatchLinked bool
 
-	ExpectedSHA256 string // Expected SHA-256 digest from signed manifest
-	DeviceID       string // Enrolled device ID if transfer was authenticated
+	Resumable       bool   // true when durable partial staging exists on disk
+	CommittedOffset int64  // last durably fsynced offset on disk
+	ExpectedSHA256  string // Expected SHA-256 digest from signed manifest
+	DeviceID        string // Enrolled device ID if transfer was authenticated
 }
 
 // ContentResult describes a successfully received upload body.
@@ -255,6 +260,20 @@ type upload struct {
 	lastAt    time.Time
 	lastBytes int64
 
+	// Resumable chunked transfer state guarded by mu.
+	batchID         string
+	itemID          string
+	partPath        string
+	metaPath        string
+	finalDir        string
+	committedOffset int64
+	chunkSize       int64
+	hashState       []byte
+	chunkInFlight   bool
+	chunkCancel     func()
+	quarantined     bool
+	quarantineMsg   string
+
 	// pub records the single decision a finishing stream and a cancel
 	// contend for. It is taken under mu before any publication work, so
 	// exactly one of "the file is published" and "the upload is canceled"
@@ -293,9 +312,11 @@ func (u *upload) snapshotLocked() Upload {
 		SHA256:    u.sha256,
 		Published: u.published,
 
-		BatchLinked:    u.managed,
-		ExpectedSHA256: u.expectedSHA256,
-		DeviceID:       u.deviceID,
+		BatchLinked:     u.managed,
+		Resumable:       u.committedOffset > 0 && (u.state == StateInterrupted || u.state == StatePaused || u.state == StateApproved || u.state == StateUploading),
+		CommittedOffset: u.committedOffset,
+		ExpectedSHA256:  u.expectedSHA256,
+		DeviceID:        u.deviceID,
 	}
 }
 
@@ -318,7 +339,7 @@ func stateOf(u *upload) State {
 
 func isTerminal(st State) bool {
 	switch st {
-	case StateRejected, StateCompleted, StateFailed, StateCanceled:
+	case StateRejected, StateCompleted, StateFailed, StateCanceled, StateDiscarded:
 		return true
 	}
 	return false
@@ -658,9 +679,22 @@ func (s *Service) SubmitContentWithPublish(id, sessionKey string, body io.Reader
 	case StateUploading:
 		u.mu.Unlock()
 		return ContentResult{}, ErrUploadUnderway
+	case StatePaused:
+		u.mu.Unlock()
+		return ContentResult{}, ErrUploadPaused
+	case StateDiscarded:
+		u.mu.Unlock()
+		return ContentResult{}, ErrUploadDiscarded
+	case StateInterrupted:
+		u.mu.Unlock()
+		return ContentResult{}, fmt.Errorf("%w: partial upload requires resumable PATCH", ErrAlreadyDecided)
 	case StateCompleted, StateFailed:
 		u.mu.Unlock()
 		return ContentResult{}, fmt.Errorf("%w: state is %q", ErrAlreadyDecided, u.state)
+	}
+	if u.committedOffset > 0 {
+		u.mu.Unlock()
+		return ContentResult{}, fmt.Errorf("%w: partial upload requires resumable PATCH", ErrAlreadyDecided)
 	}
 	// u.state == StateApproved: claim this submission for the stream.
 	var sink contentSink
@@ -880,30 +914,45 @@ func (s *Service) Cancel(id string) error {
 		return err
 	}
 	u.mu.Lock()
+	var chunkCancel func()
+	var partPath, metaPath string
+	var sink contentSink
 	switch u.state {
-	case StatePending, StateApproved:
+	case StatePending, StateApproved, StateInterrupted, StatePaused:
+		u.pub = pubCancelReserved
 		u.state = StateCanceled
+		partPath, metaPath = u.partPath, u.metaPath
+		u.partPath, u.metaPath, u.committedOffset, u.hashState = "", "", 0, nil
 		if s.quota != nil {
 			s.quota.Release(u.id)
 		}
 		u.mu.Unlock()
+		removeResumablePaths(partPath, metaPath)
 	case StateUploading:
-		sink := u.sink
+		sink = u.sink
+		chunkCancel = u.chunkCancel
+		u.pub = pubCancelReserved
 		u.state = StateCanceled
+		partPath, metaPath = u.partPath, u.metaPath
+		u.partPath, u.metaPath, u.committedOffset, u.hashState = "", "", 0, nil
 		if s.quota != nil {
 			s.quota.Release(u.id)
 		}
 		u.mu.Unlock()
+		if chunkCancel != nil {
+			chunkCancel()
+		}
 		if sink != nil {
 			_ = sink.Abort()
 		}
+		removeResumablePaths(partPath, metaPath)
 	default:
 		u.mu.Unlock()
 	}
 	return nil
 }
 
-// CancelSession cancels every pending, approved, or streaming upload owned
+// CancelSession cancels every pending, approved, interrupted, paused, or streaming upload owned
 // by the given session (matched by the session's non-secret key). The
 // desktop calls it when stopping or revoking a session so no half-received
 // file lingers on disk and no orphaned approved record outlives the
@@ -917,7 +966,7 @@ func (s *Service) CancelSession(sessionKey string) {
 	for _, u := range s.uploads {
 		if u.session == sessionKey {
 			switch stateOf(u) {
-			case StatePending, StateApproved, StateUploading:
+			case StatePending, StateApproved, StateInterrupted, StatePaused, StateUploading:
 				targets = append(targets, u)
 			}
 		}
@@ -930,24 +979,34 @@ func (s *Service) CancelSession(sessionKey string) {
 			continue
 		}
 		switch u.state {
-		case StatePending, StateApproved:
+		case StatePending, StateApproved, StateInterrupted, StatePaused:
+			partPath, metaPath := u.partPath, u.metaPath
+			u.partPath, u.metaPath, u.committedOffset, u.hashState = "", "", 0, nil
 			u.pub = pubCancelReserved
 			u.state = StateCanceled
 			if s.quota != nil {
 				s.quota.Release(u.id)
 			}
 			u.mu.Unlock()
+			removeResumablePaths(partPath, metaPath)
 		case StateUploading:
 			sink := u.sink
+			chunkCancel := u.chunkCancel
+			partPath, metaPath := u.partPath, u.metaPath
+			u.partPath, u.metaPath, u.committedOffset, u.hashState = "", "", 0, nil
 			u.pub = pubCancelReserved
 			u.state = StateCanceled
 			if s.quota != nil {
 				s.quota.Release(u.id)
 			}
 			u.mu.Unlock()
+			if chunkCancel != nil {
+				chunkCancel()
+			}
 			if sink != nil {
 				_ = sink.Abort()
 			}
+			removeResumablePaths(partPath, metaPath)
 		default:
 			u.mu.Unlock()
 		}
@@ -955,8 +1014,9 @@ func (s *Service) CancelSession(sessionKey string) {
 }
 
 // AbortActiveUploads halts every actively streaming upload whose network connection
-// was severed by an interface drop or address change. The unfinalized partial file
-// is removed and the record transitions to StateFailed with an explanatory error.
+// was severed by an interface drop or address change. Single-pass uploads clean up
+// their partial file; resumable uploads preserve their durably committed offset
+// and transition to StateInterrupted so they can resume cleanly.
 func (s *Service) AbortActiveUploads() {
 	s.mu.Lock()
 	var targets []*upload
@@ -971,6 +1031,16 @@ func (s *Service) AbortActiveUploads() {
 		u.mu.Lock()
 		if u.pub == pubPublishing {
 			u.mu.Unlock()
+			continue
+		}
+		if u.metaPath != "" || u.chunkInFlight {
+			chunkCancel := u.chunkCancel
+			u.state = StateInterrupted
+			u.reason = "transfer interrupted: network connection lost or interface changed"
+			u.mu.Unlock()
+			if chunkCancel != nil {
+				chunkCancel()
+			}
 			continue
 		}
 		sink := u.sink

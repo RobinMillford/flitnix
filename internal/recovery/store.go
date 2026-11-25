@@ -397,6 +397,18 @@ func (s *Store) VerifyToken(token, verifier string) bool {
 	return hmac.Equal([]byte(s.Verifier(token)), []byte(verifier))
 }
 
+// DeriveSubkey derives a purpose-bound 256-bit key from the installation key
+// without exposing the raw installation key material outside the store.
+func (s *Store) DeriveSubkey(purpose string) []byte {
+	s.mu.Lock()
+	key := append([]byte(nil), s.key...)
+	s.mu.Unlock()
+	m := hmac.New(sha256.New, key)
+	_, _ = m.Write([]byte("flitnix-subkey:"))
+	_, _ = m.Write([]byte(purpose))
+	return m.Sum(nil)
+}
+
 func hmacToken(key []byte, token string) []byte {
 	m := hmac.New(sha256.New, key)
 	_, _ = m.Write([]byte(token))

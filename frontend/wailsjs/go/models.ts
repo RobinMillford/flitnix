@@ -464,6 +464,7 @@ export namespace main {
 	    declaredSize: number;
 	    transferred: number;
 	    state: string;
+	    resumable?: boolean;
 	    sha256?: string;
 	    error?: string;
 
@@ -481,6 +482,7 @@ export namespace main {
 	        this.declaredSize = source["declaredSize"];
 	        this.transferred = source["transferred"];
 	        this.state = source["state"];
+	        this.resumable = source["resumable"];
 	        this.sha256 = source["sha256"];
 	        this.error = source["error"];
 	    }
@@ -1056,6 +1058,8 @@ export namespace main {
 	    speed: number;
 	    sha256?: string;
 	    reason?: string;
+	    resumable?: boolean;
+	    committedOffset?: number;
 	    storageFits: boolean;
 	    storageWarning?: string;
 
@@ -1074,6 +1078,8 @@ export namespace main {
 	        this.speed = source["speed"];
 	        this.sha256 = source["sha256"];
 	        this.reason = source["reason"];
+	        this.resumable = source["resumable"];
+	        this.committedOffset = source["committedOffset"];
 	        this.storageFits = source["storageFits"];
 	        this.storageWarning = source["storageWarning"];
 	    }

@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Resumable Chunked Uploads & Crash-Safe Offset Recovery (Phase 1 — G1)**:
+  - Implemented `HEAD` / `PATCH` resumable chunked upload endpoints on `/api/batches/{batchID}/items/{itemID}/content` and `/api/uploads/{id}/content` using `Upload-Offset`, `Upload-Length`, `Upload-Chunk-Size`, and `409 Conflict` offset-mismatch reconciliation while keeping legacy `PUT` streams compatible.
+  - Added crash-safe chunk durability (`fsync(.part)` → HMAC-authenticated `.meta.tmp` with incremental SHA-256 hash state → `fsync` → atomic rename → `syncDir`) using an installation-derived `staging-meta-v1` subkey, rolling back uncommitted torn tails automatically.
+  - Wired `RecoveryDir` into both desktop (`App`) and `flitnix serve` CLI, completing startup recovery Phases 6–10 (`recovery_startup.go`): per-upload quarantine isolation, quota reservation reconstruction, session/coordinator reconciliation, and Phase 10 TTL/orphan staging cleanup.
+  - Added non-destructive `PauseBatch`, `ResumeBatch`, `DiscardBatch`, and `DiscardUpload` lifecycle controls in Coordinator, Transfer Service, Wails adapter, and Desktop Svelte UI (`Uploading`, `Paused`, `Interrupted`, `Resuming`, `Completed`, `Failed`, `Discarded`), plus Web Worker `File.slice()` chunking in mobile `upload-worker.js` / `upload-client.js` / `app.js` and Go CLI `internal/client`.
 - **Storage Quota & Disk-Space Protection (Phase 1 — G26)**:
   - Cross-platform filesystem free-space probing (`unix.Statfs` / `GetDiskFreeSpaceEx`) with configurable minimum disk reserve buffer (`BufferReserveBytes`, default `1 GiB`) and optional hard receive cap (`MaxReceiveBytes`).
   - Atomic `QuotaManager` headroom reservations at transfer approval (and auto-approve / guest-room admission), plus mid-stream 4 MiB headroom checks and `ENOSPC` / `ERROR_DISK_FULL` mapping to HTTP `507 Insufficient Storage` (`code: "insufficient_storage"`).

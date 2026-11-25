@@ -1,41 +1,40 @@
 /*
  * Flitnix upload transport worker.
  *
- * Streams one file to a PUT endpoint from a dedicated worker thread. Keeping
- * the transfer off the page's main thread means layout, painting and progress
- * rendering cannot contend with the upload for the single thread the page
- * would otherwise share with it.
+ * Streams one file either via single-pass PUT ("start") or resumable chunked
+ * HEAD + PATCH ("startResumable") from a dedicated worker thread so layout,
+ * painting and progress rendering on the main thread cannot contend with the
+ * socket write path.
  *
  * Protocol (main thread <-> worker):
  *   in : {type: "start", uploadId, url, headers, file}
+ *   in : {type: "startResumable", uploadId, url, headers, file, chunkSize}
  *   in : {type: "abort", uploadId}
  *   out: {type: "progress", uploadId, loaded, total}
- *   out: {type: "done", uploadId, status, responseText}
- *   out: {type: "error", uploadId, kind, message}
- *
- * HTTP-level outcomes (including 4xx/5xx) are reported as "done": the status
- * belongs to the caller. Only transport-level failures and cancellation are
- * reported as "error".
+ *   out: {type: "done", uploadId, status, responseText, offset}
+ *   out: {type: "error", uploadId, kind, message, offset}
  */
 "use strict";
 
 var active = Object.create(null);
+var DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024;
 
 self.onmessage = function (ev) {
   var msg = ev.data;
   if (!msg || !msg.type) return;
   if (msg.type === "start") startUpload(msg);
+  else if (msg.type === "startResumable") startResumableUpload(msg);
   else if (msg.type === "abort") abortUpload(msg.uploadId);
 };
 
 function startUpload(msg) {
   var id = msg.uploadId;
   var xhr = new XMLHttpRequest();
-  active[id] = xhr;
+  active[id] = { xhr: xhr, aborted: false };
 
   function settle(fn) {
     return function () {
-      if (active[id] === xhr) delete active[id];
+      if (active[id] && active[id].xhr === xhr) delete active[id];
       fn();
     };
   }
@@ -44,9 +43,6 @@ function startUpload(msg) {
   xhr.upload.onprogress = function (e) {
     if (!e.lengthComputable) return;
     var now = Date.now();
-    // Coalesce progress to roughly 10 updates per second. The page applies
-    // its own paint throttle on top; this bound simply keeps the message
-    // queue from growing without limit on a fast local network.
     if (now - lastPost < 100 && e.loaded !== e.total) return;
     lastPost = now;
     self.postMessage({ type: "progress", uploadId: id, loaded: e.loaded, total: e.total });
@@ -90,9 +86,181 @@ function startUpload(msg) {
   }
 }
 
+function startResumableUpload(msg) {
+  var id = msg.uploadId;
+  var file = msg.file;
+  var total = file ? file.size : 0;
+  var chunkSize = msg.chunkSize || DEFAULT_CHUNK_SIZE;
+  var offset = 0;
+  var mismatchRetries = 0;
+  var state = { xhr: null, aborted: false };
+  active[id] = state;
+
+  function applyHeaders(xhr, extra) {
+    var headers = msg.headers || {};
+    for (var name in headers) {
+      if (Object.prototype.hasOwnProperty.call(headers, name)) {
+        xhr.setRequestHeader(name, headers[name]);
+      }
+    }
+    if (extra) {
+      for (var k in extra) {
+        if (Object.prototype.hasOwnProperty.call(extra, k)) {
+          xhr.setRequestHeader(k, extra[k]);
+        }
+      }
+    }
+  }
+
+  function finishDone(status, text) {
+    if (active[id] === state) delete active[id];
+    self.postMessage({
+      type: "done",
+      uploadId: id,
+      status: status,
+      responseText: text || "",
+      offset: offset
+    });
+  }
+
+  function finishError(kind, message) {
+    if (active[id] === state) delete active[id];
+    self.postMessage({
+      type: "error",
+      uploadId: id,
+      kind: kind,
+      message: message || "",
+      offset: offset
+    });
+  }
+
+  function queryHead() {
+    if (state.aborted) { finishError("abort", ""); return; }
+    var xhr = new XMLHttpRequest();
+    state.xhr = xhr;
+    xhr.onload = function () {
+      if (state.aborted) { finishError("abort", ""); return; }
+      if (xhr.status === 200) {
+        var srvOff = parseInt(xhr.getResponseHeader("Upload-Offset") || "0", 10);
+        if (!isNaN(srvOff) && srvOff >= 0 && srvOff <= total) {
+          offset = srvOff;
+        }
+        var srvChunk = parseInt(xhr.getResponseHeader("Upload-Chunk-Size") || "0", 10);
+        if (!isNaN(srvChunk) && srvChunk > 0) {
+          chunkSize = srvChunk;
+        }
+        var upState = xhr.getResponseHeader("X-Upload-State") || "";
+        if (upState === "completed" || (total > 0 && offset === total)) {
+          self.postMessage({ type: "progress", uploadId: id, loaded: total, total: total });
+          finishDone(200, JSON.stringify({ written: total }));
+          return;
+        }
+        self.postMessage({ type: "progress", uploadId: id, loaded: offset, total: total });
+        sendNextChunk();
+        return;
+      }
+      if (xhr.status === 404 || xhr.status === 405) {
+        // Endpoint does not advertise HEAD/PATCH; fall back cleanly to PUT.
+        delete active[id];
+        startUpload(msg);
+        return;
+      }
+      finishDone(xhr.status, xhr.responseText || "");
+    };
+    xhr.onerror = function () { finishError("network", ""); };
+    xhr.ontimeout = function () { finishError("timeout", ""); };
+    xhr.onabort = function () { finishError("abort", ""); };
+    try {
+      xhr.open("HEAD", msg.url);
+      applyHeaders(xhr, null);
+      xhr.send();
+    } catch (err) {
+      finishError("network", (err && err.message) || "");
+    }
+  }
+
+  function sendNextChunk() {
+    if (state.aborted) { finishError("abort", ""); return; }
+    var end = total === 0 ? 0 : Math.min(total, offset + chunkSize);
+    var slice = total === 0 ? new Blob([]) : file.slice(offset, end);
+    var sliceLen = end - offset;
+
+    var xhr = new XMLHttpRequest();
+    state.xhr = xhr;
+    var lastPost = 0;
+    xhr.upload.onprogress = function (e) {
+      if (!e.lengthComputable) return;
+      var loadedTotal = Math.min(total, offset + e.loaded);
+      var now = Date.now();
+      if (now - lastPost < 100 && loadedTotal !== total) return;
+      lastPost = now;
+      self.postMessage({ type: "progress", uploadId: id, loaded: loadedTotal, total: total });
+    };
+    xhr.onload = function () {
+      if (state.aborted) { finishError("abort", ""); return; }
+      if (xhr.status === 204) {
+        var srvOff = parseInt(xhr.getResponseHeader("Upload-Offset") || "", 10);
+        offset = (!isNaN(srvOff) && srvOff >= 0) ? srvOff : end;
+        self.postMessage({ type: "progress", uploadId: id, loaded: offset, total: total });
+        mismatchRetries = 0;
+        if (offset < total) sendNextChunk();
+        else finishDone(200, xhr.responseText || "");
+        return;
+      }
+      if (xhr.status === 200) {
+        offset = total;
+        self.postMessage({ type: "progress", uploadId: id, loaded: total, total: total });
+        finishDone(200, xhr.responseText || "");
+        return;
+      }
+      if (xhr.status === 409) {
+        var parsed = null;
+        try { parsed = JSON.parse(xhr.responseText || "{}"); } catch (e) {}
+        if (parsed && parsed.code === "offset_mismatch" && mismatchRetries < 3) {
+          mismatchRetries += 1;
+          var expected = parseInt(xhr.getResponseHeader("Upload-Offset") || String(parsed.expectedOffset || ""), 10);
+          if (!isNaN(expected) && expected >= 0 && expected <= total) {
+            offset = expected;
+            self.postMessage({ type: "progress", uploadId: id, loaded: offset, total: total });
+            if (offset === total && total > 0) {
+              finishDone(200, JSON.stringify({ written: total }));
+            } else {
+              sendNextChunk();
+            }
+            return;
+          }
+        }
+      }
+      // Server may have committed an earlier chunk and returned Upload-Offset on 400/408/507.
+      var hdrOff = parseInt(xhr.getResponseHeader("Upload-Offset") || "", 10);
+      if (!isNaN(hdrOff) && hdrOff >= 0 && hdrOff <= total) {
+        offset = hdrOff;
+      }
+      finishDone(xhr.status, xhr.responseText || "");
+    };
+    xhr.onerror = function () { finishError("network", ""); };
+    xhr.ontimeout = function () { finishError("timeout", ""); };
+    xhr.onabort = function () { finishError("abort", ""); };
+    try {
+      xhr.open("PATCH", msg.url);
+      applyHeaders(xhr, {
+        "Content-Type": "application/offset+octet-stream",
+        "Upload-Offset": String(offset)
+      });
+      xhr.send(slice);
+    } catch (err) {
+      finishError("network", (err && err.message) || "");
+    }
+  }
+
+  queryHead();
+}
+
 function abortUpload(id) {
-  var xhr = active[id];
-  if (!xhr) return;
+  var entry = active[id];
+  if (!entry) return;
+  entry.aborted = true;
+  var xhr = entry.xhr || entry;
   try {
     xhr.abort();
   } catch (e) {

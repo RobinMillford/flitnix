@@ -41,6 +41,10 @@
   export let decideBatch: (b: main.BatchView, approve: boolean) => void = () => {}
   export let cancelUpload: (id: string) => void = () => {}
   export let cancelBatch: (b: main.BatchView) => void = () => {}
+  export let pauseBatch: (b: main.BatchView) => void = () => {}
+  export let resumeBatch: (b: main.BatchView) => void = () => {}
+  export let discardBatch: (b: main.BatchView) => void = () => {}
+  export let discardUpload: (id: string) => void = () => {}
   export let sendTextAction: () => void = () => {}
   export let clearTextAction: () => void = () => {}
   export let copyTextToClipboard: (text: string) => void = () => {}
@@ -58,25 +62,47 @@
   $: totalSharedBytes = files.reduce((acc, f) => acc + (f.size || 0), 0) + sources.reduce((acc, s) => acc + (s.totalBytes || 0), 0)
 
   function activeUpload(u: main.UploadView): boolean {
-    return ['pending', 'approved', 'uploading'].includes(u.state)
+    return ['pending', 'approved', 'uploading', 'interrupted', 'paused'].includes(u.state)
   }
   function activeDownload(d: main.DownloadView): boolean {
     return ['starting', 'transferring', 'finalizing'].includes(d.state)
   }
   function activeBatch(b: main.BatchView): boolean {
-    return b.approvalState === 'approved' && ['queued', 'transferring'].includes(b.state)
+    return b.approvalState === 'approved' && ['queued', 'transferring', 'interrupted', 'paused'].includes(b.state)
   }
   function finishedBatch(b: main.BatchView): boolean {
-    return ['completed', 'failed', 'canceled', 'rejected'].includes(b.state)
+    return ['completed', 'failed', 'canceled', 'rejected', 'discarded'].includes(b.state)
   }
   function batchName(b: main.BatchView): string {
     return b.rootName || `${b.totalItemCount} ${b.totalItemCount === 1 ? 'file' : 'files'}`
   }
   function currentItem(b: main.BatchView): main.BatchItemView | undefined {
-    return b.items.find((item) => item.state === 'transferring')
+    return b.items.find((item) => item.state === 'transferring' || item.state === 'interrupted' || item.state === 'paused')
   }
   function doneItems(b: main.BatchView): number {
     return b.items.filter((item) => item.state === 'completed').length
+  }
+  function batchStateLabel(b: main.BatchView): string {
+    const item = currentItem(b)
+    if (b.state === 'paused') return 'Paused — partial bytes saved'
+    if (b.state === 'interrupted') return item ? `Interrupted on ${item.displayName} — ready to resume` : 'Interrupted — ready to resume'
+    if (item && item.resumable && item.state === 'transferring') return `Resuming ${item.displayName}`
+    if (item && item.state === 'transferring') return `Uploading ${item.displayName}`
+    return 'Queued'
+  }
+  function uploadStateLabel(u: main.UploadView): string {
+    switch (u.state) {
+      case 'uploading': return u.resumable ? 'Resuming' : 'Uploading'
+      case 'paused': return 'Paused'
+      case 'interrupted': return 'Interrupted — ready to resume'
+      case 'approved': return 'Approved'
+      case 'pending': return 'Pending'
+      case 'completed': return 'Completed'
+      case 'failed': return 'Failed'
+      case 'discarded': return 'Discarded'
+      case 'canceled': return 'Canceled'
+      default: return u.state
+    }
   }
 
   function getExt(name: string): string {
@@ -382,7 +408,18 @@
               <div class="transfer-direction-badge incoming">
                 <span>↙ Receiving Batch from Phone</span>
               </div>
-              <button type="button" class="cancel-text-btn" on:click={() => cancelBatch(b)}>Cancel</button>
+              <div class="header-right-actions">
+                {#if b.state === 'paused'}
+                  <button type="button" class="button primary small" on:click={() => resumeBatch(b)} disabled={isBusy(`resume-batch:${b.id}`)}>Resume</button>
+                  <button type="button" class="cancel-text-btn" on:click={() => discardBatch(b)} disabled={isBusy(`discard-batch:${b.id}`)}>Discard Partial Upload</button>
+                {:else if b.state === 'interrupted'}
+                  <button type="button" class="button primary small" on:click={() => resumeBatch(b)} disabled={isBusy(`resume-batch:${b.id}`)}>Resume</button>
+                  <button type="button" class="cancel-text-btn" on:click={() => discardBatch(b)} disabled={isBusy(`discard-batch:${b.id}`)}>Discard Partial Upload</button>
+                {:else}
+                  <button type="button" class="button ghost small" on:click={() => pauseBatch(b)} disabled={isBusy(`pause-batch:${b.id}`)}>Pause</button>
+                  <button type="button" class="cancel-text-btn" on:click={() => cancelBatch(b)}>Cancel</button>
+                {/if}
+              </div>
             </div>
 
             <div class="transfer-filename-row">
@@ -397,7 +434,7 @@
                 {formatBytes(b.transferredBytes)} of {formatBytes(b.declaredTotalBytes)}
               </span>
               <span class="transfer-substatus">
-                {currentItem(b) ? `Receiving ${currentItem(b)?.displayName}` : 'Transferring…'}
+                {batchStateLabel(b)}
               </span>
             </div>
           </div>
@@ -412,13 +449,17 @@
               </div>
               <div class="header-right-actions">
                 <span class="transfer-meta-rate tabular">{speed(u.speed)}</span>
-                <button type="button" class="cancel-text-btn" on:click={() => cancelUpload(u.id)}>Cancel</button>
+                {#if u.state === 'interrupted' || u.state === 'paused'}
+                  <button type="button" class="cancel-text-btn" on:click={() => discardUpload(u.id)} disabled={isBusy(`discard-upload:${u.id}`)}>Discard Partial Upload</button>
+                {:else}
+                  <button type="button" class="cancel-text-btn" on:click={() => cancelUpload(u.id)}>Cancel</button>
+                {/if}
               </div>
             </div>
 
             <div class="transfer-filename-row">
               <strong class="transfer-name">{u.name}</strong>
-              <span class="transfer-percent tabular">{u.state === 'uploading' ? `${percent(u.uploaded, u.size)}%` : u.state}</span>
+              <span class="transfer-percent tabular">{(u.state === 'uploading' || u.state === 'interrupted' || u.state === 'paused') ? `${percent(u.uploaded, u.size)}%` : uploadStateLabel(u)}</span>
             </div>
 
             <ProgressBar value={percent(u.uploaded, u.size)} variant="primary" size="sm" />
@@ -430,7 +471,7 @@
                   · ETA {calcEta(u.uploaded, u.size, u.speed)}
                 {/if}
               </span>
-              <span class="transfer-substatus">{u.state}</span>
+              <span class="transfer-substatus">{uploadStateLabel(u)}</span>
             </div>
           </div>
         {/each}
