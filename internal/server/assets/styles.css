@@ -597,6 +597,21 @@ select:focus-visible,
   font-size: 0.86rem;
   color: var(--text-muted);
 }
+.helper-tips {
+  margin-top: 0.9rem;
+  font-size: 0.84rem;
+  color: var(--text-muted);
+}
+.helper-tips summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text);
+}
+.helper-tips ul {
+  margin: 0.45rem 0 0;
+  padding-left: 1.2rem;
+  line-height: 1.45;
+}
 
 @media (prefers-reduced-motion: reduce) {
   *,

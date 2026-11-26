@@ -233,6 +233,9 @@ export namespace doctor {
 	    status: string;
 	    message: string;
 	    remediation?: string;
+	    firewallState?: string;
+	    affectedPort?: number;
+	    command?: string;
 
 	    static createFrom(source: any = {}) {
 	        return new DiagnosticItem(source);
@@ -245,6 +248,9 @@ export namespace doctor {
 	        this.status = source["status"];
 	        this.message = source["message"];
 	        this.remediation = source["remediation"];
+	        this.firewallState = source["firewallState"];
+	        this.affectedPort = source["affectedPort"];
+	        this.command = source["command"];
 	    }
 	}
 	export class DiagnosticReport {
