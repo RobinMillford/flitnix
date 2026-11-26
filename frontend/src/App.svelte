@@ -1633,6 +1633,36 @@
     onClose={() => { updateModalOpen = false }}
   />
 
+  <!-- Global Trusted Device Pairing Prompt (shown regardless of active tab) -->
+  {#if pairingStatus?.requiresApproval}
+    <div class="global-pairing-overlay" role="dialog" aria-modal="true" aria-label="Device pairing verification">
+      <div class="global-pairing-modal">
+        <div class="global-pairing-badge">🔐 Trusted Device Pairing Request</div>
+        <h3>{pairingStatus.deviceName || pairingStatus.clientId || 'Mobile Browser'} wants to pair</h3>
+        <p>Confirm the 6-digit verification code matches on your phone screen before approving:</p>
+        <div class="global-pairing-sas tabular">{pairingStatus.sas || '---'}</div>
+        <div class="global-pairing-actions">
+          <button
+            type="button"
+            class="button success"
+            on:click={() => handleApprovePairing(pairingStatus?.requestId || '')}
+            disabled={pairingActionLoading}
+          >
+            {pairingActionLoading ? 'Approving…' : 'Approve & Trust Device'}
+          </button>
+          <button
+            type="button"
+            class="button danger"
+            on:click={() => handleDenyPairing(pairingStatus?.requestId || '')}
+            disabled={pairingActionLoading}
+          >
+            Deny
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
   <!-- Global Toast Notification -->
   <div class="toast-fixed-container">
     <Toast message={toastMessage} type={toastType} onDismiss={dismissToast} />

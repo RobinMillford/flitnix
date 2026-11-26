@@ -550,6 +550,54 @@ select:focus-visible,
   font-size: 0.78rem;
 }
 
+.reconnect-panel {
+  margin-top: 0.85rem;
+  padding: 0.85rem;
+  border-radius: 0.65rem;
+  border: 1px solid var(--line);
+  background: var(--bg);
+}
+.reconnect-label {
+  margin: 0 0 0.55rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.pair-controls {
+  margin-top: 0.65rem;
+}
+.sas-box {
+  margin-top: 0.85rem;
+  padding: 0.9rem;
+  border-radius: 0.65rem;
+  border: 1px solid var(--accent);
+  background: rgba(59, 130, 246, 0.08);
+  text-align: center;
+}
+.sas-label {
+  margin: 0 0 0.45rem;
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+.sas-digits {
+  font-size: 1.75rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  margin: 0.25rem 0 0.4rem;
+}
+.paired-info-box {
+  margin-top: 0.65rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+.paired-meta {
+  margin: 0;
+  font-size: 0.86rem;
+  color: var(--text-muted);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

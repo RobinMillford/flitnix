@@ -335,6 +335,12 @@ func BuildAuthV2Payload(hostID, deviceID string, timestampUnix int64, transferNo
 	return []byte(fmt.Sprintf("flitnix-auth-v2:%s:%s:%d:%s:%s", hostID, deviceID, timestampUnix, transferNonce, manifestSha256Hex))
 }
 
+// BuildDeviceSessionAuthPayload builds the signed challenge payload used by a paired
+// device to bootstrap a fresh Bearer session without scanning a QR code.
+func BuildDeviceSessionAuthPayload(hostID, deviceID string, timestampUnix int64, nonce string) []byte {
+	return []byte(fmt.Sprintf("flitnix-session-auth-v1:%s:%s:%d:%s", hostID, deviceID, timestampUnix, nonce))
+}
+
 // CreateTransferChallenge generates a 32-byte secure random nonce, records it, and returns the nonce and timestamp.
 func (s *Store) CreateTransferChallenge(hostID, deviceID string) (string, int64, error) {
 	s.challengesMu.Lock()
