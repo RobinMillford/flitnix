@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { main, netenv, transfer } from '../../wailsjs/go/models'
+  import type { main, netenv, transfer, devices } from '../../wailsjs/go/models'
   import { formatBytes, percent, speed, calcEta, fmtTime, openExternalURL } from '../utils'
   import ProgressBar from '../components/ProgressBar.svelte'
 
@@ -50,7 +50,18 @@
   export let copyTextToClipboard: (text: string) => void = () => {}
   export let showToast: (msg: string, type?: any) => void = () => {}
   export let handleOpenDownloadFolder: () => void = () => {}
+  export let visibilityState: devices.VisibilityState | null = null
+  export let setVisibilityModeAction: (mode: string) => void = () => {}
+  export let setQRSharingPausedAction: (paused: boolean) => void = () => {}
+  export let revokeAllSessionsAction: () => void = () => {}
   export let goToHistory: () => void = () => {}
+
+  function formatVisibilityCountdown(sec: number): string {
+    if (!sec || sec <= 0) return '0:00'
+    const m = Math.floor(sec / 60)
+    const s = sec % 60
+    return `${m}:${s.toString().padStart(2, '0')}`
+  }
 
   let networkDetailsOpen: boolean = false
 
@@ -132,7 +143,12 @@
       <div class="hub-inactive-grid">
         <div class="hub-info-col">
           <div class="hub-pill-row">
-            {#if refreshingNetwork}
+            {#if visibilityState?.qrSharingPaused}
+              <span class="hub-status-chip warning">
+                <span class="chip-pulse warn"></span>
+                QR Sharing Paused
+              </span>
+            {:else if refreshingNetwork}
               <span class="hub-status-chip scanning">
                 <span class="chip-spinner"></span>
                 Detecting network…
@@ -291,7 +307,12 @@
 
         <div class="hub-active-details-col">
           <div class="active-status-bar">
-            {#if refreshingNetwork}
+            {#if visibilityState?.qrSharingPaused}
+              <span class="hub-status-chip warning">
+                <span class="chip-pulse warn"></span>
+                QR Sharing Paused
+              </span>
+            {:else if refreshingNetwork}
               <span class="hub-status-chip scanning">
                 <span class="chip-spinner"></span>
                 Detecting network…
@@ -352,12 +373,77 @@
             </button>
             <button
               type="button"
+              class="button secondary small"
+              on:click={() => setQRSharingPausedAction(!(visibilityState?.qrSharingPaused ?? false))}
+            >
+              {visibilityState?.qrSharingPaused ? '▶ Resume QR Sharing' : '⏸ Pause QR Sharing'}
+            </button>
+            <button
+              type="button"
               class="button danger small"
               on:click={() => endSession(qrKey)}
               disabled={isBusy(`end:${qrKey}`)}
             >
               End Session
             </button>
+            {#if sessions.length > 1}
+              <button
+                type="button"
+                class="button danger small"
+                on:click={revokeAllSessionsAction}
+              >
+                Revoke All ({sessions.length})
+              </button>
+            {/if}
+          </div>
+
+          <!-- G15 Visibility Mode Switcher -->
+          <div class="visibility-switcher-box" aria-label="Device Visibility Mode">
+            <div class="visibility-switcher-head">
+              <span class="visibility-lbl">Discovery &amp; Access Visibility</span>
+              {#if visibilityState?.mode === 'temporary_everyone' && (visibilityState?.remainingSeconds ?? 0) > 0}
+                <span class="visibility-countdown tabular">
+                  Reverts in {formatVisibilityCountdown(visibilityState.remainingSeconds)}
+                </span>
+              {/if}
+            </div>
+            <div class="visibility-pills-row">
+              <button
+                type="button"
+                class="vis-pill"
+                class:active={visibilityState?.mode === 'hidden'}
+                on:click={() => setVisibilityModeAction('hidden')}
+              >Hidden</button>
+              <button
+                type="button"
+                class="vis-pill"
+                class:active={!visibilityState?.mode || visibilityState?.mode === 'trusted'}
+                on:click={() => setVisibilityModeAction('trusted')}
+              >Trusted Only</button>
+              <button
+                type="button"
+                class="vis-pill"
+                class:active={visibilityState?.mode === 'temporary_everyone'}
+                on:click={() => setVisibilityModeAction('temporary_everyone')}
+              >Everyone (10m)</button>
+              <button
+                type="button"
+                class="vis-pill"
+                class:active={visibilityState?.mode === 'everyone'}
+                on:click={() => setVisibilityModeAction('everyone')}
+              >Everyone</button>
+            </div>
+            <span class="visibility-help">
+              {#if visibilityState?.mode === 'hidden'}
+                Suppresses LAN discovery &amp; unsolicited requests. Explicitly created QR sessions stay active unless paused.
+              {:else if visibilityState?.mode === 'temporary_everyone'}
+                Open LAN discovery for 10 minutes, then reverts automatically to {visibilityState.previousRestrictiveMode === 'hidden' ? 'Hidden' : 'Trusted Only'}.
+              {:else if visibilityState?.mode === 'everyone'}
+                Discoverable on local network; unknown devices still require manual approval.
+              {:else}
+                Accepts paired trusted devices without exposing your computer publicly.
+              {/if}
+            </span>
           </div>
         </div>
       </div>
@@ -617,7 +703,14 @@
             <div class="inbox-request-item" class:storage-blocked={u.storageFits === false}>
               <div class="request-icon">↙</div>
               <div class="request-info">
-                <strong>{u.name}</strong>
+                <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+                  <strong>{u.name}</strong>
+                  {#if u.trustedDevice}
+                    <span class="sender-trust-pill trusted">{u.deviceName || 'Trusted Device'}</span>
+                  {:else}
+                    <span class="sender-trust-pill qr">QR / Unpaired</span>
+                  {/if}
+                </div>
                 <span class="tabular">
                   {formatBytes(u.size)} · Pending Approval
                   {#if u.storageFits === false}
@@ -626,6 +719,9 @@
                     · Fits on disk
                   {/if}
                 </span>
+                {#if u.approvalReason}
+                  <span class="approval-reason-hint">{u.approvalReason}</span>
+                {/if}
                 {#if u.storageWarning}
                   <span class="storage-warn-inline">{u.storageWarning}</span>
                 {/if}
@@ -655,7 +751,14 @@
             <div class="inbox-request-item batch-item" class:storage-blocked={b.storageFits === false}>
               <div class="request-icon">↙</div>
               <div class="request-info">
-                <strong>Batch: {batchName(b)}</strong>
+                <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+                  <strong>Batch: {batchName(b)}</strong>
+                  {#if b.trustedDevice}
+                    <span class="sender-trust-pill trusted">{b.deviceName || 'Trusted Device'}</span>
+                  {:else}
+                    <span class="sender-trust-pill qr">QR / Unpaired</span>
+                  {/if}
+                </div>
                 <span class="tabular">
                   {formatBytes(b.declaredTotalBytes)} · {b.totalItemCount} files
                   {#if b.storageFits === false}
@@ -664,6 +767,9 @@
                     · Fits on disk
                   {/if}
                 </span>
+                {#if b.approvalReason}
+                  <span class="approval-reason-hint">{b.approvalReason}</span>
+                {/if}
                 {#if b.storageWarning}
                   <span class="storage-warn-inline">{b.storageWarning}</span>
                 {/if}
@@ -1843,6 +1949,93 @@
     color: var(--text-muted);
     font-style: italic;
     padding: 4px 0;
+  }
+
+  .visibility-switcher-box {
+    margin-top: 10px;
+    padding: 10px 12px;
+    border-radius: var(--radius-md, 10px);
+    background: var(--bg-surface-elevated);
+    border: 1px solid var(--border-subtle);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .visibility-switcher-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .visibility-lbl {
+    font-size: 11.5px;
+    font-weight: 700;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .visibility-countdown {
+    font-size: 11.5px;
+    font-weight: 700;
+    color: var(--accent);
+    background: var(--accent-subtle);
+    padding: 2px 8px;
+    border-radius: 999px;
+  }
+
+  .visibility-pills-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .vis-pill {
+    border: 1px solid var(--border-base);
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 600;
+    padding: 5px 10px;
+    border-radius: 999px;
+    cursor: pointer;
+  }
+
+  .vis-pill.active {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+
+  .visibility-help {
+    font-size: 11.5px;
+    color: var(--text-muted);
+    line-height: 1.4;
+  }
+
+  .sender-trust-pill {
+    font-size: 10.5px;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 999px;
+  }
+
+  .sender-trust-pill.trusted {
+    background: var(--accent-subtle);
+    color: var(--accent);
+  }
+
+  .sender-trust-pill.qr {
+    background: var(--bg-surface-elevated);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-base);
+  }
+
+  .approval-reason-hint {
+    font-size: 11.5px;
+    color: var(--text-secondary);
   }
 
   @keyframes fadeIn {

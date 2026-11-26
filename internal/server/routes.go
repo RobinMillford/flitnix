@@ -341,6 +341,8 @@ func newAPIMux(services *Services, stall time.Duration, grants *DownloadGrantSto
 	mux.HandleFunc("GET /api/devices", handleDevicesList(services))
 	mux.HandleFunc("DELETE /api/devices/{id}", handleDeviceRemove(services))
 	mux.HandleFunc("PUT /api/devices/{id}/auto-approve", handleDeviceSetAutoApprove(services))
+	mux.HandleFunc("PUT /api/devices/{id}/policy", handleDeviceSetPolicy(services))
+	mux.HandleFunc("GET /api/visibility", handleVisibilityGet(services))
 
 	return mux
 }
@@ -567,6 +569,16 @@ func toUploadJSON(u transfer.Upload) uploadJSON {
 	}
 }
 
+func isQRSharingPaused(svcs *Services, sess *session.Session) bool {
+	if svcs == nil || svcs.Visibility == nil || sess == nil {
+		return false
+	}
+	if !svcs.Visibility.Evaluate().QRSharingPaused {
+		return false
+	}
+	return sess.Kind() != session.KindDevice
+}
+
 // handleUploadDeclare serves POST /api/uploads: phase one of the two-phase
 // receive protocol. The phone submits metadata (filename, size) and gets a
 // pending record; only after the desktop user approves may it stream the
@@ -579,6 +591,10 @@ func handleUploadDeclare(svcs *Services, _ time.Duration) http.HandlerFunc {
 		if sess == nil {
 			// requireSession guarantees this never happens; defensive.
 			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if isQRSharingPaused(svcs, sess) {
+			writeErrorCode(w, http.StatusForbidden, "QR sharing is currently paused by the host", "qr_sharing_paused")
 			return
 		}
 
@@ -623,6 +639,7 @@ func handleUploadDeclare(svcs *Services, _ time.Duration) http.HandlerFunc {
 		authSig := r.Header.Get("X-Flitnix-Signature")
 
 		autoApproveUpload := false
+		approvalReason := "untrusted session requires manual approval"
 		if authDeviceID != "" {
 			if svcs.Devices == nil || svcs.HostIdentity == nil {
 				writeError(w, http.StatusUnauthorized, "trusted devices not enabled")
@@ -683,8 +700,26 @@ func handleUploadDeclare(svcs *Services, _ time.Duration) http.HandlerFunc {
 				return
 			}
 
-			if dev.AutoApprove {
-				autoApproveUpload = true
+			visMode := devices.VisibilityTrustedOnly
+			if svcs.Visibility != nil {
+				visMode = svcs.Visibility.Evaluate().Mode
+			}
+			decision := devices.EvaluateAutoApproval(&dev, visMode, []devices.ApprovalCandidate{
+				{Name: meta.Name, Size: meta.Size},
+			})
+			autoApproveUpload = decision.AutoApproved
+			approvalReason = decision.RequiresManualReason
+		} else if sess.Kind() == session.KindDevice && svcs.Devices != nil {
+			if dev, exists := svcs.Devices.Get(sess.DeviceID()); exists {
+				visMode := devices.VisibilityTrustedOnly
+				if svcs.Visibility != nil {
+					visMode = svcs.Visibility.Evaluate().Mode
+				}
+				decision := devices.EvaluateAutoApproval(&dev, visMode, []devices.ApprovalCandidate{
+					{Name: meta.Name, Size: meta.Size},
+				})
+				autoApproveUpload = decision.AutoApproved
+				approvalReason = decision.RequiresManualReason
 			}
 		}
 
@@ -703,6 +738,9 @@ func handleUploadDeclare(svcs *Services, _ time.Duration) http.HandlerFunc {
 				if decidedUp, decErr := svcs.Transfers.Decide(up.ID, true); decErr == nil {
 					up = decidedUp
 				}
+			} else if approvalReason != "" {
+				_ = svcs.Transfers.SetApprovalReason(up.ID, approvalReason)
+				up.ApprovalReason = approvalReason
 			}
 		case errors.Is(err, transfer.ErrInvalidUpload),
 			errors.Is(err, transfer.ErrInvalidFilename):
@@ -875,6 +913,10 @@ func handleBatchCreate(svcs *Services) http.HandlerFunc {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
+		if isQRSharingPaused(svcs, sess) {
+			writeErrorCode(w, http.StatusForbidden, "QR sharing is currently paused by the host", "qr_sharing_paused")
+			return
+		}
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBatchMetadataBytes))
 		if err != nil || len(body) > maxBatchMetadataBytes {
 			writeError(w, http.StatusRequestEntityTooLarge, "batch manifest too large")
@@ -913,6 +955,7 @@ func handleBatchCreate(svcs *Services) http.HandlerFunc {
 		authSig := r.Header.Get("X-Flitnix-Signature")
 
 		autoApproveBatch := false
+		batchApprovalReason := "untrusted session requires manual approval"
 		if authDeviceID != "" {
 			if svcs.Devices == nil || svcs.HostIdentity == nil {
 				writeError(w, http.StatusUnauthorized, "trusted devices not enabled")
@@ -971,9 +1014,38 @@ func handleBatchCreate(svcs *Services) http.HandlerFunc {
 				return
 			}
 
-			// Gate 3: dev.AutoApprove == true
-			if dev.AutoApprove {
-				autoApproveBatch = true
+			visMode := devices.VisibilityTrustedOnly
+			if svcs.Visibility != nil {
+				visMode = svcs.Visibility.Evaluate().Mode
+			}
+			candidates := make([]devices.ApprovalCandidate, 0, len(manifest.Items))
+			for _, item := range manifest.Items {
+				name := item.DisplayName
+				if item.RelativePath != "" {
+					name = item.RelativePath
+				}
+				candidates = append(candidates, devices.ApprovalCandidate{Name: name, Size: item.Size})
+			}
+			decision := devices.EvaluateAutoApproval(&dev, visMode, candidates)
+			autoApproveBatch = decision.AutoApproved
+			batchApprovalReason = decision.RequiresManualReason
+		} else if sess.Kind() == session.KindDevice && svcs.Devices != nil {
+			if dev, exists := svcs.Devices.Get(sess.DeviceID()); exists {
+				visMode := devices.VisibilityTrustedOnly
+				if svcs.Visibility != nil {
+					visMode = svcs.Visibility.Evaluate().Mode
+				}
+				candidates := make([]devices.ApprovalCandidate, 0, len(manifest.Items))
+				for _, item := range manifest.Items {
+					name := item.DisplayName
+					if item.RelativePath != "" {
+						name = item.RelativePath
+					}
+					candidates = append(candidates, devices.ApprovalCandidate{Name: name, Size: item.Size})
+				}
+				decision := devices.EvaluateAutoApproval(&dev, visMode, candidates)
+				autoApproveBatch = decision.AutoApproved
+				batchApprovalReason = decision.RequiresManualReason
 			}
 		}
 
@@ -1054,6 +1126,9 @@ func handleBatchCreate(svcs *Services) http.HandlerFunc {
 			if declareErr != nil {
 				abort(declareErr)
 				return
+			}
+			if !autoApproveBatch && batchApprovalReason != "" {
+				_ = svcs.Transfers.SetApprovalReason(up.ID, batchApprovalReason)
 			}
 			if item.LastModifiedMs > 0 {
 				if mErr := svcs.Transfers.SetUploadModTime(up.ID, item.LastModifiedMs); mErr != nil {
@@ -1398,6 +1473,10 @@ func toFileJSON(sf transfer.SharedFile) fileJSON {
 // and are visible to any authenticated phone in this stage.
 func serveFilesList(svcs *Services) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if isQRSharingPaused(svcs, sessionFrom(r)) {
+			writeErrorCode(w, http.StatusForbidden, "QR sharing is currently paused by the host", "qr_sharing_paused")
+			return
+		}
 		files := svcs.Registry.List()
 		out := make([]fileJSON, len(files))
 		for i, sf := range files {
@@ -1422,6 +1501,10 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 		sess := sessionFrom(r)
 		if sess == nil {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if isQRSharingPaused(svcs, sess) {
+			writeErrorCode(w, http.StatusForbidden, "QR sharing is currently paused by the host", "qr_sharing_paused")
 			return
 		}
 		sf, ok := svcs.Registry.Get(r.PathValue("id"))
@@ -1713,6 +1796,13 @@ func writeError(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+func writeErrorCode(w http.ResponseWriter, status int, msg, code string) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg, "code": code})
 }
 
 type textSendRequest struct {
@@ -2101,5 +2191,42 @@ func handleDeviceSetAutoApprove(svcs *Services) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"status": "updated", "autoApprove": req.AutoApprove})
+	}
+}
+
+func handleDeviceSetPolicy(svcs *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess := sessionFrom(r)
+		if sess == nil || svcs == nil || svcs.Devices == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		id := r.PathValue("id")
+		var policy devices.DevicePolicy
+		if !decodeControlJSON(w, r, &policy, "invalid request body", rejectUnknownFields) {
+			return
+		}
+		if err := svcs.Devices.SetDevicePolicy(id, policy); err != nil {
+			if errors.Is(err, devices.ErrDeviceNotFound) {
+				writeError(w, http.StatusNotFound, "device not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "updated", "policy": policy})
+	}
+}
+
+func handleVisibilityGet(svcs *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if svcs == nil || svcs.Visibility == nil {
+			writeJSON(w, http.StatusOK, devices.VisibilityState{
+				Mode:                    devices.VisibilityTrustedOnly,
+				PreviousRestrictiveMode: devices.VisibilityTrustedOnly,
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, svcs.Visibility.Evaluate())
 	}
 }

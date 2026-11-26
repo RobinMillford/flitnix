@@ -158,6 +158,7 @@ type Services struct {
 	Devices        *devices.Store
 	HostIdentity   *devices.HostIdentity
 	Pairing        *devices.PairingCoordinator
+	Visibility     *devices.VisibilityManager
 	Inhibitor      power.Inhibitor
 	OnPhoneContact func(source string)
 
