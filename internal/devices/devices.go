@@ -36,12 +36,25 @@ type TransferChallenge struct {
 
 // Device represents a cryptographically paired personal device.
 type Device struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	PublicKey   string    `json:"publicKey"` // hex-encoded Ed25519 public key
-	PairedAt    time.Time `json:"pairedAt"`
-	LastSeen    time.Time `json:"lastSeen"`
-	AutoApprove bool      `json:"autoApprove"`
+	ID                  string    `json:"id"`
+	Name                string    `json:"name"`
+	PublicKey           string    `json:"publicKey"` // hex-encoded Ed25519 public key
+	PairedAt            time.Time `json:"pairedAt"`
+	LastSeen            time.Time `json:"lastSeen"`
+	AutoApprove         bool      `json:"autoApprove"`
+	MaxAutoApproveBytes int64     `json:"maxAutoApproveBytes"` // 0 = default 100 MiB, <0 = unlimited
+	AllowExecutables    bool      `json:"allowExecutables"`
+	AllowScripts        bool      `json:"allowScripts"`
+}
+
+// EffectivePolicy returns the normalized per-device conditional auto-approval policy.
+func (d Device) EffectivePolicy() DevicePolicy {
+	return DevicePolicy{
+		AutoApprove:         d.AutoApprove,
+		MaxAutoApproveBytes: d.MaxAutoApproveBytes,
+		AllowExecutables:    d.AllowExecutables,
+		AllowScripts:        d.AllowScripts,
+	}
 }
 
 // Store manages persistent trusted devices.
@@ -176,6 +189,23 @@ func (s *Store) SetAutoApprove(id string, autoApprove bool) error {
 		return ErrDeviceNotFound
 	}
 	d.AutoApprove = autoApprove
+	s.devices[id] = d
+	return s.saveLocked()
+}
+
+// SetDevicePolicy updates the granular conditional auto-approval policy for a device.
+func (s *Store) SetDevicePolicy(id string, policy DevicePolicy) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	d, ok := s.devices[id]
+	if !ok {
+		return ErrDeviceNotFound
+	}
+	d.AutoApprove = policy.AutoApprove
+	d.MaxAutoApproveBytes = policy.MaxAutoApproveBytes
+	d.AllowExecutables = policy.AllowExecutables
+	d.AllowScripts = policy.AllowScripts
 	s.devices[id] = d
 	return s.saveLocked()
 }

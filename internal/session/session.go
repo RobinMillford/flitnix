@@ -212,6 +212,8 @@ type Session struct {
 
 	id         string
 	generation uint64
+	kind       string // "qr" (default) or "device"
+	deviceID   string // enrolled device ID when kind == "device"
 
 	created    time.Time
 	idle       time.Duration
@@ -348,9 +350,23 @@ func generateToken() (string, error) {
 
 func digestToken(tok string) [sha256.Size]byte { return sha256.Sum256([]byte(tok)) }
 
+const (
+	KindQR     = "qr"
+	KindDevice = "device"
+)
+
 // Create inserts a new active session and returns it, including its raw
 // token (the desktop needs it, e.g. to build the QR URL in stage 4).
 func (m *Manager) Create() (*Session, error) {
+	return m.createWithKind(KindQR, "")
+}
+
+// CreateForDevice inserts a new active session bound to an enrolled trusted device ID.
+func (m *Manager) CreateForDevice(deviceID string) (*Session, error) {
+	return m.createWithKind(KindDevice, deviceID)
+}
+
+func (m *Manager) createWithKind(kind, deviceID string) (*Session, error) {
 	tok, err := generateToken()
 	if err != nil {
 		return nil, err
@@ -378,6 +394,8 @@ func (m *Manager) Create() (*Session, error) {
 		verifier:   m.verify(tok),
 		id:         id,
 		generation: 1,
+		kind:       kind,
+		deviceID:   deviceID,
 		created:    now,
 		idle:       m.idle,
 		nowFactory: m.now,
@@ -604,6 +622,30 @@ func (m *Manager) RevokeSession(s *Session) error {
 	return m.revokeLocked(s)
 }
 
+// RevokeByDeviceID revokes every active session bound to deviceID and returns
+// the non-secret session keys of the revoked sessions.
+func (m *Manager) RevokeByDeviceID(deviceID string) []string {
+	if deviceID == "" {
+		return nil
+	}
+	defer m.notifyExpired()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var targets []*Session
+	for _, s := range m.active {
+		if s.deviceID == deviceID {
+			targets = append(targets, s)
+		}
+	}
+	var keys []string
+	for _, s := range targets {
+		if err := m.revokeLocked(s); err == nil {
+			keys = append(keys, s.Key())
+		}
+	}
+	return keys
+}
+
 // revokeLocked persists then applies one revocation. Callers hold m.mu.
 func (m *Manager) revokeLocked(s *Session) error {
 	s.generation++
@@ -778,6 +820,17 @@ func (s *Session) Key() string {
 
 // ID returns the stable session identity reference. It is not a credential.
 func (s *Session) ID() string { return s.id }
+
+// Kind returns the session origin kind ("qr" or "device").
+func (s *Session) Kind() string {
+	if s.kind == "" {
+		return "qr"
+	}
+	return s.kind
+}
+
+// DeviceID returns the enrolled trusted device ID if the session was created for a trusted device.
+func (s *Session) DeviceID() string { return s.deviceID }
 
 // Generation reports the current credential generation.
 func (s *Session) Generation() uint64 { return s.generation }

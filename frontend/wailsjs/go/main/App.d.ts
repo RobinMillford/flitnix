@@ -69,6 +69,8 @@ export function GetSettings():Promise<main.SettingsView>;
 
 export function GetStorageStatus():Promise<transfer.StorageStatus>;
 
+export function GetVisibilityState():Promise<devices.VisibilityState>;
+
 export function ListAuditEvents(arg1:audit.Filter):Promise<main.AuditListResult>;
 
 export function ListBatches():Promise<Array<main.BatchView>>;
@@ -133,6 +135,8 @@ export function ResetSettings():Promise<main.SettingsView>;
 
 export function ResumeBatch(arg1:string):Promise<main.BatchView>;
 
+export function RevokeAllSessions():Promise<void>;
+
 export function RevokeGuest(arg1:string):Promise<void>;
 
 export function RevokeSharedFile(arg1:string):Promise<void>;
@@ -154,6 +158,12 @@ export function ServerAddress():Promise<string>;
 export function SessionQR(arg1:string):Promise<string>;
 
 export function SetDeviceAutoApprove(arg1:string,arg2:boolean):Promise<void>;
+
+export function SetDevicePolicy(arg1:string,arg2:devices.DevicePolicy):Promise<void>;
+
+export function SetQRSharingPaused(arg1:boolean):Promise<devices.VisibilityState>;
+
+export function SetVisibilityMode(arg1:string):Promise<devices.VisibilityState>;
 
 export function SleepInhibition():Promise<power.Status>;
 

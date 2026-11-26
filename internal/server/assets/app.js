@@ -483,11 +483,15 @@
     }).then(function (res) {
       return readBody(res).then(function (body) {
         if (res.status === 401) { endUnauthorized(body && body.code); }
+        if (res.status === 403 && body && body.code === "qr_sharing_paused") {
+          setStatus("reconnecting", body.error || "QR sharing is currently paused by the host");
+        }
         if (res.status >= 200 && res.status < 300) return body;
         var msg = body && body.error ? body.error
           : "Request failed (" + res.status + ")";
         var err = new Error(msg);
         err.status = res.status;
+        err.code = body && body.code ? body.code : "";
         err.silent = res.status === 401; // session UI already switching over
         throw err;
       });

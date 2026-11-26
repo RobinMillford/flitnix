@@ -118,6 +118,10 @@ export function GetStorageStatus() {
   return window['go']['main']['App']['GetStorageStatus']();
 }
 
+export function GetVisibilityState() {
+  return window['go']['main']['App']['GetVisibilityState']();
+}
+
 export function ListAuditEvents(arg1) {
   return window['go']['main']['App']['ListAuditEvents'](arg1);
 }
@@ -246,6 +250,10 @@ export function ResumeBatch(arg1) {
   return window['go']['main']['App']['ResumeBatch'](arg1);
 }
 
+export function RevokeAllSessions() {
+  return window['go']['main']['App']['RevokeAllSessions']();
+}
+
 export function RevokeGuest(arg1) {
   return window['go']['main']['App']['RevokeGuest'](arg1);
 }
@@ -288,6 +296,18 @@ export function SessionQR(arg1) {
 
 export function SetDeviceAutoApprove(arg1, arg2) {
   return window['go']['main']['App']['SetDeviceAutoApprove'](arg1, arg2);
+}
+
+export function SetDevicePolicy(arg1, arg2) {
+  return window['go']['main']['App']['SetDevicePolicy'](arg1, arg2);
+}
+
+export function SetQRSharingPaused(arg1) {
+  return window['go']['main']['App']['SetQRSharingPaused'](arg1);
+}
+
+export function SetVisibilityMode(arg1) {
+  return window['go']['main']['App']['SetVisibilityMode'](arg1);
 }
 
 export function SleepInhibition() {

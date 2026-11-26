@@ -33,8 +33,9 @@
     ListGuestPresets, ListGuestTemplates, SaveGuestTemplate, DeleteGuestTemplate, DuplicateGuestTemplate, StartGuestRoomFromTemplate,
     ListAuditEvents, ClearAuditHistory,
     RunConnectionDiagnostics, SendTextMessage, ListTextMessages, ClearTextMessages,
-    ListTrustedDevices, RemoveTrustedDevice, SetDeviceAutoApprove,
+    ListTrustedDevices, RemoveTrustedDevice, SetDeviceAutoApprove, SetDevicePolicy,
     ApprovePairing, DenyPairing, GetPairingStatus, ReArmPairing,
+    GetVisibilityState, SetVisibilityMode, SetQRSharingPaused, RevokeAllSessions,
     GetSettings, SaveSettings, ResetSettings, SelectDownloadDirectory, OpenDownloadFolder,
     GetStorageStatus, SleepInhibition, GetAppVersion, CheckForUpdates
   } from '../wailsjs/go/main/App.js'
@@ -80,6 +81,7 @@
   let rearmingLoading = false
   let sleepInhibition: power.Status | null = null
   let storageStatus: transfer.StorageStatus | null = null
+  let visibilityState: devices.VisibilityState | null = null
 
   // Persistent Settings state
   let settingsState: main.SettingsView = {
@@ -251,9 +253,9 @@
       ListSessions(), ListPendingUploads(), RecentUploads(), RecentDownloads(),
       ListSharedFiles(), ListSharedSources(), ReceiveDirectory(), ServerAddress(),
       ListPendingBatches(), ListBatches(), GetGuestRoomState(), GetPairingStatus(),
-      SleepInhibition(), GetStorageStatus()
+      SleepInhibition(), GetStorageStatus(), GetVisibilityState()
     ]),
-    ([s, p, u, d, f, sourceList, dir, addr, b, allBatches, grState, pStatus, sleepStatus, stStatus]) => {
+    ([s, p, u, d, f, sourceList, dir, addr, b, allBatches, grState, pStatus, sleepStatus, stStatus, visState]) => {
       sessions = s ?? []; pending = p ?? []; uploads = u ?? []; downloads = d ?? []
       files = f ?? []; sources = sourceList ?? []; pendingBatches = b ?? []
       batches = allBatches ?? []
@@ -262,6 +264,7 @@
       pairingStatus = pStatus ?? null
       sleepInhibition = sleepStatus ?? null
       storageStatus = stStatus ?? null
+      visibilityState = visState ?? null
       if (!guestDestDir && dir) guestDestDir = dir
 
       const currentPendingTotal = (pending?.length ?? 0) + (pendingBatches?.length ?? 0) + (guestRoomState?.pendingUploads?.length ?? 0)
@@ -828,6 +831,53 @@
     }
   }
 
+  async function updateDevicePolicyAction(id: string, policy: devices.DevicePolicy): Promise<void> {
+    try {
+      await SetDevicePolicy(id, policy)
+      await loadTrustedDevices()
+      showToast('Updated device acceptance policy', 'success')
+    } catch (err) {
+      report(err)
+    }
+  }
+
+  async function setVisibilityModeAction(mode: string): Promise<void> {
+    try {
+      visibilityState = await SetVisibilityMode(mode)
+      showToast(
+        mode === 'hidden'
+          ? 'Visibility set to Hidden (QR sharing stays independent)'
+          : mode === 'trusted'
+            ? 'Visibility set to Trusted Devices Only'
+            : mode === 'temporary_everyone'
+              ? 'Visible to Everyone for 10 minutes'
+              : 'Visible to Everyone',
+        'info'
+      )
+    } catch (err) {
+      report(err)
+    }
+  }
+
+  async function setQRSharingPausedAction(paused: boolean): Promise<void> {
+    try {
+      visibilityState = await SetQRSharingPaused(paused)
+      showToast(paused ? 'QR sharing paused' : 'QR sharing resumed', 'info')
+    } catch (err) {
+      report(err)
+    }
+  }
+
+  async function revokeAllSessionsAction(): Promise<void> {
+    try {
+      await RevokeAllSessions()
+      refresh()
+      showToast('Revoked all active sessions', 'info')
+    } catch (err) {
+      report(err)
+    }
+  }
+
   async function removeDeviceAction(id: string): Promise<void> {
     try {
       await RemoveTrustedDevice(id)
@@ -1074,6 +1124,9 @@
     EventsOn('network:changed', (st: netenv.NetworkState) => {
       handleNetworkStateUpdate(st)
     })
+    EventsOn('visibility:changed', (st: devices.VisibilityState) => {
+      visibilityState = st
+    })
     GetAppVersion().then((v) => {
       appVersionInfo = v
     }).catch(report)
@@ -1090,6 +1143,7 @@
       clearInterval(id)
       OnFileDropOff()
       EventsOff('network:changed')
+      EventsOff('visibility:changed')
     }
   })
 </script>
@@ -1423,6 +1477,10 @@
               {copyTextToClipboard}
               {showToast}
               {handleOpenDownloadFolder}
+              {visibilityState}
+              {setVisibilityModeAction}
+              {setQRSharingPausedAction}
+              {revokeAllSessionsAction}
               goToHistory={() => switchTab('history')}
             />
           </div>
@@ -1479,6 +1537,7 @@
               loadTrustedDevices={loadTrustedDevices}
               removeDeviceAction={removeDeviceAction}
               setDeviceAutoApproveAction={toggleDeviceAutoApprove}
+              setDevicePolicyAction={updateDevicePolicyAction}
               approvePairingAction={handleApprovePairing}
               denyPairingAction={handleDenyPairing}
               reArmPairingAction={handleReArmPairing}

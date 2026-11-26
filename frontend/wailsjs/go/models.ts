@@ -111,6 +111,9 @@ export namespace devices {
 	    // Go type: time
 	    lastSeen: any;
 	    autoApprove: boolean;
+	    maxAutoApproveBytes: number;
+	    allowExecutables: boolean;
+	    allowScripts: boolean;
 
 	    static createFrom(source: any = {}) {
 	        return new Device(source);
@@ -124,6 +127,9 @@ export namespace devices {
 	        this.pairedAt = this.convertValues(source["pairedAt"], null);
 	        this.lastSeen = this.convertValues(source["lastSeen"], null);
 	        this.autoApprove = source["autoApprove"];
+	        this.maxAutoApproveBytes = source["maxAutoApproveBytes"];
+	        this.allowExecutables = source["allowExecutables"];
+	        this.allowScripts = source["allowScripts"];
 	    }
 
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -172,6 +178,48 @@ export namespace devices {
 	        this.sas = source["sas"];
 	        this.remainingSeconds = source["remainingSeconds"];
 	        this.failureCount = source["failureCount"];
+	    }
+	}
+	export class DevicePolicy {
+	    autoApprove: boolean;
+	    maxAutoApproveBytes: number;
+	    allowExecutables: boolean;
+	    allowScripts: boolean;
+
+	    static createFrom(source: any = {}) {
+	        return new DevicePolicy(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.autoApprove = source["autoApprove"];
+	        this.maxAutoApproveBytes = source["maxAutoApproveBytes"];
+	        this.allowExecutables = source["allowExecutables"];
+	        this.allowScripts = source["allowScripts"];
+	    }
+	}
+	export class VisibilityState {
+	    mode: string;
+	    previousRestrictiveMode: string;
+	    // Go type: time
+	    temporaryExpiresAt?: any;
+	    qrSharingPaused: boolean;
+	    remainingSeconds: number;
+	    // Go type: time
+	    updatedAt?: any;
+
+	    static createFrom(source: any = {}) {
+	        return new VisibilityState(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.mode = source["mode"];
+	        this.previousRestrictiveMode = source["previousRestrictiveMode"];
+	        this.temporaryExpiresAt = source["temporaryExpiresAt"];
+	        this.qrSharingPaused = source["qrSharingPaused"];
+	        this.remainingSeconds = source["remainingSeconds"];
+	        this.updatedAt = source["updatedAt"];
 	    }
 	}
 
@@ -507,6 +555,10 @@ export namespace main {
 	    error?: string;
 	    storageFits: boolean;
 	    storageWarning?: string;
+	    deviceId?: string;
+	    deviceName?: string;
+	    trustedDevice?: boolean;
+	    approvalReason?: string;
 
 	    static createFrom(source: any = {}) {
 	        return new BatchView(source);
@@ -530,6 +582,10 @@ export namespace main {
 	        this.error = source["error"];
 	        this.storageFits = source["storageFits"];
 	        this.storageWarning = source["storageWarning"];
+	        this.deviceId = source["deviceId"];
+	        this.deviceName = source["deviceName"];
+	        this.trustedDevice = source["trustedDevice"];
+	        this.approvalReason = source["approvalReason"];
 	    }
 
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -911,6 +967,10 @@ export namespace main {
 	    autoStartSession: boolean;
 	    preserveModTimes: boolean;
 	    preferredInterface: string;
+	    visibilityMode?: string;
+	    visibilityPreviousMode?: string;
+	    visibilityExpiresAt?: string;
+	    qrSharingPaused?: boolean;
 
 	    static createFrom(source: any = {}) {
 	        return new SettingsView(source);
@@ -926,6 +986,10 @@ export namespace main {
 	        this.autoStartSession = source["autoStartSession"];
 	        this.preserveModTimes = source["preserveModTimes"] !== undefined ? source["preserveModTimes"] : true;
 	        this.preferredInterface = source["preferredInterface"];
+	        this.visibilityMode = source["visibilityMode"];
+	        this.visibilityPreviousMode = source["visibilityPreviousMode"];
+	        this.visibilityExpiresAt = source["visibilityExpiresAt"];
+	        this.qrSharingPaused = source["qrSharingPaused"];
 	    }
 	}
 	export class SharedFileView {
@@ -1064,6 +1128,10 @@ export namespace main {
 	    committedOffset?: number;
 	    storageFits: boolean;
 	    storageWarning?: string;
+	    deviceId?: string;
+	    deviceName?: string;
+	    trustedDevice?: boolean;
+	    approvalReason?: string;
 
 	    static createFrom(source: any = {}) {
 	        return new UploadView(source);
@@ -1084,6 +1152,10 @@ export namespace main {
 	        this.committedOffset = source["committedOffset"];
 	        this.storageFits = source["storageFits"];
 	        this.storageWarning = source["storageWarning"];
+	        this.deviceId = source["deviceId"];
+	        this.deviceName = source["deviceName"];
+	        this.trustedDevice = source["trustedDevice"];
+	        this.approvalReason = source["approvalReason"];
 	    }
 
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
