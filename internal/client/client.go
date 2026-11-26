@@ -67,21 +67,29 @@ type Client struct {
 
 // NewClient constructs an outbound transfer client for the given target.
 func NewClient(target *Target) *Client {
-	transport := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		ResponseHeaderTimeout: 30 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
+	return NewClientWithHTTPClient(target, nil)
+}
+
+// NewClientWithHTTPClient constructs an outbound transfer client using a caller-supplied HTTP client (such as TLS 1.3 pinned transport).
+func NewClientWithHTTPClient(target *Target, httpClient *http.Client) *Client {
+	if httpClient == nil {
+		transport := &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   10 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			ResponseHeaderTimeout: 30 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		}
+		httpClient = &http.Client{
+			Transport: transport,
+			Timeout:   0, // Streaming requests use context deadlines rather than a blanket client timeout
+		}
 	}
 
 	return &Client{
-		target: target,
-		httpClient: &http.Client{
-			Transport: transport,
-			Timeout:   0, // Streaming requests use context deadlines rather than a blanket client timeout
-		},
+		target:      target,
+		httpClient:  httpClient,
 		retryPolicy: DefaultRetryPolicy(),
 	}
 }
