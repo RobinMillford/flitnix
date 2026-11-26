@@ -6,6 +6,7 @@ import {guest} from '../models';
 import {version} from '../models';
 import {netenv} from '../models';
 import {devices} from '../models';
+import {discovery} from '../models';
 import {session} from '../models';
 import {audit} from '../models';
 import {doctor} from '../models';
@@ -81,6 +82,8 @@ export function ListBatches():Promise<Array<main.BatchView>>;
 export function ListGuestPresets():Promise<Array<guest.Preset>>;
 
 export function ListGuestTemplates():Promise<Array<guest.Template>>;
+
+export function ListNearbyPeers():Promise<Array<discovery.Peer>>;
 
 export function ListNetworkInterfaces():Promise<Array<netenv.View>>;
 
@@ -179,5 +182,7 @@ export function StartGuestRoomFromTemplate(arg1:string,arg2:string):Promise<main
 export function StartGuestRoomWithConfig(arg1:main.GuestRoomConfigView):Promise<main.GuestRoomView>;
 
 export function StartSession(arg1:string):Promise<main.SessionView>;
+
+export function TriggerNearbyScan():Promise<Array<discovery.Peer>>;
 
 export function UpdateExpectedParticipant(arg1:guest.ExpectedParticipant):Promise<void>;

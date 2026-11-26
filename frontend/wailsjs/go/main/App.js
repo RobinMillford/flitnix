@@ -142,6 +142,10 @@ export function ListGuestTemplates() {
   return window['go']['main']['App']['ListGuestTemplates']();
 }
 
+export function ListNearbyPeers() {
+  return window['go']['main']['App']['ListNearbyPeers']();
+}
+
 export function ListNetworkInterfaces() {
   return window['go']['main']['App']['ListNetworkInterfaces']();
 }
@@ -336,6 +340,10 @@ export function StartGuestRoomWithConfig(arg1) {
 
 export function StartSession(arg1) {
   return window['go']['main']['App']['StartSession'](arg1);
+}
+
+export function TriggerNearbyScan() {
+  return window['go']['main']['App']['TriggerNearbyScan']();
 }
 
 export function UpdateExpectedParticipant(arg1) {
