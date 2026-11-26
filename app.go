@@ -293,6 +293,7 @@ type App struct {
 
 	srvMu       sync.Mutex
 	srv         *server.Server
+	srvListen   string
 	serveCancel context.CancelFunc
 	serveDone   chan error
 
@@ -647,7 +648,7 @@ func (a *App) ensureServer(listen string) error {
 	defer a.srvMu.Unlock()
 
 	if a.srv != nil {
-		if got := a.srv.Addr(); got != nil && sameListenAddr(got.String(), listen) {
+		if a.srvListen == listen || (a.srv.Addr() != nil && sameListenAddr(a.srv.Addr().String(), listen)) {
 			return nil
 		}
 		fmt.Fprintf(os.Stderr, "flitnix: the listen address changed; the existing sessions cannot stay reachable: pairing_replacement\n")
@@ -723,6 +724,7 @@ func (a *App) startServerLocked(listen string) error {
 		return fmt.Errorf("flitnix: the local server could not start on %s: %w", listen, err)
 	case <-srv.Ready():
 		a.srv, a.serveCancel, a.serveDone = srv, cancel, done
+		a.srvListen = listen
 		return nil
 	case <-time.After(3 * time.Second):
 		cancel()
@@ -752,6 +754,7 @@ func (a *App) stopServerLocked() {
 		// mean an already-stranded Serve, which nothing here can fix.
 	}
 	a.srv, a.serveCancel, a.serveDone = nil, nil, nil
+	a.srvListen = ""
 }
 
 // endAllSessions ends every active session, mirroring EndSession for all
