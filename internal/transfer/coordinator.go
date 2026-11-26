@@ -770,8 +770,11 @@ func (c *Coordinator) InterruptItem(sessionKey string, lease TransferLease, comm
 
 // PauseBatch suspends an approved/active/interrupted batch, preserving committed
 // bytes on disk and invoking any active chunk cancellation callback unlocked.
+// PauseBatch pauses an active or interrupted batch while preserving durable
+// committed partial bytes. The in-flight stream is NOT canceled or discarded
+// here; callers must invoke transfers.Pause for the returned content IDs,
+// which cancels only in-flight I/O and keeps .part/.meta and committed offset.
 func (c *Coordinator) PauseBatch(sessionKey, batchID string) (BatchView, []string, error) {
-	var cancel context.CancelFunc
 	var contentIDs []string
 	var view BatchView
 	c.mu.Lock()
@@ -789,7 +792,8 @@ func (c *Coordinator) PauseBatch(sessionKey, batchID string) (BatchView, []strin
 					if session.active.publishing {
 						continue
 					}
-					cancel = session.active.cancel
+					// Release the lease WITHOUT invoking the cancellation
+					// callback: pause must not cancel or erase the upload.
 					session.active = nil
 				}
 				switch item.State {
@@ -817,9 +821,6 @@ func (c *Coordinator) PauseBatch(sessionKey, batchID string) (BatchView, []strin
 		}
 	}
 	c.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
 	if err != nil {
 		return BatchView{}, nil, err
 	}

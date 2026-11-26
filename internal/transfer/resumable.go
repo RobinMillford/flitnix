@@ -960,10 +960,15 @@ func (s *Service) SubmitChunk(
 			removeResumablePaths(partPath, metaPath)
 			return ChunkResult{}, ErrUploadDiscarded
 		}
-		if !wasPaused {
-			u.state = StateInterrupted
-			u.reason = cause.Error()
+		if wasPaused {
+			// Paused, not canceled: keep durable partial data (.part/.meta),
+			// committed offset, hash state, and quota reservation for resume.
+			// partFile was truncated to curOffset above; no partials removed.
+			u.mu.Unlock()
+			return ChunkResult{CommittedOffset: curOffset}, ErrUploadPaused
 		}
+		u.state = StateInterrupted
+		u.reason = cause.Error()
 		u.mu.Unlock()
 		return ChunkResult{CommittedOffset: curOffset}, cause
 	}

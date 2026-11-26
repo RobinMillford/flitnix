@@ -909,7 +909,7 @@ func serveArchiveDownload(svcs *Services, grants *DownloadGrantStore, stall time
 			return
 		}
 
-		if svcs.Downloads != nil && !isContinuation {
+		if svcs.Downloads != nil {
 			svcs.Downloads.Begin(grant.DownloadID)
 		}
 
