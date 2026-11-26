@@ -54,9 +54,18 @@ func TestDevicesStoreLifecycle(t *testing.T) {
 		t.Fatalf("VerifySignature failed: valid=%v, err=%v", valid, err)
 	}
 
-	// Bad signature test
-	badSigHex := sigHex[:len(sigHex)-4] + "0000"
-	validBad, err := store.VerifySignature(dev.ID, msg, badSigHex)
+	// Bad signature test: corrupt the first hex digit so the signature is
+	// guaranteed to differ (appending "0000" would collide if sigHex already
+	// ends in "0000").
+	badSig := []byte(sigHex)
+	if len(badSig) > 0 {
+		if badSig[0] == '0' {
+			badSig[0] = '1'
+		} else {
+			badSig[0] = '0'
+		}
+	}
+	validBad, err := store.VerifySignature(dev.ID, msg, string(badSig))
 	if validBad {
 		t.Errorf("expected bad signature to fail verification")
 	}

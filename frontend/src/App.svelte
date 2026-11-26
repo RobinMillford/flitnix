@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { t, setLocale, tFn } from './i18n'
-  import type { main, netenv, doctor, guest, audit, devices, power, version, update } from '../wailsjs/go/models'
+  import type { main, netenv, doctor, guest, audit, devices, power, version, update, transfer } from '../wailsjs/go/models'
   import { OnFileDrop, OnFileDropOff, EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
   import logoUrl from './assets/images/logo-universal.png'
   import { createRefreshScheduler } from './refreshScheduler'
@@ -21,8 +21,9 @@
 
   import {
     StartSession, EndSession, ListSessions, ListPendingUploads, RecentUploads,
-    RecentDownloads, ApproveUpload, RejectUpload, CancelUpload,
+    RecentDownloads, ApproveUpload, RejectUpload, CancelUpload, DiscardUpload,
     ListPendingBatches, ListBatches, ApproveBatch, RejectBatch, CancelBatch,
+    PauseBatch, ResumeBatch, DiscardBatch,
     PickFilesForSharing, PickFolderForSharing, AddDroppedSources,
     ListSharedFiles, ListSharedSources, RevokeSharedFile, RevokeSharedSource, ReceiveDirectory,
     ListNetworkInterfaces, SessionQR, ServerAddress, GetNetworkState, RefreshNetwork,
@@ -35,7 +36,7 @@
     ListTrustedDevices, RemoveTrustedDevice, SetDeviceAutoApprove,
     ApprovePairing, DenyPairing, GetPairingStatus, ReArmPairing,
     GetSettings, SaveSettings, ResetSettings, SelectDownloadDirectory, OpenDownloadFolder,
-    SleepInhibition, GetAppVersion, CheckForUpdates
+    GetStorageStatus, SleepInhibition, GetAppVersion, CheckForUpdates
   } from '../wailsjs/go/main/App.js'
 
   const validTabs = ['personal', 'guest', 'templates', 'devices', 'history', 'audit', 'settings'] as const
@@ -78,15 +79,17 @@
   let pairingActionLoading = false
   let rearmingLoading = false
   let sleepInhibition: power.Status | null = null
+  let storageStatus: transfer.StorageStatus | null = null
 
   // Persistent Settings state
   let settingsState: main.SettingsView = {
-    version: 1,
+    version: 2,
     theme: getInitialTheme(),
     locale: 'system',
     downloadDir: '',
     effectiveDir: '',
     autoStartSession: false,
+    preserveModTimes: true,
     preferredInterface: ''
   }
   let settingsSavedAlert = ''
@@ -248,9 +251,9 @@
       ListSessions(), ListPendingUploads(), RecentUploads(), RecentDownloads(),
       ListSharedFiles(), ListSharedSources(), ReceiveDirectory(), ServerAddress(),
       ListPendingBatches(), ListBatches(), GetGuestRoomState(), GetPairingStatus(),
-      SleepInhibition()
+      SleepInhibition(), GetStorageStatus()
     ]),
-    ([s, p, u, d, f, sourceList, dir, addr, b, allBatches, grState, pStatus, sleepStatus]) => {
+    ([s, p, u, d, f, sourceList, dir, addr, b, allBatches, grState, pStatus, sleepStatus, stStatus]) => {
       sessions = s ?? []; pending = p ?? []; uploads = u ?? []; downloads = d ?? []
       files = f ?? []; sources = sourceList ?? []; pendingBatches = b ?? []
       batches = allBatches ?? []
@@ -258,6 +261,7 @@
       guestRoomState = grState ?? null
       pairingStatus = pStatus ?? null
       sleepInhibition = sleepStatus ?? null
+      storageStatus = stStatus ?? null
       if (!guestDestDir && dir) guestDestDir = dir
 
       const currentPendingTotal = (pending?.length ?? 0) + (pendingBatches?.length ?? 0) + (guestRoomState?.pendingUploads?.length ?? 0)
@@ -444,6 +448,42 @@
     setBusy(k, true)
     CancelUpload(id).then(() => {
       liveAnnouncement = tFn('announcements.uploadCanceled')
+      refresh()
+    }).catch((e) => report(e, k)).finally(() => setBusy(k, false))
+  }
+
+  function pauseBatch(batch: main.BatchView): void {
+    const k = `pause-batch:${batch.id}`; if (isBusy(k)) return
+    setBusy(k, true)
+    PauseBatch(batch.id).then(() => {
+      liveAnnouncement = 'Transfer paused'
+      refresh()
+    }).catch((e) => report(e, k)).finally(() => setBusy(k, false))
+  }
+
+  function resumeBatch(batch: main.BatchView): void {
+    const k = `resume-batch:${batch.id}`; if (isBusy(k)) return
+    setBusy(k, true)
+    ResumeBatch(batch.id).then(() => {
+      liveAnnouncement = 'Transfer ready to resume'
+      refresh()
+    }).catch((e) => report(e, k)).finally(() => setBusy(k, false))
+  }
+
+  function discardBatch(batch: main.BatchView): void {
+    const k = `discard-batch:${batch.id}`; if (isBusy(k)) return
+    setBusy(k, true)
+    DiscardBatch(batch.id).then(() => {
+      liveAnnouncement = 'Partial upload discarded'
+      refresh()
+    }).catch((e) => report(e, k)).finally(() => setBusy(k, false))
+  }
+
+  function discardUpload(id: string): void {
+    const k = `discard-upload:${id}`; if (isBusy(k)) return
+    setBusy(k, true)
+    DiscardUpload(id).then(() => {
+      liveAnnouncement = 'Partial upload discarded'
       refresh()
     }).catch((e) => report(e, k)).finally(() => setBusy(k, false))
   }
@@ -869,6 +909,14 @@
     }
   }
 
+  async function refreshStorageStatus(): Promise<void> {
+    try {
+      storageStatus = await GetStorageStatus()
+    } catch {
+      // non-fatal background refresh
+    }
+  }
+
   async function handleSaveSettings(): Promise<void> {
     savingSettings = true
     settingsSavedAlert = ''
@@ -880,6 +928,7 @@
       const reloaded = await GetSettings()
       settingsState = reloaded
       receiveDir = reloaded.effectiveDir
+      await refreshStorageStatus()
       settingsSavedAlert = 'Settings saved successfully.'
       setTimeout(() => { settingsSavedAlert = '' }, 3000)
     } catch (err) {
@@ -898,6 +947,7 @@
       applyTheme(defaults.theme)
       setLocale(defaults.locale || 'system')
       receiveDir = defaults.effectiveDir
+      await refreshStorageStatus()
       settingsSavedAlert = 'Settings restored to defaults.'
       setTimeout(() => { settingsSavedAlert = '' }, 3000)
     } catch (err) {
@@ -1335,6 +1385,7 @@
               {downloads}
               {files}
               {sources}
+              {storageStatus}
               {interfaces}
               {networkState}
               {refreshingNetwork}
@@ -1363,6 +1414,10 @@
               {decideBatch}
               {cancelUpload}
               {cancelBatch}
+              {pauseBatch}
+              {resumeBatch}
+              {discardBatch}
+              {discardUpload}
               {sendTextAction}
               {clearTextAction}
               {copyTextToClipboard}
@@ -1469,6 +1524,8 @@
               {settingsSavedAlert}
               {settingsError}
               {sleepInhibition}
+              {storageStatus}
+              onRefreshStorage={refreshStorageStatus}
               {handleSelectDownloadDir}
               {handleOpenDownloadFolder}
               {handleSaveSettings}

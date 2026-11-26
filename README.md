@@ -34,9 +34,16 @@ Flitnix combines the performance and concurrency safety of Go with a modern Svel
 
 ---
 
-## Key Features & What's New in v0.2.7.4
+## Key Features & What's New in v0.2.8
 
-Flitnix provides high-speed, private local file transfers between desktop computers and phones. Version **v0.2.7.4** brings major reliability, security, and recovery improvements across the transfer engine:
+Flitnix provides high-speed, private local file transfers between desktop computers and phones. Version **v0.2.8** brings major reliability, security, and recovery improvements across the transfer engine:
+
+- **Unbreakable Transfers**:
+  - Resumable chunked uploads (`HEAD`/`PATCH`, authoritative committed offset, no restart from byte zero) with durable `.part` + HMAC-signed `.meta` checkpoints, fsync ordering, atomic publication, and startup crash recovery; corrupted staging is quarantined individually.
+  - Pausing no longer cancels or erases partial progress: **Pause** keeps committed bytes and `.part`/`.meta`, returns `409 paused`, and **Resume** continues from the exact committed offset; **Discard** removes partials.
+  - Bounded automatic retry with exponential backoff + jitter, `/ping` reachability checks, `HEAD` offset reconciliation, `Retry-After` handling, permanent-error fail-fast, and Wi-Fi roaming recovery for uploads and downloads.
+  - Resumable HTTP downloads (`Range`, `If-Range`, `ETag`, `206`, `416`, `Content-Digest`) with source-mutation protection; a phone-side pause + resume re-activates the transfer with committed progress intact and progress re-shown on desktop.
+  - Storage quota and disk-space protection (atomic reservations, mid-stream checks, HTTP `507`, cross-platform free-space probing) and atomic crash-safe publication with no incomplete files left behind.
 
 - **Direct High-Speed Streaming Uploads**:
   - High-throughput, single-pass HTTP streaming directly from browser storage to desktop with zero whole-file memory buffering.
@@ -44,7 +51,7 @@ Flitnix provides high-speed, private local file transfers between desktop comput
   - Paint-throttled progress: host and guest progress panels repaint at most five times per second, restoring the sustained throughput of earlier releases.
   - Incremental single-pass SHA-256 integrity verification hashes data on the fly during the write pass without duplicate reads or storage synchronization stalls.
   - Sequential transfer queue preserving low CPU and RAM consumption on phones and laptops.
-  - Clean restart from byte zero: if a connection is interrupted or fails, incomplete temporary files are safely aborted and discarded; retrying starts a fresh transfer allocation from byte zero without complex or fragile partial-offset reconciliation.
+  - Unbreakable, resumable transfer: interrupted or paused transfers preserve committed bytes and resume from the last durable checkpoint instead of restarting from byte zero; retrying reconciles the server's authoritative committed offset.
 - **Guest Drop Box (Multi-Device Upload Room)**:
   - Collect photos, videos, and documents from an entire group, classroom, or meeting without requiring anyone to install an app.
   - Guests scan a single QR code with their phone camera to request entry.
@@ -123,7 +130,7 @@ Every release includes a verified `SHA256SUMS.txt` manifest.
 
 ## Platform Compatibility & Project Status
 
-### Flitnix v0.2.7.4 Project & Release Status
+### Flitnix v0.2.8 Project & Release Status
 
 | Platform / Target | Minimum Version | Status | Verification & Readiness Notes |
 | :--- | :--- | :--- | :--- |
@@ -131,7 +138,7 @@ Every release includes a verified `SHA256SUMS.txt` manifest.
 | **Windows (Desktop)** | Windows 10 (1809+) / Windows 11 (64-bit) | **CI Pending** | Single-pass streaming and atomic collision-safe publication verified; local repeated tests pass (50/50); remote Windows GitHub Actions CI confirmation pending. Authenticode code signing pending. |
 | **macOS (Desktop)** | macOS 11.0 Big Sur or later | **Native Validation Pending** | Universal binary configuration present (`.dmg` / `.zip`); direct streaming upload engine cross-compiled; native hardware execution, code signing, and notarization pending. |
 | **Mobile Browsers** | iOS 14+ (Safari), Android 8+ (Chrome, Firefox, etc.) | **Automated Tests Passed** | Direct single-pass HTTP streaming with native progress reporting and wake-lock test suites pass; physical mobile device validation across diverse hardware pending. |
-| **Physical RF Wi-Fi & Power Loss** | All Platforms | **Deferred** | Physical multi-room RF Wi-Fi roaming, AP handoff, and hardware sudden power-loss testing are explicitly deferred to post-v0.2.7.4 evaluation tracks. |
+| **Physical RF Wi-Fi & Power Loss** | All Platforms | **Deferred** | Physical multi-room RF Wi-Fi roaming, AP handoff, and hardware sudden power-loss testing are explicitly deferred to post-v0.2.8 evaluation tracks. |
 
 ---
 

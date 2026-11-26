@@ -323,6 +323,10 @@ func handleGuestUploadDeclare(svcs *Services) http.HandlerFunc {
 				writeError(w, http.StatusConflict, "a file with this name already exists in your submission")
 				return
 			}
+			if errors.Is(err, transfer.ErrInsufficientStorage) {
+				writeInsufficientStorage(w)
+				return
+			}
 			if errors.Is(err, transfer.ErrNoCapacity) {
 				writeError(w, http.StatusTooManyRequests, "upload capacity reached")
 				return
@@ -455,6 +459,10 @@ func handleGuestUploadContent(svcs *Services, stall time.Duration) http.HandlerF
 					Outcome:   audit.OutcomeFailed,
 					Details:   fmt.Sprintf("Upload failed: %v", err),
 				})
+			}
+			if errors.Is(err, transfer.ErrInsufficientStorage) {
+				writeInsufficientStorage(w)
+				return
 			}
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return

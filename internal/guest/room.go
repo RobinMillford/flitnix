@@ -183,14 +183,15 @@ func DefaultPresets() []Preset {
 }
 
 type RoomConfig struct {
-	DestinationRoot      string                `json:"destinationRoot"`
-	Duration             time.Duration         `json:"duration"`
-	Title                string                `json:"title"`
-	Description          string                `json:"description,omitempty"`
-	Deadline             *time.Time            `json:"deadline,omitempty"`
-	CollisionPolicy      CollisionPolicy       `json:"collisionPolicy"`
-	FormSchema           []FormField           `json:"formSchema,omitempty"`
-	ExpectedParticipants []ExpectedParticipant `json:"expectedParticipants,omitempty"`
+	DestinationRoot      string                 `json:"destinationRoot"`
+	Duration             time.Duration          `json:"duration"`
+	Title                string                 `json:"title"`
+	Description          string                 `json:"description,omitempty"`
+	Deadline             *time.Time             `json:"deadline,omitempty"`
+	CollisionPolicy      CollisionPolicy        `json:"collisionPolicy"`
+	FormSchema           []FormField            `json:"formSchema,omitempty"`
+	ExpectedParticipants []ExpectedParticipant  `json:"expectedParticipants,omitempty"`
+	Quota                *transfer.QuotaManager `json:"-"`
 }
 
 const (
@@ -308,6 +309,7 @@ type Room struct {
 	guestsByToken map[string]*Guest
 	uploads       map[string]*UploadRequest
 	roster        map[string]*ExpectedParticipant
+	quota         *transfer.QuotaManager
 }
 
 func randomID() string {
@@ -405,6 +407,7 @@ func NewRoomWithConfig(cfg RoomConfig) (*Room, error) {
 		guestsByToken:   make(map[string]*Guest),
 		uploads:         make(map[string]*UploadRequest),
 		roster:          make(map[string]*ExpectedParticipant),
+		quota:           cfg.Quota,
 	}
 
 	for _, ep := range cfg.ExpectedParticipants {
@@ -659,7 +662,7 @@ func (r *Room) ApproveGuest(id string) error {
 	}
 
 	g.store = store
-	g.transfer = transfer.NewService(transfer.Config{Store: store})
+	g.transfer = transfer.NewService(transfer.Config{Store: store, Quota: r.quota})
 	g.State = GuestApproved
 	g.DecidedAt = time.Now()
 
@@ -688,6 +691,10 @@ func (r *Room) RejectGuest(id string) error {
 			p.Status = StatusRejected
 			p.LastActivity = time.Now()
 		}
+	}
+
+	if g.transfer != nil {
+		g.transfer.CancelSession("guest-" + g.ID)
 	}
 
 	for _, u := range r.uploads {

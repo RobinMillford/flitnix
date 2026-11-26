@@ -155,9 +155,10 @@ func buildFolderManifest(dirRoot, nameOverride string) (*LocalManifest, error) {
 		slashRel := filepath.ToSlash(rel)
 
 		item := transfer.ManifestItem{
-			RelativePath: slashRel,
-			DisplayName:  filepath.Base(slashRel),
-			Size:         info.Size(),
+			RelativePath:   slashRel,
+			DisplayName:    filepath.Base(slashRel),
+			Size:           info.Size(),
+			LastModifiedMs: info.ModTime().UnixMilli(),
 		}
 
 		manifestItems = append(manifestItems, item)
@@ -237,8 +238,9 @@ func buildFilesManifest(paths []string) (*LocalManifest, error) {
 		seenNames[sanitized] = p
 
 		item := transfer.ManifestItem{
-			DisplayName: sanitized,
-			Size:        info.Size(),
+			DisplayName:    sanitized,
+			Size:           info.Size(),
+			LastModifiedMs: info.ModTime().UnixMilli(),
 		}
 
 		manifestItems = append(manifestItems, item)

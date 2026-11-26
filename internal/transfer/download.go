@@ -226,8 +226,15 @@ func (r *DownloadRegistry) setState(id string, state DownloadState, reason strin
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.State == DownloadSent || d.State == DownloadFailed || d.State == DownloadCanceled {
+	if d.State == DownloadSent || d.State == DownloadCanceled {
 		return
+	}
+	if d.State == DownloadFailed {
+		// Terminal failure, but a phone-side pause + continuation re-activates
+		// the same download (Begin -> transferring); nothing else does.
+		if state != DownloadTransferring {
+			return
+		}
 	}
 	if state == DownloadTransferring && d.Started.IsZero() {
 		d.Started = time.Now()

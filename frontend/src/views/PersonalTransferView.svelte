@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { main, netenv } from '../../wailsjs/go/models'
+  import type { main, netenv, transfer } from '../../wailsjs/go/models'
   import { formatBytes, percent, speed, calcEta, fmtTime, openExternalURL } from '../utils'
   import ProgressBar from '../components/ProgressBar.svelte'
 
@@ -11,6 +11,7 @@
   export let downloads: main.DownloadView[] = []
   export let files: main.SharedFileView[] = []
   export let sources: main.SharedSourceView[] = []
+  export let storageStatus: transfer.StorageStatus | null = null
   export let interfaces: netenv.View[] = []
   export let networkState: netenv.NetworkState | null = null
   export let refreshingNetwork: boolean = false
@@ -40,6 +41,10 @@
   export let decideBatch: (b: main.BatchView, approve: boolean) => void = () => {}
   export let cancelUpload: (id: string) => void = () => {}
   export let cancelBatch: (b: main.BatchView) => void = () => {}
+  export let pauseBatch: (b: main.BatchView) => void = () => {}
+  export let resumeBatch: (b: main.BatchView) => void = () => {}
+  export let discardBatch: (b: main.BatchView) => void = () => {}
+  export let discardUpload: (id: string) => void = () => {}
   export let sendTextAction: () => void = () => {}
   export let clearTextAction: () => void = () => {}
   export let copyTextToClipboard: (text: string) => void = () => {}
@@ -57,25 +62,53 @@
   $: totalSharedBytes = files.reduce((acc, f) => acc + (f.size || 0), 0) + sources.reduce((acc, s) => acc + (s.totalBytes || 0), 0)
 
   function activeUpload(u: main.UploadView): boolean {
-    return ['pending', 'approved', 'uploading'].includes(u.state)
+    return ['pending', 'approved', 'uploading', 'interrupted', 'paused'].includes(u.state)
   }
   function activeDownload(d: main.DownloadView): boolean {
-    return ['starting', 'transferring', 'finalizing'].includes(d.state)
+    return ['starting', 'transferring', 'finalizing', 'paused'].includes(d.state)
+  }
+  function downloadStateLabel(d: main.DownloadView): string {
+    if (d.state === 'paused') return `Paused — ${formatBytes(d.written)} of ${formatBytes(d.size)}`
+    if (d.state === 'starting') return 'Starting…'
+    if (d.state === 'finalizing') return 'Finishing…'
+    return d.state
   }
   function activeBatch(b: main.BatchView): boolean {
-    return b.approvalState === 'approved' && ['queued', 'transferring'].includes(b.state)
+    return b.approvalState === 'approved' && ['queued', 'transferring', 'interrupted', 'paused'].includes(b.state)
   }
   function finishedBatch(b: main.BatchView): boolean {
-    return ['completed', 'failed', 'canceled', 'rejected'].includes(b.state)
+    return ['completed', 'failed', 'canceled', 'rejected', 'discarded'].includes(b.state)
   }
   function batchName(b: main.BatchView): string {
     return b.rootName || `${b.totalItemCount} ${b.totalItemCount === 1 ? 'file' : 'files'}`
   }
   function currentItem(b: main.BatchView): main.BatchItemView | undefined {
-    return b.items.find((item) => item.state === 'transferring')
+    return b.items.find((item) => item.state === 'transferring' || item.state === 'interrupted' || item.state === 'paused')
   }
   function doneItems(b: main.BatchView): number {
     return b.items.filter((item) => item.state === 'completed').length
+  }
+  function batchStateLabel(b: main.BatchView): string {
+    const item = currentItem(b)
+    if (b.state === 'paused') return 'Paused — partial bytes saved'
+    if (b.state === 'interrupted') return item ? `Interrupted on ${item.displayName} — ready to resume` : 'Interrupted — ready to resume'
+    if (item && item.resumable && item.state === 'transferring') return `Resuming ${item.displayName}`
+    if (item && item.state === 'transferring') return `Uploading ${item.displayName}`
+    return 'Queued'
+  }
+  function uploadStateLabel(u: main.UploadView): string {
+    switch (u.state) {
+      case 'uploading': return u.resumable ? 'Resuming' : 'Uploading'
+      case 'paused': return 'Paused'
+      case 'interrupted': return 'Interrupted — ready to resume'
+      case 'approved': return 'Approved'
+      case 'pending': return 'Pending'
+      case 'completed': return 'Completed'
+      case 'failed': return 'Failed'
+      case 'discarded': return 'Discarded'
+      case 'canceled': return 'Canceled'
+      default: return u.state
+    }
   }
 
   function getExt(name: string): string {
@@ -369,7 +402,7 @@
                   · ETA {calcEta(d.written, d.size, d.speed)}
                 {/if}
               </span>
-              <span class="transfer-substatus">{d.state}</span>
+              <span class="transfer-substatus">{downloadStateLabel(d)}</span>
             </div>
           </div>
         {/each}
@@ -381,7 +414,18 @@
               <div class="transfer-direction-badge incoming">
                 <span>↙ Receiving Batch from Phone</span>
               </div>
-              <button type="button" class="cancel-text-btn" on:click={() => cancelBatch(b)}>Cancel</button>
+              <div class="header-right-actions">
+                {#if b.state === 'paused'}
+                  <button type="button" class="button primary small" on:click={() => resumeBatch(b)} disabled={isBusy(`resume-batch:${b.id}`)}>Resume</button>
+                  <button type="button" class="cancel-text-btn" on:click={() => discardBatch(b)} disabled={isBusy(`discard-batch:${b.id}`)}>Discard Partial Upload</button>
+                {:else if b.state === 'interrupted'}
+                  <button type="button" class="button primary small" on:click={() => resumeBatch(b)} disabled={isBusy(`resume-batch:${b.id}`)}>Resume</button>
+                  <button type="button" class="cancel-text-btn" on:click={() => discardBatch(b)} disabled={isBusy(`discard-batch:${b.id}`)}>Discard Partial Upload</button>
+                {:else}
+                  <button type="button" class="button ghost small" on:click={() => pauseBatch(b)} disabled={isBusy(`pause-batch:${b.id}`)}>Pause</button>
+                  <button type="button" class="cancel-text-btn" on:click={() => cancelBatch(b)}>Cancel</button>
+                {/if}
+              </div>
             </div>
 
             <div class="transfer-filename-row">
@@ -396,7 +440,7 @@
                 {formatBytes(b.transferredBytes)} of {formatBytes(b.declaredTotalBytes)}
               </span>
               <span class="transfer-substatus">
-                {currentItem(b) ? `Receiving ${currentItem(b)?.displayName}` : 'Transferring…'}
+                {batchStateLabel(b)}
               </span>
             </div>
           </div>
@@ -411,13 +455,17 @@
               </div>
               <div class="header-right-actions">
                 <span class="transfer-meta-rate tabular">{speed(u.speed)}</span>
-                <button type="button" class="cancel-text-btn" on:click={() => cancelUpload(u.id)}>Cancel</button>
+                {#if u.state === 'interrupted' || u.state === 'paused'}
+                  <button type="button" class="cancel-text-btn" on:click={() => discardUpload(u.id)} disabled={isBusy(`discard-upload:${u.id}`)}>Discard Partial Upload</button>
+                {:else}
+                  <button type="button" class="cancel-text-btn" on:click={() => cancelUpload(u.id)}>Cancel</button>
+                {/if}
               </div>
             </div>
 
             <div class="transfer-filename-row">
               <strong class="transfer-name">{u.name}</strong>
-              <span class="transfer-percent tabular">{u.state === 'uploading' ? `${percent(u.uploaded, u.size)}%` : u.state}</span>
+              <span class="transfer-percent tabular">{(u.state === 'uploading' || u.state === 'interrupted' || u.state === 'paused') ? `${percent(u.uploaded, u.size)}%` : uploadStateLabel(u)}</span>
             </div>
 
             <ProgressBar value={percent(u.uploaded, u.size)} variant="primary" size="sm" />
@@ -429,7 +477,7 @@
                   · ETA {calcEta(u.uploaded, u.size, u.speed)}
                 {/if}
               </span>
-              <span class="transfer-substatus">{u.state}</span>
+              <span class="transfer-substatus">{uploadStateLabel(u)}</span>
             </div>
           </div>
         {/each}
@@ -553,24 +601,41 @@
             <span class="eyebrow-blue">Receive from Phone</span>
             <h3>Approval Inbox</h3>
           </div>
-          <span class="count-pill">{pending.length + pendingBatches.length}</span>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            {#if storageStatus}
+              <span class="storage-pill {storageStatus.status === 'critical' ? 'danger' : storageStatus.status === 'low' ? 'warn' : ''}" title="Available receive disk space">
+                {storageStatus.available ? `${formatBytes(storageStatus.headroomBytes)} free` : 'Disk space unknown'}
+              </span>
+            {/if}
+            <span class="count-pill">{pending.length + pendingBatches.length}</span>
+          </div>
         </div>
         <p class="column-desc">Review and confirm transfer requests before files are written to disk.</p>
 
         <div class="inbox-requests-list">
           {#each pending as u (u.id)}
-            <div class="inbox-request-item">
+            <div class="inbox-request-item" class:storage-blocked={u.storageFits === false}>
               <div class="request-icon">↙</div>
               <div class="request-info">
                 <strong>{u.name}</strong>
-                <span class="tabular">{formatBytes(u.size)} · Pending Approval</span>
+                <span class="tabular">
+                  {formatBytes(u.size)} · Pending Approval
+                  {#if u.storageFits === false}
+                    · <strong class="storage-warn-inline">Insufficient disk space</strong>
+                  {:else if storageStatus?.available}
+                    · Fits on disk
+                  {/if}
+                </span>
+                {#if u.storageWarning}
+                  <span class="storage-warn-inline">{u.storageWarning}</span>
+                {/if}
               </div>
               <div class="request-actions">
                 <button
                   type="button"
                   class="button success small"
                   on:click={() => decide(u, true)}
-                  disabled={isBusy(`approve:${u.id}`)}
+                  disabled={isBusy(`approve:${u.id}`) || u.storageFits === false}
                 >
                   Approve
                 </button>
@@ -587,18 +652,28 @@
           {/each}
 
           {#each pendingBatches as b (b.id)}
-            <div class="inbox-request-item batch-item">
+            <div class="inbox-request-item batch-item" class:storage-blocked={b.storageFits === false}>
               <div class="request-icon">↙</div>
               <div class="request-info">
                 <strong>Batch: {batchName(b)}</strong>
-                <span class="tabular">{formatBytes(b.declaredTotalBytes)} · {b.totalItemCount} files</span>
+                <span class="tabular">
+                  {formatBytes(b.declaredTotalBytes)} · {b.totalItemCount} files
+                  {#if b.storageFits === false}
+                    · <strong class="storage-warn-inline">Exceeds free disk space</strong>
+                  {:else if storageStatus?.available}
+                    · Fits on disk
+                  {/if}
+                </span>
+                {#if b.storageWarning}
+                  <span class="storage-warn-inline">{b.storageWarning}</span>
+                {/if}
               </div>
               <div class="request-actions">
                 <button
                   type="button"
                   class="button success small"
                   on:click={() => decideBatch(b, true)}
-                  disabled={isBusy(`approve-batch:${b.id}`)}
+                  disabled={isBusy(`approve-batch:${b.id}`) || b.storageFits === false}
                 >
                   Approve
                 </button>
@@ -1511,6 +1586,35 @@
   .request-actions {
     display: flex;
     gap: 6px;
+  }
+
+  .storage-pill {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--bg-surface-elevated);
+    border: 1px solid var(--border-base);
+    color: var(--text-secondary);
+  }
+
+  .storage-pill.warn {
+    color: var(--warning-text, #f59e0b);
+    border-color: var(--warning, #f59e0b);
+  }
+
+  .storage-pill.danger {
+    color: var(--danger-text, #ef4444);
+    border-color: var(--danger, #ef4444);
+  }
+
+  .inbox-request-item.storage-blocked {
+    border-color: var(--danger, #ef4444);
+  }
+
+  .storage-warn-inline {
+    color: var(--danger-text, #ef4444);
+    font-weight: 600;
   }
 
   .empty-state-compact {

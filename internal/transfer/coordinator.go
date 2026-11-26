@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -255,11 +256,19 @@ func (c *Coordinator) RestoreBatch(batch TransferBatch) error {
 	// an approval that durable state proves was granted) becomes eligible
 	// again. Its durable bytes are authoritative in resumable metadata, and
 	// the client continues from the HEAD offset. Terminal states — canceled,
-	// rejected, failed, completed — are never reopened.
+	// rejected, failed, completed, discarded — are never reopened.
+	hasInterrupted := false
 	for i := range batch.Items {
 		switch batch.Items[i].State {
 		case ItemStateTransferring:
-			batch.Items[i].State = ItemStateQueued
+			if batch.Items[i].Transferred > 0 {
+				batch.Items[i].State = ItemStateInterrupted
+				hasInterrupted = true
+			} else {
+				batch.Items[i].State = ItemStateQueued
+			}
+		case ItemStateInterrupted:
+			hasInterrupted = true
 		case ItemStatePending:
 			if batch.ApprovalState == ApprovalApproved {
 				batch.Items[i].State = ItemStateQueued
@@ -267,7 +276,11 @@ func (c *Coordinator) RestoreBatch(batch TransferBatch) error {
 		}
 	}
 	if batch.State == BatchStateTransferring {
-		batch.State = BatchStateQueued
+		if hasInterrupted {
+			batch.State = BatchStateInterrupted
+		} else {
+			batch.State = BatchStateQueued
+		}
 	}
 
 	c.mu.Lock()
@@ -281,10 +294,77 @@ func (c *Coordinator) RestoreBatch(batch TransferBatch) error {
 	return nil
 }
 
+// HasBatch reports whether batchID is already loaded in the coordinator.
+func (c *Coordinator) HasBatch(batchID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.batches[batchID]
+	return ok
+}
+
+// ReconcileItemFromStaging updates a restored batch item during startup recovery
+// using verified resumable staging metadata (or marks it failed if quarantined).
+func (c *Coordinator) ReconcileItemFromStaging(sessionKey, batchID, itemID string, committedBytes int64, paused, quarantined bool, reason string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	batch, ok := c.batches[batchID]
+	if !ok || batch.batch.SessionKey != sessionKey {
+		return ErrBatchNotFound
+	}
+	item := findItem(&batch.batch, itemID)
+	if item == nil {
+		return ErrItemNotFound
+	}
+	switch item.State {
+	case ItemStateCompleted, ItemStateCanceled, ItemStateRejected, ItemStateFailed, ItemStateDiscarded:
+		return nil
+	}
+	if quarantined {
+		item.Transferred = 0
+		item.State = ItemStateFailed
+		item.Error = "quarantined: " + reason
+	} else {
+		item.Transferred = committedBytes
+		if paused {
+			item.State = ItemStatePaused
+		} else if committedBytes > 0 {
+			item.State = ItemStateInterrupted
+			if reason != "" {
+				item.Error = reason
+			}
+		} else {
+			item.State = ItemStateQueued
+		}
+	}
+	var total int64
+	hasInterrupted := false
+	hasPaused := false
+	for i := range batch.batch.Items {
+		total += batch.batch.Items[i].Transferred
+		switch batch.batch.Items[i].State {
+		case ItemStateInterrupted:
+			hasInterrupted = true
+		case ItemStatePaused:
+			hasPaused = true
+		}
+	}
+	batch.batch.TransferredBytes = total
+	if allItemsTerminal(batch.batch.Items) {
+		c.finishBatchLocked(batch)
+	} else if hasPaused && !hasInterrupted {
+		batch.batch.State = BatchStatePaused
+	} else if hasInterrupted {
+		batch.batch.State = BatchStateInterrupted
+	} else if batch.batch.ApprovalState == ApprovalApproved {
+		batch.batch.State = BatchStateQueued
+	}
+	return nil
+}
+
 func manifestItems(items []TransferItem) []ManifestItem {
 	out := make([]ManifestItem, len(items))
 	for i, item := range items {
-		out[i] = ManifestItem{ID: item.ID, Sequence: item.Sequence, RelativePath: item.RelativePath, DisplayName: item.DisplayName, Size: item.DeclaredSize, SHA256: item.SHA256}
+		out[i] = ManifestItem{ID: item.ID, Sequence: item.Sequence, RelativePath: item.RelativePath, DisplayName: item.DisplayName, Size: item.DeclaredSize, LastModifiedMs: item.LastModifiedMs, SHA256: item.SHA256}
 	}
 	return out
 }
@@ -339,8 +419,8 @@ func (c *Coordinator) CreateBatch(sessionKey string, manifest BatchManifest) (Ba
 		batch.Items = append(batch.Items, TransferItem{
 			ID: itemID, BatchID: batchID, Sequence: sequence,
 			RelativePath: item.RelativePath, DisplayName: item.DisplayName,
-			DeclaredSize: item.Size, State: itemState,
-			SHA256: item.SHA256,
+			DeclaredSize: item.Size, LastModifiedMs: item.LastModifiedMs,
+			State: itemState, SHA256: item.SHA256,
 		})
 	}
 	c.batches[batchID] = &coordinatorBatch{batch: batch}
@@ -541,10 +621,310 @@ func (c *Coordinator) ClaimItem(sessionKey, batchID, itemID string) (TransferLea
 	if err != nil {
 		return TransferLease{}, err
 	}
-	if batch.batch.ID != batchID || item.ID != itemID {
+	if batch.batch.ID != batchID || item.ID != itemID || item.State != ItemStateQueued {
 		return TransferLease{}, ErrNoEligibleItem
 	}
 	return c.claimLocked(session, item, batch)
+}
+
+// ClaimChunk leases one item for a resumable PATCH chunk. Unlike ClaimItem, it
+// accepts ItemStateInterrupted, ItemStateQueued, and ItemStateTransferring (when
+// no active chunk stream holds the lease between sequential PATCH chunks), and
+// refuses paused/discarded items with specific errors.
+func (c *Coordinator) ClaimChunk(sessionKey, batchID, itemID string) (TransferLease, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	session, err := c.sessionForOperationLocked(sessionKey)
+	if err != nil {
+		return TransferLease{}, err
+	}
+	if session.active != nil {
+		return TransferLease{}, ErrNoEligibleItem
+	}
+	if session.paused {
+		return TransferLease{}, ErrQueuePaused
+	}
+	batch, err := c.ownedBatchLocked(sessionKey, batchID)
+	if err != nil {
+		return TransferLease{}, err
+	}
+	if batch.batch.ApprovalState == ApprovalPending {
+		return TransferLease{}, ErrNotApproved
+	}
+	target := findItem(&batch.batch, itemID)
+	if target == nil {
+		return TransferLease{}, ErrItemNotFound
+	}
+	switch target.State {
+	case ItemStatePaused:
+		return TransferLease{}, ErrUploadPaused
+	case ItemStateDiscarded:
+		return TransferLease{}, ErrUploadDiscarded
+	case ItemStateQueued, ItemStateInterrupted, ItemStateTransferring:
+	default:
+		return TransferLease{}, ErrInvalidTransition
+	}
+	// Enforce FIFO order across eligible non-terminal items.
+	nextItem, nextBatch, err := c.nextItemLocked(session)
+	if err != nil {
+		return TransferLease{}, err
+	}
+	if nextBatch.batch.ID != batchID || nextItem.ID != itemID {
+		return TransferLease{}, ErrNoEligibleItem
+	}
+	alreadyTransferring := target.State == ItemStateTransferring && batch.batch.State == BatchStateTransferring
+	leaseID, err := NewOpaqueID()
+	if err != nil {
+		return TransferLease{}, err
+	}
+	target.State = ItemStateTransferring
+	target.Error = ""
+	batch.batch.State = BatchStateTransferring
+	batch.batch.Error = ""
+	if batch.batch.StartedAt.IsZero() {
+		batch.batch.StartedAt = c.now()
+	}
+	lease := TransferLease{
+		LeaseID: leaseID, BatchID: batch.batch.ID, ItemID: target.ID,
+		Sequence: target.Sequence, DeclaredSize: target.DeclaredSize, Item: target.View(),
+	}
+	session.active = &activeLease{TransferLease: lease}
+	if !alreadyTransferring {
+		if err := c.commitLocked(LifecycleEvent{
+			Kind: LifecycleItemTransition, BatchID: batch.batch.ID, Item: target,
+			BatchState: batch.batch.State, Transferred: batch.batch.TransferredBytes,
+		}); err != nil {
+			session.active = nil
+			return TransferLease{}, err
+		}
+	}
+	c.notifyLocked()
+	return lease, nil
+}
+
+// ReleaseChunkLease releases the active chunk HTTP request lease after one
+// intermediate chunk commits durably, updating committed byte counts while
+// keeping the item eligible for the next sequential PATCH chunk.
+func (c *Coordinator) ReleaseChunkLease(sessionKey string, lease TransferLease, committedBytes int64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	session := c.sessions[sessionKey]
+	if session == nil || !sameLease(session.active, lease) {
+		return ErrLeaseInvalid
+	}
+	item, batch, err := c.itemForLeaseLocked(lease)
+	if err != nil {
+		return err
+	}
+	if committedBytes >= 0 && committedBytes <= item.DeclaredSize && committedBytes >= item.Transferred {
+		delta := committedBytes - item.Transferred
+		item.Transferred = committedBytes
+		batch.batch.TransferredBytes += delta
+	}
+	session.active = nil
+	c.notifyLocked()
+	return nil
+}
+
+// InterruptItem records a transient mid-stream interruption on a resumable item
+// without failing or canceling sibling items in the batch. Durable committedBytes
+// are preserved so the client can resume cleanly from HEAD Upload-Offset.
+func (c *Coordinator) InterruptItem(sessionKey string, lease TransferLease, committedBytes int64, cause error) (BatchView, error) {
+	msg := "transfer interrupted"
+	if cause != nil {
+		msg = cause.Error()
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	session := c.sessions[sessionKey]
+	if session == nil {
+		return BatchView{}, ErrWrongSession
+	}
+	if !sameLease(session.active, lease) {
+		return BatchView{}, ErrLeaseInvalid
+	}
+	item, batch, err := c.itemForLeaseLocked(lease)
+	if err != nil {
+		return BatchView{}, err
+	}
+	if committedBytes >= 0 && committedBytes <= item.DeclaredSize {
+		delta := committedBytes - item.Transferred
+		item.Transferred = committedBytes
+		batch.batch.TransferredBytes += delta
+	}
+	item.State = ItemStateInterrupted
+	item.Error = msg
+	session.active = nil
+	batch.batch.State = BatchStateInterrupted
+	batch.batch.Error = msg
+	c.notifyLocked()
+	if err := c.commitLocked(LifecycleEvent{
+		Kind: LifecycleItemTransition, BatchID: batch.batch.ID, Item: item,
+		BatchState: batch.batch.State, Error: batch.batch.Error,
+		CompletedAt: batch.batch.CompletedAt, Transferred: batch.batch.TransferredBytes,
+	}); err != nil {
+		return BatchView{}, err
+	}
+	return batch.batch.View(), nil
+}
+
+// PauseBatch suspends an approved/active/interrupted batch, preserving committed
+// bytes on disk and invoking any active chunk cancellation callback unlocked.
+// PauseBatch pauses an active or interrupted batch while preserving durable
+// committed partial bytes. The in-flight stream is NOT canceled or discarded
+// here; callers must invoke transfers.Pause for the returned content IDs,
+// which cancels only in-flight I/O and keeps .part/.meta and committed offset.
+func (c *Coordinator) PauseBatch(sessionKey, batchID string) (BatchView, []string, error) {
+	var contentIDs []string
+	var view BatchView
+	c.mu.Lock()
+	batch, err := c.ownedBatchLocked(sessionKey, batchID)
+	if err == nil {
+		switch batch.batch.State {
+		case BatchStateCompleted, BatchStateRejected, BatchStateCanceled, BatchStateFailed:
+			err = ErrInvalidTransition
+		default:
+			session := c.sessions[sessionKey]
+			changed := false
+			for i := range batch.batch.Items {
+				item := &batch.batch.Items[i]
+				if session.active != nil && session.active.ItemID == item.ID {
+					if session.active.publishing {
+						continue
+					}
+					// Release the lease WITHOUT invoking the cancellation
+					// callback: pause must not cancel or erase the upload.
+					session.active = nil
+				}
+				switch item.State {
+				case ItemStateQueued, ItemStateTransferring, ItemStateInterrupted:
+					item.State = ItemStatePaused
+					changed = true
+					if item.ContentID != "" {
+						contentIDs = append(contentIDs, item.ContentID)
+					}
+				case ItemStatePaused:
+					if item.ContentID != "" {
+						contentIDs = append(contentIDs, item.ContentID)
+					}
+				}
+			}
+			if changed || batch.batch.State != BatchStatePaused {
+				if batch.batch.ApprovalState == ApprovalApproved {
+					batch.batch.State = BatchStatePaused
+				}
+				view = batch.batch.View()
+				err = c.commitBatchLocked(batch)
+			} else {
+				view = batch.batch.View()
+			}
+		}
+	}
+	c.mu.Unlock()
+	if err != nil {
+		return BatchView{}, nil, err
+	}
+	return view, contentIDs, nil
+}
+
+// ResumeBatch moves paused/interrupted items back into resumable queue state.
+func (c *Coordinator) ResumeBatch(sessionKey, batchID string) (BatchView, []string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	batch, err := c.ownedBatchLocked(sessionKey, batchID)
+	if err != nil {
+		return BatchView{}, nil, err
+	}
+	if batch.batch.ApprovalState != ApprovalApproved {
+		return BatchView{}, nil, ErrInvalidTransition
+	}
+	var contentIDs []string
+	hasInterrupted := false
+	for i := range batch.batch.Items {
+		item := &batch.batch.Items[i]
+		if item.State == ItemStatePaused {
+			if item.Transferred > 0 {
+				item.State = ItemStateInterrupted
+				hasInterrupted = true
+			} else {
+				item.State = ItemStateQueued
+			}
+			item.Error = ""
+			if item.ContentID != "" {
+				contentIDs = append(contentIDs, item.ContentID)
+			}
+		} else if item.State == ItemStateInterrupted {
+			hasInterrupted = true
+			item.Error = ""
+			if item.ContentID != "" {
+				contentIDs = append(contentIDs, item.ContentID)
+			}
+		}
+	}
+	if hasInterrupted {
+		batch.batch.State = BatchStateInterrupted
+	} else if !allItemsTerminal(batch.batch.Items) {
+		batch.batch.State = BatchStateQueued
+	}
+	batch.batch.Error = ""
+	c.notifyLocked()
+	if cerr := c.commitBatchLocked(batch); cerr != nil {
+		return BatchView{}, nil, cerr
+	}
+	return batch.batch.View(), contentIDs, nil
+}
+
+// DiscardBatch explicitly discards unfinished/paused/interrupted items in a batch,
+// returning their contentIDs so staging files and quota reservations are released.
+func (c *Coordinator) DiscardBatch(sessionKey, batchID string) (BatchView, []string, error) {
+	var cancel context.CancelFunc
+	var contentIDs []string
+	var view BatchView
+	c.mu.Lock()
+	batch, err := c.ownedBatchLocked(sessionKey, batchID)
+	if err == nil {
+		switch batch.batch.State {
+		case BatchStateCompleted, BatchStateRejected, BatchStateCanceled:
+			err = ErrInvalidTransition
+		default:
+			session := c.sessions[sessionKey]
+			for i := range batch.batch.Items {
+				item := &batch.batch.Items[i]
+				if session.active != nil && session.active.ItemID == item.ID {
+					if session.active.publishing {
+						continue
+					}
+					cancel = session.active.cancel
+					session.active = nil
+				}
+				switch item.State {
+				case ItemStateCompleted, ItemStateRejected, ItemStateCanceled, ItemStateFailed, ItemStateDiscarded:
+				default:
+					if item.Transferred > 0 {
+						batch.batch.TransferredBytes -= item.Transferred
+						item.Transferred = 0
+					}
+					item.State = ItemStateDiscarded
+					item.Error = "discarded by user"
+					if item.ContentID != "" {
+						contentIDs = append(contentIDs, item.ContentID)
+					}
+				}
+			}
+			c.recomputeBatchTerminalStateLocked(batch)
+			view = batch.batch.View()
+			c.notifyLocked()
+			err = c.commitBatchLocked(batch)
+		}
+	}
+	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if err != nil {
+		return BatchView{}, nil, err
+	}
+	return view, contentIDs, nil
 }
 
 func (c *Coordinator) claimLocked(session *coordinatorSession, item *TransferItem, batch *coordinatorBatch) (TransferLease, error) {
@@ -824,7 +1204,7 @@ func (c *Coordinator) CancelItem(sessionKey, batchID, itemID string) error {
 				err = ErrItemNotFound
 			case item.State == ItemStateCanceled:
 				// Already canceled: a repeated or concurrent cancel is a no-op.
-			case item.State == ItemStateCompleted || item.State == ItemStateRejected || item.State == ItemStateFailed:
+			case item.State == ItemStateCompleted || item.State == ItemStateRejected || item.State == ItemStateFailed || item.State == ItemStateDiscarded:
 				err = ErrInvalidTransition
 			case batch.batch.State == BatchStateCompleted || batch.batch.State == BatchStateRejected ||
 				batch.batch.State == BatchStateCanceled || batch.batch.State == BatchStateFailed:
@@ -1059,7 +1439,7 @@ func (c *Coordinator) CloseSession(sessionKey string) error {
 					batchHasPublishing = true
 					continue
 				}
-				if item.State != ItemStateCompleted && item.State != ItemStateRejected && item.State != ItemStateCanceled {
+				if item.State != ItemStateCompleted && item.State != ItemStateRejected && item.State != ItemStateCanceled && item.State != ItemStateDiscarded {
 					if item.Transferred > 0 {
 						batch.batch.TransferredBytes -= item.Transferred
 						item.Transferred = 0
@@ -1136,7 +1516,7 @@ func (c *Coordinator) Close() {
 						batchHasPublishing = true
 						continue
 					}
-					if item.State != ItemStateCompleted && item.State != ItemStateRejected && item.State != ItemStateCanceled {
+					if item.State != ItemStateCompleted && item.State != ItemStateRejected && item.State != ItemStateCanceled && item.State != ItemStateDiscarded {
 						if item.Transferred > 0 {
 							batch.batch.TransferredBytes -= item.Transferred
 							item.Transferred = 0
@@ -1184,7 +1564,7 @@ func (c *Coordinator) endBatch(sessionKey, batchID string, state BatchState, app
 					cancel = session.active.cancel
 					session.active = nil
 				}
-				if item.State != ItemStateCompleted && item.State != ItemStateRejected && item.State != ItemStateCanceled && item.State != ItemStateFailed {
+				if item.State != ItemStateCompleted && item.State != ItemStateRejected && item.State != ItemStateCanceled && item.State != ItemStateFailed && item.State != ItemStateDiscarded {
 					if item.Transferred > 0 {
 						batch.batch.TransferredBytes -= item.Transferred
 						item.Transferred = 0
@@ -1269,7 +1649,7 @@ func (c *Coordinator) nextItemLocked(session *coordinatorSession) (*TransferItem
 		if batch == nil {
 			continue
 		}
-		if batch.batch.State == BatchStatePending || batch.batch.State == BatchStateRejected || batch.batch.State == BatchStateCanceled || batch.batch.State == BatchStateCompleted {
+		if batch.batch.State == BatchStatePending || batch.batch.State == BatchStateRejected || batch.batch.State == BatchStateCanceled || batch.batch.State == BatchStateCompleted || batch.batch.State == BatchStatePaused {
 			continue
 		}
 		if batch.batch.State == BatchStateFailed && !session.paused {
@@ -1279,14 +1659,21 @@ func (c *Coordinator) nextItemLocked(session *coordinatorSession) (*TransferItem
 		for i := range batch.batch.Items {
 			item := &batch.batch.Items[i]
 			switch item.State {
-			case ItemStateQueued:
+			case ItemStateQueued, ItemStateInterrupted, ItemStateTransferring:
 				return item, batch, nil
 			case ItemStateFailed:
+				if !session.paused && strings.HasPrefix(item.Error, "quarantined:") {
+					continue
+				}
 				return nil, nil, ErrQueuePaused
+			case ItemStatePaused:
+				// Paused item stalls remaining items in this batch without blocking other batches.
+				goto nextBatch
 			case ItemStatePending, ItemStateApproved:
 				return nil, nil, ErrNoEligibleItem
 			}
 		}
+	nextBatch:
 	}
 	return nil, nil, ErrNoEligibleItem
 }
@@ -1335,7 +1722,7 @@ func allItemsCompleted(items []TransferItem) bool {
 func allItemsTerminal(items []TransferItem) bool {
 	for _, item := range items {
 		switch item.State {
-		case ItemStateCompleted, ItemStateCanceled, ItemStateRejected, ItemStateFailed:
+		case ItemStateCompleted, ItemStateCanceled, ItemStateRejected, ItemStateFailed, ItemStateDiscarded:
 		default:
 			return false
 		}

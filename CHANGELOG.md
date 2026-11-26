@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+- **Original Modification Timestamp Preservation (Phase 1 — G22)**:
+  - Propagated validated sender modification timestamps (`lastModifiedMs`) from the mobile browser (`File.lastModified`) and Go CLI (`client.BuildManifest`) through `POST /api/batches` and `POST /api/uploads`, persisting them in recovery journals and resumable `.meta` sidecars across pauses and restarts.
+  - Applied `os.Chtimes` atomically to staged `.part` files prior to publication in both single-pass `PUT` and resumable `PATCH` commits so received files retain their original capture/edit dates immediately upon appearing on disk.
+  - Added the `"Preserve original file dates"` setting (`PreserveModTimes`, default ON) in `internal/settings`, Wails bindings, and `SettingsView.svelte`.
+- **Browseable Shared-Folder Explorer (Phase 1 — G31)**:
+  - Assigned opaque per-item IDs inside shared folders (`transfer.SourceItem.ID`) and added strictly confined hierarchical folder browsing (`GET /api/sources/{id}/items?prefix=&cursor=&limit=`) without exposing host filesystem paths.
+  - Extended `POST /api/download-grants` with selective folder item IDs (`sourceId` + `itemIds`): downloading one file streams directly with full G2 byte-range resumption (`Accept-Ranges: bytes`), while selecting multiple files across subdirectories streams a targeted ZIP archive.
+  - Built an interactive mobile shared-folder explorer in `index.html`, `styles.css`, and `app.js` with `Browse` buttons, breadcrumb navigation, pagination, and multi-file checkboxes across subdirectories.
+- **Resumable HTTP Byte-Range Downloads (Phase 1 — G2)**:
+  - Enabled `Accept-Ranges: bytes`, strong file-metadata validators (`ETag: "flit-<size>-<mtime_ns>-<file_id>"`), `Range` (`206 Partial Content`), `If-Range` verification (with `200 OK` full fallback on mismatch or weak validators), `416 Range Not Satisfiable`, and `HEAD` support across mutable single-file download grants (`/api/downloads/{id}`) and direct file downloads (`/api/files/{id}/download`), while keeping OS-immutable Tier 1 (`"sha256-..."`) and Tier 3 dynamic ZIP (`Accept-Ranges: none`) contracts intact.
+  - Added mid-stream file-mutation and atomic-replacement guards (`fileMatchesSnapshot`) so modified or swapped source files cleanly abort live streams instead of serving spliced bytes.
+  - Upgraded mobile File System Access (`showSaveFilePicker`) streaming downloads in `app.js` with bounded automatic byte-range resumption (`Range` + `If-Range`) and incremental SHA-256 verification.
+- **Automatic Stream Retry & Wi-Fi Roaming Recovery (Phase 1 — G7)**:
+  - Implemented `RetryPolicy` and error classification (`internal/client/retry.go`) with jittered exponential backoff (`1s`, `2s`, `4s`, `8s`, `15s` ±20%), `/ping` reachability probing, and automatic `HEAD` + `PATCH` offset recovery in Go CLI (`internal/client`, `send_cli.go`).
+  - Added bounded automatic chunk retry and `"Reconnecting — attempt X/Y"` progress UI in the mobile browser (`app.js`) with immediate `online` event wakeup and non-destructive batch sibling preservation.
+  - Preserved sessions, coordinator batches, and resumable staging across temporary Wi-Fi drops and IP roaming (`handleNetworkChange` + `AbortActiveUploads` interruption handling).
+- **Resumable Chunked Uploads & Crash-Safe Offset Recovery (Phase 1 — G1)**:
+  - Implemented `HEAD` / `PATCH` resumable chunked upload endpoints on `/api/batches/{batchID}/items/{itemID}/content` and `/api/uploads/{id}/content` using `Upload-Offset`, `Upload-Length`, `Upload-Chunk-Size`, and `409 Conflict` offset-mismatch reconciliation while keeping legacy `PUT` streams compatible.
+  - Added crash-safe chunk durability (`fsync(.part)` → HMAC-authenticated `.meta.tmp` with incremental SHA-256 hash state → `fsync` → atomic rename → `syncDir`) using an installation-derived `staging-meta-v1` subkey, rolling back uncommitted torn tails automatically.
+  - Wired `RecoveryDir` into both desktop (`App`) and `flitnix serve` CLI, completing startup recovery Phases 6–10 (`recovery_startup.go`): per-upload quarantine isolation, quota reservation reconstruction, session/coordinator reconciliation, and Phase 10 TTL/orphan staging cleanup.
+  - Added non-destructive `PauseBatch`, `ResumeBatch`, `DiscardBatch`, and `DiscardUpload` lifecycle controls in Coordinator, Transfer Service, Wails adapter, and Desktop Svelte UI (`Uploading`, `Paused`, `Interrupted`, `Resuming`, `Completed`, `Failed`, `Discarded`), plus Web Worker `File.slice()` chunking in mobile `upload-worker.js` / `upload-client.js` / `app.js` and Go CLI `internal/client`.
+- **Storage Quota & Disk-Space Protection (Phase 1 — G26)**:
+  - Cross-platform filesystem free-space probing (`unix.Statfs` / `GetDiskFreeSpaceEx`) with configurable minimum disk reserve buffer (`BufferReserveBytes`, default `1 GiB`) and optional hard receive cap (`MaxReceiveBytes`).
+  - Atomic `QuotaManager` headroom reservations at transfer approval (and auto-approve / guest-room admission), plus mid-stream 4 MiB headroom checks and `ENOSPC` / `ERROR_DISK_FULL` mapping to HTTP `507 Insufficient Storage` (`code: "insufficient_storage"`).
+  - Desktop Storage Headroom telemetry in Settings and Approval Inbox (fit/exceeds status indicators) and clear mobile error reporting (`507`) when desktop storage is full.
+  - Note: History auto-retention policies are intentionally deferred to Phase 3 (G6).
+
+---
+
 ## [0.2.7.4] - 2026-11-10
 
 ### Fixed

@@ -227,6 +227,32 @@ select:focus-visible,
 .queue-item__err { margin: 0.45rem 0 0; color: var(--danger); font-size: 0.85rem; overflow-wrap: anywhere; }
 
 .file-actions { display: flex; justify-content: flex-end; margin-top: 0.75rem; }
+.folder-nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+  margin-top: 0.75rem;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-secondary);
+}
+.breadcrumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem; font-size: 0.85rem; }
+.breadcrumb-sep { color: var(--text-muted); }
+.breadcrumb-btn {
+  padding: 0.2rem 0.45rem;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.breadcrumb-btn[aria-current="location"] { color: var(--text); cursor: default; }
+.file-item__actions { display: flex; flex-wrap: wrap; gap: 0.4rem; flex: none; }
+.browse-load-more { margin-top: 0.65rem; width: 100%; }
 .file-list { display: grid; gap: 0.6rem; margin: 0.85rem 0 0; padding: 0; list-style: none; }
 .file-item {
   display: flex;

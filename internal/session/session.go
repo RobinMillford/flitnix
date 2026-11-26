@@ -420,11 +420,26 @@ func (m *Manager) Restore(record SessionRecord) error {
 
 	switch record.Status {
 	case StatusActive:
+		for _, existing := range m.active {
+			if existing.id == record.SessionID || existing.verifier == record.Verifier {
+				return nil
+			}
+		}
 		// fall through to the expiry check below
 	case StatusRevoked:
+		for _, existing := range m.hist {
+			if existing.verifier == record.Verifier && existing.status == StatusRevoked {
+				return nil
+			}
+		}
 		m.hist = append(m.hist, histItem{verifier: record.Verifier, status: StatusRevoked})
 		return nil
 	case StatusExpired:
+		for _, existing := range m.hist {
+			if existing.verifier == record.Verifier && existing.status == StatusExpired {
+				return nil
+			}
+		}
 		m.hist = append(m.hist, histItem{verifier: record.Verifier, status: StatusExpired})
 		return nil
 	default:

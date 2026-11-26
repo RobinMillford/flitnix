@@ -216,3 +216,34 @@ func TestStore_Concurrency(t *testing.T) {
 		t.Fatalf("unexpected final theme: %q", final.Theme)
 	}
 }
+
+func TestStore_PreserveModTimesDefaultAndToggle(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+
+	// Legacy v1 JSON lacking "preserveModTimes" must default it to true.
+	if err := os.WriteFile(path, []byte(`{"version":1,"theme":"dark","locale":"en"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := store.Get()
+	if !got.PreserveModTimes {
+		t.Fatal("expected legacy settings migration to default preserveModTimes=true")
+	}
+
+	// Explicit toggle to false must persist cleanly.
+	got.PreserveModTimes = false
+	if err := store.Save(got); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Get().PreserveModTimes {
+		t.Fatal("expected preserveModTimes=false to persist across reload")
+	}
+}

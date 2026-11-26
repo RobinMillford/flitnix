@@ -42,19 +42,6 @@ func upIf(name string) net.Interface {
 	}
 }
 
-// newTestApp builds a fully wired App whose runtime context is ready and
-// whose network source is injectable. tests re-point a.source at fakes.
-func newTestApp(t *testing.T) *App {
-	t.Helper()
-	a, err := NewApp()
-	if err != nil {
-		t.Fatalf("NewApp: %v", err)
-	}
-	a.startup(context.Background())
-	t.Cleanup(a.stopServer)
-	return a
-}
-
 // tempSharedFile creates one real regular file for registry.Add, which
 // lstats its argument.
 func tempSharedFile(t *testing.T, name string) string {

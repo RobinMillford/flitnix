@@ -127,17 +127,18 @@ type SessionRecord struct {
 // ItemRecord is the durable projection of one coordinator item. Byte progress
 // lives in resumable metadata, not here.
 type ItemRecord struct {
-	ID           string `json:"id"`
-	BatchID      string `json:"batchId"`
-	Sequence     int    `json:"sequence"`
-	RelativePath string `json:"relativePath"`
-	DisplayName  string `json:"displayName"`
-	DeclaredSize int64  `json:"declaredSize"`
-	State        string `json:"state"`
-	SHA256       string `json:"sha256"`
-	ContentID    string `json:"contentId"`
-	Error        string `json:"error,omitempty"`
-	Transferred  int64  `json:"transferred,omitempty"`
+	ID             string `json:"id"`
+	BatchID        string `json:"batchId"`
+	Sequence       int    `json:"sequence"`
+	RelativePath   string `json:"relativePath"`
+	DisplayName    string `json:"displayName"`
+	DeclaredSize   int64  `json:"declaredSize"`
+	LastModifiedMs int64  `json:"lastModifiedMs,omitempty"`
+	State          string `json:"state"`
+	SHA256         string `json:"sha256"`
+	ContentID      string `json:"contentId"`
+	Error          string `json:"error,omitempty"`
+	Transferred    int64  `json:"transferred,omitempty"`
 }
 
 // BatchRecord is the durable projection of one coordinator batch.
@@ -395,6 +396,18 @@ func (s *Store) Verifier(token string) string {
 // constant time.
 func (s *Store) VerifyToken(token, verifier string) bool {
 	return hmac.Equal([]byte(s.Verifier(token)), []byte(verifier))
+}
+
+// DeriveSubkey derives a purpose-bound 256-bit key from the installation key
+// without exposing the raw installation key material outside the store.
+func (s *Store) DeriveSubkey(purpose string) []byte {
+	s.mu.Lock()
+	key := append([]byte(nil), s.key...)
+	s.mu.Unlock()
+	m := hmac.New(sha256.New, key)
+	_, _ = m.Write([]byte("flitnix-subkey:"))
+	_, _ = m.Write([]byte(purpose))
+	return m.Sum(nil)
 }
 
 func hmacToken(key []byte, token string) []byte {

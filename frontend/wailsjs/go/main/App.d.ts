@@ -9,6 +9,7 @@ import {devices} from '../models';
 import {audit} from '../models';
 import {doctor} from '../models';
 import {power} from '../models';
+import {transfer} from '../models';
 
 export function AddDroppedSources(arg1:Array<string>):Promise<Array<main.SharedSourceView>>;
 
@@ -40,6 +41,10 @@ export function DeleteGuestTemplate(arg1:string):Promise<void>;
 
 export function DenyPairing(arg1:string):Promise<void>;
 
+export function DiscardBatch(arg1:string):Promise<void>;
+
+export function DiscardUpload(arg1:string):Promise<void>;
+
 export function DownloadUpdate():Promise<update.Progress>;
 
 export function DuplicateGuestTemplate(arg1:string,arg2:string):Promise<guest.Template>;
@@ -61,6 +66,8 @@ export function GetNetworkState():Promise<netenv.NetworkState>;
 export function GetPairingStatus():Promise<devices.PairingStatusView>;
 
 export function GetSettings():Promise<main.SettingsView>;
+
+export function GetStorageStatus():Promise<transfer.StorageStatus>;
 
 export function ListAuditEvents(arg1:audit.Filter):Promise<main.AuditListResult>;
 
@@ -89,6 +96,8 @@ export function ListTrustedDevices():Promise<Array<devices.Device>>;
 export function OpenDownloadFolder():Promise<void>;
 
 export function OpenGuestFolder():Promise<void>;
+
+export function PauseBatch(arg1:string):Promise<main.BatchView>;
 
 export function PickExportDestination():Promise<string>;
 
@@ -121,6 +130,8 @@ export function RemoveExpectedParticipant(arg1:string):Promise<void>;
 export function RemoveTrustedDevice(arg1:string):Promise<void>;
 
 export function ResetSettings():Promise<main.SettingsView>;
+
+export function ResumeBatch(arg1:string):Promise<main.BatchView>;
 
 export function RevokeGuest(arg1:string):Promise<void>;
 
