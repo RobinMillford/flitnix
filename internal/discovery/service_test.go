@@ -236,12 +236,33 @@ func TestDiscoveryVisibilityModesAndSpoofingDefense(t *testing.T) {
 		DeviceName: "Evil Spoofer",
 		OS:         "linux",
 		Port:       43821,
+		IPs:        []string{"192.168.1.99"},
 		Timestamp:  clock().Unix(),
-		Signature:  spoofID.Sign(signAnnouncementPayload(bobID.HostID, spoofID.PublicKey, "Evil Spoofer", "linux", "0.2.8.0", 43821, clock().Unix())),
+		Signature:  spoofID.Sign(signAnnouncementPayload(bobID.HostID, spoofID.PublicKey, "Evil Spoofer", "linux", "0.2.8.0", 43821, []string{"192.168.1.99"}, clock().Unix())),
 	})
 	alice.handleBeaconPacket(nil, spoofPkt, net.ParseIP("192.168.1.99"))
 	if p := alice.Peers(); len(p) != 1 || p[0].DeviceName != "Bob MacBook" {
 		t.Fatalf("spoof packet corrupted peer table: %+v", p)
+	}
+
+	// 3b. Replay of Bob's genuine signed announce from a DIFFERENT attacker IP (192.168.1.99) MUST be dropped!
+	bobTS := clock().Unix()
+	bobSignedPayload := signAnnouncementPayload(bobID.HostID, bobID.PublicKey, "Bob MacBook", "darwin", "0.2.8.0", 43821, []string{"192.168.1.30"}, bobTS)
+	replayedPkt, _ := json.Marshal(beaconEnvelope{
+		Kind:       "announce",
+		HostID:     bobID.HostID,
+		PublicKey:  bobID.PublicKey,
+		DeviceName: "Bob MacBook",
+		OS:         "darwin",
+		Version:    "0.2.8.0",
+		Port:       43821,
+		IPs:        []string{"192.168.1.30"},
+		Timestamp:  bobTS,
+		Signature:  bobID.Sign(bobSignedPayload),
+	})
+	alice.handleBeaconPacket(nil, replayedPkt, net.ParseIP("192.168.1.99"))
+	if p := alice.Peers(); len(p) != 1 || p[0].Address != "192.168.1.30" {
+		t.Fatalf("attacker IP replay hijacked peer address: %+v", p)
 	}
 
 	// 4. Stale peer eviction clears expired entries.
@@ -334,5 +355,88 @@ func TestDiscoveryTrustedOnlyNonIdentifyingProbes(t *testing.T) {
 		if strings.Contains(s, "SECRET_ALICE_HOST") || strings.Contains(s, aliceID.HostID) || strings.Contains(s, aliceID.PublicKey) {
 			t.Fatalf("trusted probe leaked identifiable metadata on wire: %s", s)
 		}
+	}
+
+	// Verify an attacker knowing BOTH public keys (pubA, pubB) CANNOT forge a trusted probe!
+	fakeSalt := make([]byte, 16)
+	epoch := time.Now().UTC().Unix() / 60
+	fakeTag, fakeMask := computeProbeTagAndMask([]byte("01234567890123456789012345678901"), epoch, fakeSalt, aliceID.HostID, "192.168.2.99", 43821)
+	forgedPkt, _ := json.Marshal(beaconEnvelope{
+		Kind:   "probe",
+		Epoch:  epoch,
+		Salt:   hex.EncodeToString(fakeSalt),
+		Probes: []trustedProbe{{Tag: fakeTag, MetaMask: fakeMask}},
+	})
+	bob2.handleBeaconPacket(nil, forgedPkt, net.ParseIP("192.168.2.99"))
+	for _, p := range bob2.Peers() {
+		if p.Address == "192.168.2.99" {
+			t.Fatalf("forged trusted probe hijacked Alice's IP: %+v", p)
+		}
+	}
+
+	// Verify TrustedOnly ignores unsolicited announcements from unknown strangers.
+	strangerID, _ := devices.LoadOrCreateHostIdentity(filepath.Join(dir, "stranger.json"))
+	ts := time.Now().UTC().Unix()
+	strangerSig := strangerID.Sign(signAnnouncementPayload(strangerID.HostID, strangerID.PublicKey, "Bob Desktop", "linux", "0.2.8.0", 43821, []string{"192.168.2.88"}, ts))
+	strangerPkt, _ := json.Marshal(beaconEnvelope{
+		Kind:       "announce",
+		HostID:     strangerID.HostID,
+		PublicKey:  strangerID.PublicKey,
+		DeviceName: "Bob Desktop",
+		OS:         "linux",
+		Version:    "0.2.8.0",
+		Port:       43821,
+		IPs:        []string{"192.168.2.88"},
+		Timestamp:  ts,
+		Signature:  strangerSig,
+	})
+	alice.handleBeaconPacket(nil, strangerPkt, net.ParseIP("192.168.2.88"))
+	for _, peer := range alice.Peers() {
+		if peer.HostID == strangerID.HostID {
+			t.Fatalf("TrustedOnly mode accepted stranger announcement: %+v", peer)
+		}
+	}
+}
+
+func TestDiscoveryFlagsSpoofedTrustedNameInEveryoneMode(t *testing.T) {
+	dir := t.TempDir()
+	aliceID, _ := devices.LoadOrCreateHostIdentity(filepath.Join(dir, "alice.json"))
+	bobID, _ := devices.LoadOrCreateHostIdentity(filepath.Join(dir, "bob.json"))
+	evilID, _ := devices.LoadOrCreateHostIdentity(filepath.Join(dir, "evil.json"))
+
+	aliceStore, _ := devices.NewStore("")
+	bobPub, _ := hex.DecodeString(bobID.PublicKey)
+	_, _ = aliceStore.Add("Bob Workstation", bobPub, true)
+
+	alice := NewService(Config{
+		HostIdentity:   aliceID,
+		TrustedDevices: func() []devices.Device { return aliceStore.List() },
+		VisibilityMode: func() devices.VisibilityMode { return devices.VisibilityEveryone },
+	})
+
+	ts := time.Now().UTC().Unix()
+	evilSig := evilID.Sign(signAnnouncementPayload(evilID.HostID, evilID.PublicKey, "Bob Workstation", "linux", "0.2.8.0", 43821, []string{"192.168.1.99"}, ts))
+	evilPkt, _ := json.Marshal(beaconEnvelope{
+		Kind:       "announce",
+		HostID:     evilID.HostID,
+		PublicKey:  evilID.PublicKey,
+		DeviceName: "Bob Workstation",
+		OS:         "linux",
+		Version:    "0.2.8.0",
+		Port:       43821,
+		IPs:        []string{"192.168.1.99"},
+		Timestamp:  ts,
+		Signature:  evilSig,
+	})
+	alice.handleBeaconPacket(nil, evilPkt, net.ParseIP("192.168.1.99"))
+	peers := alice.Peers()
+	if len(peers) != 1 {
+		t.Fatalf("expected 1 peer, got %+v", peers)
+	}
+	if peers[0].Trusted {
+		t.Fatalf("attacker reusing trusted DeviceName marked Trusted=true!")
+	}
+	if !peers[0].NameConflictWarning {
+		t.Fatalf("expected NameConflictWarning=true for attacker mimicking trusted name, got %+v", peers[0])
 	}
 }

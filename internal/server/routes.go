@@ -2172,6 +2172,9 @@ func handleDeviceRemove(svcs *Services) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		if svcs.Sessions != nil {
+			svcs.Sessions.RevokeByDeviceID(id)
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
 	}
 }

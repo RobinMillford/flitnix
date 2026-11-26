@@ -251,6 +251,14 @@ func (c *PairingCoordinator) Reveal(sessionKeyHash []byte, nonceHex, clientEphem
 		return nil, ErrWrongPairingState
 	}
 
+	// Enforce session binding identically to Phase 3 so a different QR/code session
+	// cannot advance another session's active challenge.
+	if len(p.SessionKeyHash) > 0 && !hmac.Equal(p.SessionKeyHash, sessionKeyHash) {
+		c.recordFailureLocked(now)
+		c.active = nil
+		return nil, ErrSessionMismatch
+	}
+
 	// Decode client ephemeral key and salt
 	clientEphemeral, err := hex.DecodeString(clientEphemeralHex)
 	if err != nil || len(clientEphemeral) != 32 {
@@ -374,8 +382,8 @@ func (c *PairingCoordinator) PrepareApproval(sessionKeyHash []byte, deviceName, 
 		return "", nil, time.Time{}, ErrWrongPairingState
 	}
 
-	// Verify session binding
-	if len(p.SessionKeyHash) > 0 && len(sessionKeyHash) > 0 && !hmac.Equal(p.SessionKeyHash, sessionKeyHash) {
+	// Verify session binding strictly fail-closed
+	if len(p.SessionKeyHash) > 0 && !hmac.Equal(p.SessionKeyHash, sessionKeyHash) {
 		c.recordFailureLocked(now)
 		c.active = nil
 		return "", nil, time.Time{}, ErrSessionMismatch

@@ -38,7 +38,7 @@
     ListTrustedDevices, RemoveTrustedDevice, SetDeviceAutoApprove, SetDevicePolicy,
     ApprovePairing, DenyPairing, GetPairingStatus, ReArmPairing,
     GetVisibilityState, SetVisibilityMode, SetQRSharingPaused, RevokeAllSessions,
-    GetLocalPeerInfo, EnsurePeerServer, ListNearbyPeers, TriggerNearbyScan,
+    GetLocalPeerInfo, EnsurePeerServer, EnsurePeerSessionShortCode, ListNearbyPeers, TriggerNearbyScan,
     PickFilesForPeer, PickFolderForPeer, ConnectAndSendToPeer, PairWithPeer,
     InspectPeerTarget, ListPeerTransfers, CancelPeerTransfer, ClearCompletedPeerTransfers,
     ResolvePeerPairingSAS,
@@ -929,6 +929,15 @@
     }
   }
 
+  async function ensurePeerShortCodeAction(): Promise<void> {
+    try {
+      shortCode = await EnsurePeerSessionShortCode()
+      refresh()
+    } catch (err) {
+      report(err)
+    }
+  }
+
   async function triggerPeerScanAction(): Promise<void> {
     scanningPeers = true
     try {
@@ -1673,6 +1682,7 @@
               {peerTransfers}
               stagedPaths={peerStagedPaths}
               {visibilityState}
+              {shortCode}
               {pending}
               {pendingBatches}
               {serverAddress}
@@ -1680,6 +1690,8 @@
               sending={sendingToPeer}
               {pairingSasPrompt}
               ensurePeerServerAction={ensurePeerServerAction}
+              {ensurePeerShortCodeAction}
+              {regenerateShortCodeAction}
               triggerScanAction={triggerPeerScanAction}
               {setVisibilityModeAction}
               pickFilesAction={pickPeerFilesAction}
@@ -1831,8 +1843,8 @@
     <div class="global-pairing-overlay" role="dialog" aria-modal="true" aria-label="Device pairing verification">
       <div class="global-pairing-modal">
         <div class="global-pairing-badge">🔐 Trusted Device Pairing Request</div>
-        <h3>{pairingStatus.deviceName || pairingStatus.clientId || 'Mobile Browser'} wants to pair</h3>
-        <p>Confirm the 6-digit verification code matches on your phone screen before approving:</p>
+        <h3>{pairingStatus.deviceName || pairingStatus.clientId || 'Remote Device'} wants to pair</h3>
+        <p>Confirm the 6-digit verification code matches on the remote screen before approving:</p>
         <div class="global-pairing-sas tabular">{pairingStatus.sas || '---'}</div>
         <div class="global-pairing-actions">
           <button

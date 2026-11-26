@@ -102,6 +102,10 @@ export function EnsurePeerServer() {
   return window['go']['main']['App']['EnsurePeerServer']();
 }
 
+export function EnsurePeerSessionShortCode() {
+  return window['go']['main']['App']['EnsurePeerSessionShortCode']();
+}
+
 export function ExportGuestCollection(arg1) {
   return window['go']['main']['App']['ExportGuestCollection'](arg1);
 }

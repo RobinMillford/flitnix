@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import type { main, discovery, devices, client } from '../../wailsjs/go/models'
+  import type { main, discovery, devices, client, session } from '../../wailsjs/go/models'
   import { formatBytes, percent, speed, calcEta } from '../utils'
   import ProgressBar from '../components/ProgressBar.svelte'
 
@@ -9,6 +9,7 @@
   export let peerTransfers: main.PeerTransferJob[] = []
   export let stagedPaths: string[] = []
   export let visibilityState: devices.VisibilityState | null = null
+  export let shortCode: session.ShortCodeView | null = null
   export let pending: main.UploadView[] = []
   export let pendingBatches: main.BatchView[] = []
   export let serverAddress: string = ''
@@ -17,6 +18,8 @@
   export let pairingSasPrompt: main.PeerPairSASPrompt | null = null
 
   export let ensurePeerServerAction: () => void = () => {}
+  export let ensurePeerShortCodeAction: () => void = () => {}
+  export let regenerateShortCodeAction: (key: string) => void = () => {}
   export let triggerScanAction: () => void = () => {}
   export let setVisibilityModeAction: (mode: string) => void = () => {}
   export let pickFilesAction: () => void = () => {}
@@ -74,7 +77,34 @@
     manualAddress = `${p.address}:${p.port || 43821}`
     probedInfo = null
     probeError = ''
-    tofuConfirmed = true
+    if (p.trusted && !p.nameConflictWarning) {
+      tofuConfirmed = true
+      return
+    }
+    // Untrusted discovery hints MUST be verified over TLS 1.3 and confirmed (or paired via SAS) before sending.
+    tofuConfirmed = false
+    void verifyDiscoveredPeerTLS(p)
+  }
+
+  async function verifyDiscoveredPeerTLS(p: discovery.Peer) {
+    probingTarget = true
+    probeError = ''
+    try {
+      const res = await inspectPeerTargetAction(p.address, p.port || 43821)
+      if (!res || !res.hostId) return
+      if (res.hostId.toLowerCase() !== (p.hostId || '').toLowerCase() ||
+          res.publicKey.toLowerCase() !== (p.publicKey || '').toLowerCase()) {
+        probeError = 'Security warning: live TLS 1.3 key at this address does not match the discovery announcement (possible spoofed beacon).'
+        probedInfo = null
+        tofuConfirmed = false
+        return
+      }
+      probedInfo = res
+    } catch (err: any) {
+      probeError = err?.message || String(err)
+    } finally {
+      probingTarget = false
+    }
   }
 
   async function inspectManualTarget() {
@@ -149,7 +179,10 @@
       ? manualAddress.trim()
       : 'No recipient chosen'
 
-  $: canSend = stagedPaths.length > 0 && !sending && (!!selectedPeer || (!!manualAddress.trim() && (tofuConfirmed || !probedInfo)))
+  $: canSend = stagedPaths.length > 0 && !sending && (
+    (!!selectedPeer && (selectedPeer.trusted || tofuConfirmed || manualShortCode.replace(/\s+/g, '').length === 6)) ||
+    (!!manualAddress.trim() && (tofuConfirmed || manualShortCode.replace(/\s+/g, '').length === 6))
+  )
 </script>
 
 <div class="computer-sharing-view">
@@ -220,8 +253,10 @@
                     <strong>{peer.deviceName || 'Flitnix Desktop'}</strong>
                     {#if peer.trusted}
                       <span class="trust-badge trusted">Trusted</span>
+                    {:else if peer.nameConflictWarning}
+                      <span class="trust-badge conflict">⚠ Spoofed Name Risk (Unverified)</span>
                     {:else}
-                      <span class="trust-badge">Unpaired</span>
+                      <span class="trust-badge">Unverified Hint</span>
                     {/if}
                   </div>
                   <span class="peer-sub tabular">
@@ -246,6 +281,35 @@
             </div>
           {/each}
         </div>
+      </section>
+
+      <!-- Direct Receive Code for this Computer -->
+      <section class="peer-card">
+        <div class="card-head">
+          <div>
+            <span class="eyebrow">Receive From Another Computer</span>
+            <h3>This Computer's 6-Digit Share Code</h3>
+          </div>
+          {#if shortCode?.code && !shortCode.used && !shortCode.expired}
+            <button type="button" class="button ghost small" on:click={() => regenerateShortCodeAction(shortCode?.sessionKey || '')}>
+              ↻ New Code
+            </button>
+          {:else}
+            <button type="button" class="button secondary small" on:click={ensurePeerShortCodeAction}>
+              Generate 6-Digit Code
+            </button>
+          {/if}
+        </div>
+        {#if shortCode?.code && !shortCode.used && !shortCode.expired}
+          <div class="code-share-box">
+            <strong class="code-digits tabular">{shortCode.code.slice(0, 3)} {shortCode.code.slice(3)}</strong>
+            <span class="peer-sub">Enter on another desktop (works even in Hidden or Trusted Only mode). Single-use · 3 min TTL.</span>
+          </div>
+        {:else}
+          <div class="empty-box">
+            Generate a temporary single-use 6-digit code so another computer can connect to {localPeerInfo?.address || 'this computer'} without switching to Everyone mode.
+          </div>
+        {/if}
       </section>
 
       <!-- Manual IP & 6-Digit Code Fallback -->
@@ -864,5 +928,26 @@
     background: var(--danger-subtle);
     color: var(--danger-text);
     font-size: 12px;
+  }
+
+  .trust-badge.conflict {
+    background: var(--danger-subtle);
+    color: var(--danger-text);
+  }
+
+  .code-share-box {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 12px 14px;
+    border-radius: 10px;
+    background: var(--bg-surface-elevated);
+    border: 1px dashed var(--accent);
+  }
+
+  .code-digits {
+    font-size: 24px;
+    letter-spacing: 0.14em;
+    color: var(--accent);
   }
 </style>

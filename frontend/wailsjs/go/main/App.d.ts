@@ -64,6 +64,8 @@ export function EndSession(arg1:string):Promise<void>;
 
 export function EnsurePeerServer():Promise<string>;
 
+export function EnsurePeerSessionShortCode():Promise<session.ShortCodeView>;
+
 export function ExportGuestCollection(arg1:string):Promise<guest.ExportResult>;
 
 export function GetAppVersion():Promise<version.Info>;
