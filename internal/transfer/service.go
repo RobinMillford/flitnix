@@ -765,11 +765,16 @@ func (s *Service) SubmitContentWithPublish(id, sessionKey string, body io.Reader
 		}
 		u.mu.Lock()
 		now := time.Now()
-		if elapsed := now.Sub(u.lastAt).Seconds(); elapsed > 0 {
-			u.speed = float64(written-u.lastBytes) / elapsed
+		if elapsed := now.Sub(u.lastAt).Seconds(); (elapsed >= 0.05 || (u.speed <= 0 && elapsed > 0)) && written > u.lastBytes {
+			inst := float64(written-u.lastBytes) / elapsed
+			if u.speed <= 0 {
+				u.speed = inst
+			} else {
+				u.speed = 0.7*u.speed + 0.3*inst
+			}
+			u.lastAt = now
+			u.lastBytes = written
 		}
-		u.lastAt = now
-		u.lastBytes = written
 		u.mu.Unlock()
 		if onProgress != nil {
 			onProgress(u.snapshot())

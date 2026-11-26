@@ -1017,6 +1017,16 @@ func (c *Coordinator) MarkItemPublishing(sessionKey string, lease TransferLease)
 // CompleteItem finalizes a successful lease. A stream must have reported the
 // complete declared size first.
 func (c *Coordinator) CompleteItem(sessionKey string, lease TransferLease, sha256 string) (BatchView, error) {
+	return c.completeItem(sessionKey, lease, sha256, false)
+}
+
+// CompleteItemCompact finalizes a successful lease and returns a compact BatchView
+// omitting the full item slice to avoid O(N^2) copying on large multi-file batches.
+func (c *Coordinator) CompleteItemCompact(sessionKey string, lease TransferLease, sha256 string) (BatchView, error) {
+	return c.completeItem(sessionKey, lease, sha256, true)
+}
+
+func (c *Coordinator) completeItem(sessionKey string, lease TransferLease, sha256 string, compact bool) (BatchView, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	session := c.sessions[sessionKey]
@@ -1056,6 +1066,9 @@ func (c *Coordinator) CompleteItem(sessionKey string, lease TransferLease, sha25
 		CompletedAt: batch.batch.CompletedAt, Transferred: batch.batch.TransferredBytes,
 	}); err != nil {
 		return BatchView{}, err
+	}
+	if compact {
+		return batch.batch.CompactView(), nil
 	}
 	return batch.batch.View(), nil
 }

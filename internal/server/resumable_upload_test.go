@@ -723,3 +723,84 @@ func TestRecoveryPhase10CleansExpiredAndOrphanStaging(t *testing.T) {
 }
 
 func errorsIsNotExist(err error) bool { return os.IsNotExist(err) }
+
+func TestCompactAckOmitsItemsWhileUpdatingBatchSummary(t *testing.T) {
+	store, err := transfer.NewStore(transfer.StoreConfig{Dir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessMgr := session.NewManager(session.Config{})
+	trans := transfer.NewService(transfer.Config{Store: store})
+	coord := transfer.NewCoordinator(transfer.CoordinatorConfig{})
+	svcs := &Services{
+		Sessions:    sessMgr,
+		Transfers:   trans,
+		Coordinator: coord,
+		Registry:    transfer.NewRegistry(),
+		Downloads:   transfer.NewDownloadRegistry(),
+	}
+	srv := New(Config{ListenAddr: "127.0.0.1:0", Services: svcs})
+	s, _ := sessMgr.Create()
+
+	payload := synthPattern(32*1024, 0x55)
+	items := make([]transfer.ManifestItem, 5)
+	for i := range items {
+		items[i] = transfer.ManifestItem{
+			DisplayName: fmt.Sprintf("f%d.bin", i),
+			Size:        int64(len(payload)),
+		}
+	}
+	meta, _ := json.Marshal(transfer.BatchManifest{
+		Direction: transfer.DirectionPhoneToDesktop,
+		Kind:      transfer.BatchKindFiles,
+		Items:     items,
+	})
+	rec := httptest.NewRecorder()
+	r, _ := http.NewRequest(http.MethodPost, "/api/batches", bytes.NewReader(meta))
+	r.Host = "127.0.0.1"
+	r.Header.Set("Authorization", "Bearer "+s.Token())
+	srv.Handler().ServeHTTP(rec, r)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create batch = %d", rec.Code)
+	}
+	var b transfer.BatchView
+	_ = json.Unmarshal(rec.Body.Bytes(), &b)
+
+	cids := make([]string, len(b.Items))
+	for i, it := range b.Items {
+		cid, _ := coord.ItemContentID(s.Key(), b.ID, it.ID)
+		cids[i] = cid
+	}
+	_ = trans.DecideBatchItems(cids, true)
+	_, _ = coord.ApproveBatch(s.Key(), b.ID)
+
+	for i, it := range b.Items {
+		patch, _ := http.NewRequest(http.MethodPatch, fmt.Sprintf("/api/batches/%s/items/%s/content", b.ID, it.ID), bytes.NewReader(payload))
+		patch.Host = "127.0.0.1"
+		patch.Header.Set("Authorization", "Bearer "+s.Token())
+		patch.Header.Set("Upload-Offset", "0")
+		patch.Header.Set("X-Flitnix-Compact-Ack", "1")
+		patch.ContentLength = int64(len(payload))
+		pr := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(pr, patch)
+		if pr.Code != http.StatusOK {
+			t.Fatalf("item %d PATCH = %d body=%s", i, pr.Code, pr.Body.String())
+		}
+		var ack struct {
+			Written int64              `json:"written"`
+			Batch   transfer.BatchView `json:"batch"`
+		}
+		if err := json.Unmarshal(pr.Body.Bytes(), &ack); err != nil {
+			t.Fatal(err)
+		}
+		if len(ack.Batch.Items) != 0 {
+			t.Fatalf("compact ACK item %d returned %d items, want 0", i, len(ack.Batch.Items))
+		}
+		if ack.Batch.TotalItemCount != 5 || ack.Batch.TransferredBytes != int64(i+1)*int64(len(payload)) {
+			t.Fatalf("compact ACK item %d summary = %+v", i, ack.Batch)
+		}
+		if i == len(b.Items)-1 && ack.Batch.State != transfer.BatchStateCompleted {
+			t.Fatalf("final compact ACK batch state = %q, want completed", ack.Batch.State)
+		}
+	}
+}

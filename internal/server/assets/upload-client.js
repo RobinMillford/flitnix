@@ -15,7 +15,7 @@
   "use strict";
 
   var WORKER_URL = "/static/upload-worker.js";
-  var DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024;
+  var DEFAULT_CHUNK_SIZE = 16 * 1024 * 1024;
 
   var worker = null;
   var workerBroken = false;
@@ -115,7 +115,8 @@
         url: opts.url,
         headers: opts.headers || {},
         file: opts.file,
-        chunkSize: opts.chunkSize || DEFAULT_CHUNK_SIZE
+        chunkSize: opts.chunkSize || DEFAULT_CHUNK_SIZE,
+        skipInitialHead: Boolean(opts.skipInitialHead)
       });
     });
     return {
@@ -267,6 +268,12 @@
             resolve({ status: 200, responseText: xhr.responseText || "", offset: total });
             return;
           }
+          if (xhr.status === 404 || xhr.status === 405) {
+            var fallback = streamOnMainThread(opts);
+            currentXhr = { abort: fallback.abort };
+            fallback.promise.then(resolve, reject);
+            return;
+          }
           if (xhr.status === 409) {
             var parsed = null;
             try { parsed = JSON.parse(xhr.responseText || "{}"); } catch (e) {}
@@ -309,7 +316,11 @@
         }
       }
 
-      queryHead();
+      if (opts.skipInitialHead) {
+        sendNextChunk();
+      } else {
+        queryHead();
+      }
     });
 
     return {

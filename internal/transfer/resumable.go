@@ -1,6 +1,7 @@
 package transfer
 
 import (
+	"bufio"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -20,9 +21,9 @@ import (
 )
 
 const (
-	// DefaultChunkSize is the server-advertised chunk size (4 MiB) for resumable
+	// DefaultChunkSize is the server-advertised chunk size (16 MiB) for resumable
 	// chunked PATCH uploads.
-	DefaultChunkSize int64 = 4 << 20
+	DefaultChunkSize int64 = 16 << 20
 
 	// MaxChunkSize bounds a single PATCH request body so server memory and crash
 	// rollback remain strictly bounded.
@@ -848,37 +849,8 @@ func (s *Service) SubmitChunk(
 		metaPath = metaPathForPart(partPath)
 		partFile = pf.f
 
-		partRel, relErr := filepath.Rel(s.store.Dir(), partPath)
-		if relErr != nil {
-			_ = pf.Abort()
-			u.mu.Unlock()
-			return ChunkResult{}, relErr
-		}
-		initMeta := ResumableMeta{
-			UploadID:        u.id,
-			BatchID:         batchID,
-			ItemID:          itemID,
-			SessionKey:      u.session,
-			RootName:        root,
-			RelativePath:    relPath,
-			FinalName:       name,
-			PartRelPath:     filepath.ToSlash(partRel),
-			DeclaredSize:    u.size,
-			LastModifiedMs:  lastModMs,
-			CommittedOffset: 0,
-			ChunkSize:       DefaultChunkSize,
-			ExpectedSHA256:  expectedSHA,
-			SHA256State:     hstate,
-			CreatedAt:       createdAt,
-			UpdatedAt:       time.Now().UTC(),
-		}
-		if werr := WriteResumableMeta(metaPath, metaKey, initMeta); werr != nil {
-			_ = pf.Abort()
-			u.state = StateInterrupted
-			u.reason = werr.Error()
-			u.mu.Unlock()
-			return ChunkResult{}, werr
-		}
+		// Defer writing .meta until an intermediate chunk boundary (< u.size) is
+		// committed so single-chunk uploads never pay extra .meta fsync + unlink I/O.
 		u.partPath = partPath
 		u.metaPath = metaPath
 		u.finalDir = finalDir
@@ -923,11 +895,16 @@ func (s *Service) SubmitChunk(
 	u.chunkCancel = chunkCancel
 	u.state = StateUploading
 	u.reason = ""
-	u.lastAt = time.Now()
+	chunkStart := time.Now()
+	u.lastAt = chunkStart
 	u.lastBytes = curOffset
 	u.mu.Unlock()
 
+	var bw *bufio.Writer
 	rollbackInterrupted := func(cause error) (ChunkResult, error) {
+		if bw != nil {
+			_ = bw.Flush()
+		}
 		_ = partFile.Truncate(curOffset)
 		_ = partFile.Sync()
 		_ = partFile.Close()
@@ -983,7 +960,9 @@ func (s *Service) SubmitChunk(
 	var chunkWritten int64
 	var sinceStep int64
 	var sinceDiskCheck int64
-	mw := io.MultiWriter(partFile, hasher)
+	bw = GetBufioWriter(partFile)
+	defer PutBufioWriter(bw)
+	mw := io.MultiWriter(bw, hasher)
 
 	limited := io.LimitReader(body, chunkLen+1)
 	for {
@@ -1023,11 +1002,16 @@ func (s *Service) SubmitChunk(
 				sinceStep = 0
 				u.mu.Lock()
 				now := time.Now()
-				if elapsed := now.Sub(u.lastAt).Seconds(); elapsed > 0 {
-					u.speed = float64(totalSoFar-u.lastBytes) / elapsed
+				if elapsed := now.Sub(u.lastAt).Seconds(); elapsed >= 0.01 && totalSoFar > u.lastBytes {
+					inst := float64(totalSoFar-u.lastBytes) / elapsed
+					if u.speed <= 0 {
+						u.speed = inst
+					} else {
+						u.speed = 0.7*u.speed + 0.3*inst
+					}
+					u.lastAt = now
+					u.lastBytes = totalSoFar
 				}
-				u.lastAt = now
-				u.lastBytes = totalSoFar
 				u.mu.Unlock()
 				if onProgress != nil {
 					onProgress(u.snapshot())
@@ -1058,7 +1042,13 @@ func (s *Service) SubmitChunk(
 	u.mu.Unlock()
 
 	// Crash-safe commit ordering:
-	// 1. fsync .part data
+	// 1. Flush coalesced buffer and fsync .part data.
+	if err := bw.Flush(); err != nil {
+		if IsNoSpaceError(err) {
+			return rollbackInterrupted(fmt.Errorf("%w: %v", ErrInsufficientStorage, err))
+		}
+		return rollbackInterrupted(err)
+	}
 	if err := partFile.Sync(); err != nil {
 		if IsNoSpaceError(err) {
 			return rollbackInterrupted(fmt.Errorf("%w: %v", ErrInsufficientStorage, err))
@@ -1070,80 +1060,75 @@ func (s *Service) SubmitChunk(
 	}
 
 	newOffset := curOffset + chunkWritten
-	newHashState, herr := marshalHashState(hasher)
-	if herr != nil {
-		return ChunkResult{}, herr
-	}
-	partRel, relErr := filepath.Rel(s.store.Dir(), partPath)
-	if relErr != nil {
-		return ChunkResult{}, relErr
-	}
-
-	// 2. Write + fsync .meta.tmp -> rename to .meta -> syncDir
-	updatedMeta := ResumableMeta{
-		UploadID:        id,
-		BatchID:         batchID,
-		ItemID:          itemID,
-		SessionKey:      sessionKey,
-		RootName:        root,
-		RelativePath:    relPath,
-		FinalName:       name,
-		PartRelPath:     filepath.ToSlash(partRel),
-		DeclaredSize:    u.size,
-		LastModifiedMs:  lastModMs,
-		CommittedOffset: newOffset,
-		ChunkSize:       DefaultChunkSize,
-		ExpectedSHA256:  expectedSHA,
-		SHA256State:     newHashState,
-		CreatedAt:       createdAt,
-		UpdatedAt:       time.Now().UTC(),
-	}
-	if err := WriteResumableMeta(metaPath, metaKey, updatedMeta); err != nil {
-		// Notice .part has newOffset bytes, .meta still points to curOffset.
-		// Roll back .part to curOffset? No — WriteResumableMeta failed BEFORE rename,
-		// so truncate .part back to curOffset to match authoritative .meta!
-		f2, _, oerr := s.store.ReopenPartForAppend(partPath, curOffset)
-		if oerr == nil {
-			_ = f2.Close()
-		}
-		u.mu.Lock()
-		u.chunkInFlight = false
-		u.chunkCancel = nil
-		u.uploaded.Store(curOffset)
-		u.state = StateInterrupted
-		u.reason = err.Error()
-		u.mu.Unlock()
-		return ChunkResult{CommittedOffset: curOffset}, err
-	}
-
-	// Durable checkpoint succeeded. Update in-memory committed state.
-	u.mu.Lock()
-	u.committedOffset = newOffset
-	u.hashState = newHashState
-	u.uploaded.Store(newOffset)
-	if s.quota != nil {
-		s.quota.Advance(id, newOffset)
-	}
-	now := time.Now()
-	if elapsed := now.Sub(u.lastAt).Seconds(); elapsed > 0 {
-		u.speed = float64(newOffset-u.lastBytes) / elapsed
-	}
-	u.lastAt = now
-	u.lastBytes = newOffset
-	u.mu.Unlock()
-
-	if onProgress != nil {
-		onProgress(u.snapshot())
-	}
-
 	if newOffset < u.size {
+		newHashState, herr := marshalHashState(hasher)
+		if herr != nil {
+			return ChunkResult{}, herr
+		}
+		partRel, relErr := filepath.Rel(s.store.Dir(), partPath)
+		if relErr != nil {
+			return ChunkResult{}, relErr
+		}
+
+		// 2. Write + fsync .meta.tmp -> rename to .meta -> syncDir for intermediate checkpoints.
+		updatedMeta := ResumableMeta{
+			UploadID:        id,
+			BatchID:         batchID,
+			ItemID:          itemID,
+			SessionKey:      sessionKey,
+			RootName:        root,
+			RelativePath:    relPath,
+			FinalName:       name,
+			PartRelPath:     filepath.ToSlash(partRel),
+			DeclaredSize:    u.size,
+			LastModifiedMs:  lastModMs,
+			CommittedOffset: newOffset,
+			ChunkSize:       DefaultChunkSize,
+			ExpectedSHA256:  expectedSHA,
+			SHA256State:     newHashState,
+			CreatedAt:       createdAt,
+			UpdatedAt:       time.Now().UTC(),
+		}
+		if err := WriteResumableMeta(metaPath, metaKey, updatedMeta); err != nil {
+			// Notice .part has newOffset bytes, .meta still points to curOffset.
+			// Truncate .part back to curOffset to match authoritative .meta.
+			f2, _, oerr := s.store.ReopenPartForAppend(partPath, curOffset)
+			if oerr == nil {
+				_ = f2.Close()
+			}
+			u.mu.Lock()
+			u.chunkInFlight = false
+			u.chunkCancel = nil
+			u.uploaded.Store(curOffset)
+			u.state = StateInterrupted
+			u.reason = err.Error()
+			u.mu.Unlock()
+			return ChunkResult{CommittedOffset: curOffset}, err
+		}
+
+		// Durable checkpoint succeeded. Update in-memory committed state.
 		u.mu.Lock()
+		u.committedOffset = newOffset
+		u.hashState = newHashState
+		u.uploaded.Store(newOffset)
+		if s.quota != nil {
+			s.quota.Advance(id, newOffset)
+		}
+		now := time.Now()
+		if u.speed <= 0 && chunkWritten > 0 {
+			if elapsed := now.Sub(chunkStart).Seconds(); elapsed > 0 {
+				u.speed = float64(chunkWritten) / elapsed
+			}
+		}
+		u.lastAt = now
+		u.lastBytes = newOffset
 		u.chunkInFlight = false
 		u.chunkCancel = nil
-		if u.state == StateUploading {
-			// Keep uploading state between rapid sequential chunks unless paused/canceled.
-		}
 		u.mu.Unlock()
+
+		if onProgress != nil {
+			onProgress(u.snapshot())
+		}
 		return ChunkResult{
 			Written:         newOffset,
 			ChunkWritten:    chunkWritten,
@@ -1152,7 +1137,8 @@ func (s *Service) SubmitChunk(
 		}, nil
 	}
 
-	// Final chunk arrived: verify digest & atomically publish!
+	// Final chunk arrived: verify digest & atomically publish without writing a
+	// short-lived .meta sidecar that CommitResumablePartWithModTime would delete immediately.
 	sumHex := hex.EncodeToString(hasher.Sum(nil))
 	if expectedSHA != "" && !strings.EqualFold(sumHex, expectedSHA) {
 		u.mu.Lock()
@@ -1168,6 +1154,25 @@ func (s *Service) SubmitChunk(
 		u.mu.Unlock()
 		removeResumablePaths(partPath, metaPath)
 		return ChunkResult{}, ErrDigestMismatch
+	}
+
+	u.mu.Lock()
+	u.committedOffset = newOffset
+	u.uploaded.Store(newOffset)
+	if s.quota != nil {
+		s.quota.Advance(id, newOffset)
+	}
+	now := time.Now()
+	if u.speed <= 0 && chunkWritten > 0 {
+		if elapsed := now.Sub(chunkStart).Seconds(); elapsed > 0 {
+			u.speed = float64(chunkWritten) / elapsed
+		}
+	}
+	u.lastAt = now
+	u.lastBytes = newOffset
+	u.mu.Unlock()
+	if onProgress != nil {
+		onProgress(u.snapshot())
 	}
 
 	u.mu.Lock()

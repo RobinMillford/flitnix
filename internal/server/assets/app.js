@@ -1282,8 +1282,10 @@
       url: "/api/batches/" + encodeURIComponent(job.batchID) +
         "/items/" + encodeURIComponent(job.itemID) + "/content",
       headers: {
-        "Authorization": "Bearer " + token
+        "Authorization": "Bearer " + token,
+        "X-Flitnix-Compact-Ack": "1"
       },
+      skipInitialHead: job.uploaded === 0 && job.phase !== "resuming",
       file: job.file,
       onProgress: function (loaded, total) {
         job.uploaded = Math.min(job.size, loaded);
