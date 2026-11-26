@@ -34,6 +34,7 @@ import (
 
 	"github.com/itsyamin/flitnix/internal/audit"
 	"github.com/itsyamin/flitnix/internal/devices"
+	"github.com/itsyamin/flitnix/internal/discovery"
 	"github.com/itsyamin/flitnix/internal/doctor"
 	"github.com/itsyamin/flitnix/internal/guest"
 	"github.com/itsyamin/flitnix/internal/netenv"
@@ -285,6 +286,7 @@ type App struct {
 	hostIdentity  *devices.HostIdentity
 	pairing       *devices.PairingCoordinator
 	visibility    *devices.VisibilityManager
+	discovery     *discovery.Service
 	inhibitor     power.Inhibitor
 	updater       *update.Service
 	startupMu     sync.Mutex
@@ -433,6 +435,9 @@ func NewApp() (*App, error) {
 	}
 	visMgr.SetHooks(
 		func(st devices.VisibilityState) {
+			if a.discovery != nil {
+				a.discovery.NotifyEndpointChanged()
+			}
 			a.startupMu.Lock()
 			ctx := a.ctx
 			a.startupMu.Unlock()
@@ -464,6 +469,24 @@ func NewApp() (*App, error) {
 	)
 	a.netMonitor.OnChange(func(state netenv.NetworkState) {
 		a.handleNetworkChange(state)
+	})
+	a.discovery = discovery.NewService(discovery.Config{
+		HostIdentity: a.hostIdentity,
+		TrustedDevices: func() []devices.Device {
+			return a.ListTrustedDevices()
+		},
+		VisibilityMode: func() devices.VisibilityMode {
+			return a.GetVisibilityState().Mode
+		},
+		LocalEndpoint: a.discoveryLocalEndpoint,
+		OnPeersChanged: func(peers []discovery.Peer) {
+			a.startupMu.Lock()
+			ctx := a.ctx
+			a.startupMu.Unlock()
+			if ctx != nil && ctx.Value("frontend") != nil {
+				runtime.EventsEmit(ctx, "discovery:peers", peers)
+			}
+		},
 	})
 	a.sessions = session.NewManager(session.Config{OnExpire: a.releaseSession, OnEnd: a.logSessionEnd})
 	return a, nil
@@ -521,6 +544,9 @@ func (a *App) startup(ctx context.Context) {
 
 	if a.netMonitor != nil {
 		a.netMonitor.Start(bgCtx)
+	}
+	if a.discovery != nil {
+		a.discovery.Start(bgCtx)
 	}
 
 	if a.visibility != nil {
@@ -707,6 +733,9 @@ func (a *App) shutdown(ctx context.Context) {
 
 		if a.netMonitor != nil {
 			a.netMonitor.Stop()
+		}
+		if a.discovery != nil {
+			a.discovery.Stop()
 		}
 
 		for _, s := range a.sessions.ActiveSessions() {
@@ -1072,9 +1101,54 @@ func (a *App) handleNetworkChange(state netenv.NetworkState) {
 	a.startupMu.Lock()
 	ctx := a.ctx
 	a.startupMu.Unlock()
+	if a.discovery != nil {
+		a.discovery.NotifyEndpointChanged()
+	}
 	if ctx != nil && ctx.Value("frontend") != nil {
 		runtime.EventsEmit(ctx, "network:changed", state)
 	}
+}
+
+func (a *App) discoveryLocalEndpoint() discovery.LocalEndpoint {
+	hostname, _ := os.Hostname()
+	if strings.TrimSpace(hostname) == "" {
+		hostname = "Flitnix Desktop"
+	}
+	port := server.DefaultPort
+	if addr := a.ServerAddress(); addr != "" {
+		if _, pStr, err := net.SplitHostPort(addr); err == nil {
+			if p, pErr := fmt.Sscanf(pStr, "%d", &port); pErr != nil || p != 1 || port <= 0 {
+				port = server.DefaultPort
+			}
+		}
+	}
+	st := a.GetNetworkState()
+	return discovery.LocalEndpoint{
+		DeviceName:    devices.SanitizeDeviceName(hostname),
+		OS:            stdlibRuntime.GOOS,
+		Version:       version.Get().Version,
+		Port:          port,
+		InterfaceName: st.InterfaceName,
+		InterfaceType: st.Type,
+		LocalIP:       st.IP,
+	}
+}
+
+// ListNearbyPeers returns currently visible desktop peers on the local network.
+func (a *App) ListNearbyPeers() []discovery.Peer {
+	if a.discovery == nil {
+		return []discovery.Peer{}
+	}
+	return a.discovery.Peers()
+}
+
+// TriggerNearbyScan initiates an immediate LAN peer scan and returns the current list.
+func (a *App) TriggerNearbyScan() []discovery.Peer {
+	if a.discovery == nil {
+		return []discovery.Peer{}
+	}
+	a.discovery.TriggerScan()
+	return a.discovery.Peers()
 }
 
 // GetNetworkState returns the verified operational network state snapshot.

@@ -225,6 +225,46 @@ export namespace devices {
 
 }
 
+export namespace discovery {
+
+	export class Peer {
+	    hostId: string;
+	    publicKey: string;
+	    deviceName: string;
+	    os: string;
+	    version: string;
+	    address: string;
+	    port: number;
+	    addresses?: string[];
+	    trusted: boolean;
+	    autoApprove: boolean;
+	    interfaceName?: string;
+	    // Go type: time
+	    lastSeen?: any;
+
+	    static createFrom(source: any = {}) {
+	        return new Peer(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.hostId = source["hostId"];
+	        this.publicKey = source["publicKey"];
+	        this.deviceName = source["deviceName"];
+	        this.os = source["os"];
+	        this.version = source["version"];
+	        this.address = source["address"];
+	        this.port = source["port"];
+	        this.addresses = source["addresses"];
+	        this.trusted = source["trusted"];
+	        this.autoApprove = source["autoApprove"];
+	        this.interfaceName = source["interfaceName"];
+	        this.lastSeen = source["lastSeen"];
+	    }
+	}
+
+}
+
 export namespace doctor {
 
 	export class DiagnosticItem {

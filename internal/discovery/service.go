@@ -1,0 +1,921 @@
+package discovery
+
+import (
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"runtime"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/itsyamin/flitnix/internal/devices"
+	"golang.org/x/net/ipv4"
+)
+
+const (
+	// BeaconMulticastV4 is the Flitnix LAN multicast group used alongside mDNS.
+	BeaconMulticastV4 = "239.255.43.82"
+	// BeaconPort is the UDP port for LAN peer discovery beacons.
+	BeaconPort = 43822
+	// MDNSMulticastV4 is the standard IPv4 mDNS multicast address.
+	MDNSMulticastV4 = "224.0.0.251"
+	// MDNSPort is the standard mDNS UDP port.
+	MDNSPort = 5353
+
+	DefaultAnnounceInterval = 4 * time.Second
+	DefaultPeerTTL          = 18 * time.Second
+	MaxDiscoveredPeers      = 64
+	maxAnnouncementAge      = 2 * time.Minute
+)
+
+// PacketKind distinguishes mDNS DNS-SD packets from JSON LAN beacons.
+type PacketKind string
+
+const (
+	PacketMDNS   PacketKind = "mdns"
+	PacketBeacon PacketKind = "beacon"
+)
+
+// Peer represents one sanitized, cryptographically bound desktop instance on the LAN.
+type Peer struct {
+	HostID        string    `json:"hostId"`
+	PublicKey     string    `json:"publicKey"`
+	DeviceName    string    `json:"deviceName"`
+	OS            string    `json:"os"`
+	Version       string    `json:"version"`
+	Address       string    `json:"address"`
+	Port          int       `json:"port"`
+	Addresses     []string  `json:"addresses,omitempty"`
+	Trusted       bool      `json:"trusted"`
+	AutoApprove   bool      `json:"autoApprove"`
+	InterfaceName string    `json:"interfaceName,omitempty"`
+	LastSeen      time.Time `json:"lastSeen"`
+}
+
+// LocalEndpoint describes the currently selected local LAN interface and service port.
+type LocalEndpoint struct {
+	DeviceName    string
+	OS            string
+	Version       string
+	Port          int
+	InterfaceName string
+	InterfaceType string
+	LocalIP       string
+}
+
+// Config configures a Service.
+type Config struct {
+	HostIdentity     *devices.HostIdentity
+	TrustedDevices   func() []devices.Device
+	VisibilityMode   func() devices.VisibilityMode
+	LocalEndpoint    func() LocalEndpoint
+	Transport        NetworkTransport
+	AnnounceInterval time.Duration
+	PeerTTL          time.Duration
+	Now              func() time.Time
+	OnPeersChanged   func([]Peer)
+}
+
+// NetworkTransport abstracts UDP/multicast socket lifecycle for deterministic testing.
+type NetworkTransport interface {
+	Open(ifaceName string, localIP net.IP) (PacketSocket, error)
+}
+
+// PacketSocket sends and receives LAN discovery packets on a single bound interface.
+type PacketSocket interface {
+	SendMDNS(pkt []byte) error
+	SendBeacon(pkt []byte) error
+	Recv(ctx context.Context) (pkt []byte, srcIP net.IP, kind PacketKind, err error)
+	Close() error
+}
+
+type beaconEnvelope struct {
+	Kind       string         `json:"kind"`
+	HostID     string         `json:"hostId,omitempty"`
+	PublicKey  string         `json:"publicKey,omitempty"`
+	DeviceName string         `json:"deviceName,omitempty"`
+	OS         string         `json:"os,omitempty"`
+	Version    string         `json:"version,omitempty"`
+	Port       int            `json:"port,omitempty"`
+	Timestamp  int64          `json:"ts,omitempty"`
+	Signature  string         `json:"sig,omitempty"`
+	Epoch      int64          `json:"epoch,omitempty"`
+	Salt       string         `json:"salt,omitempty"`
+	Probes     []trustedProbe `json:"probes,omitempty"`
+}
+
+type trustedProbe struct {
+	Tag      string `json:"tag"`
+	MetaMask string `json:"m"`
+}
+
+// Service advertises the local Flitnix instance (when visibility permits) and discovers nearby peers.
+type Service struct {
+	cfg Config
+	now func() time.Time
+
+	mu          sync.RWMutex
+	peers       map[string]Peer
+	keyByHostID map[string]string
+	running     bool
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
+	scanCh      chan struct{}
+	rebindCh    chan struct{}
+	lastIface   string
+	lastIP      string
+}
+
+// NewService creates a nearby LAN discovery service.
+func NewService(cfg Config) *Service {
+	if cfg.AnnounceInterval <= 0 {
+		cfg.AnnounceInterval = DefaultAnnounceInterval
+	}
+	if cfg.PeerTTL <= 0 {
+		cfg.PeerTTL = DefaultPeerTTL
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
+	if cfg.Transport == nil {
+		cfg.Transport = udpMulticastTransport{}
+	}
+	return &Service{
+		cfg:         cfg,
+		now:         cfg.Now,
+		peers:       make(map[string]Peer),
+		keyByHostID: make(map[string]string),
+		scanCh:      make(chan struct{}, 1),
+		rebindCh:    make(chan struct{}, 1),
+	}
+}
+
+// Start begins background LAN discovery and visibility-aware announcements.
+func (s *Service) Start(ctx context.Context) {
+	s.mu.Lock()
+	if s.running {
+		s.mu.Unlock()
+		return
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	s.cancel = cancel
+	s.running = true
+	s.wg.Add(1)
+	s.mu.Unlock()
+
+	go s.run(runCtx)
+}
+
+// Stop shuts down sockets and background discovery loops cleanly.
+func (s *Service) Stop() {
+	s.mu.Lock()
+	if !s.running {
+		s.mu.Unlock()
+		return
+	}
+	cancel := s.cancel
+	s.running = false
+	s.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	s.wg.Wait()
+}
+
+// TriggerScan requests an immediate discovery query / announcement cycle.
+func (s *Service) TriggerScan() {
+	select {
+	case s.scanCh <- struct{}{}:
+	default:
+	}
+}
+
+// NotifyEndpointChanged prompts discovery to rebind sockets if interface/IP changed or visibility updated.
+func (s *Service) NotifyEndpointChanged() {
+	select {
+	case s.rebindCh <- struct{}{}:
+	default:
+	}
+}
+
+// Peers returns a snapshot of currently visible, non-expired nearby computers, updating trust status live.
+func (s *Service) Peers() []Peer {
+	now := s.now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneExpiredLocked(now)
+	return s.snapshotLocked()
+}
+
+func (s *Service) snapshotLocked() []Peer {
+	trustedByPub := make(map[string]devices.Device)
+	if s.cfg.TrustedDevices != nil {
+		for _, dev := range s.cfg.TrustedDevices() {
+			trustedByPub[dev.PublicKey] = dev
+		}
+	}
+	out := make([]Peer, 0, len(s.peers))
+	for _, p := range s.peers {
+		if dev, ok := trustedByPub[p.PublicKey]; ok {
+			p.Trusted = true
+			p.AutoApprove = dev.AutoApprove
+			if dev.Name != "" && p.DeviceName == "" {
+				p.DeviceName = dev.Name
+			}
+		} else {
+			p.Trusted = false
+			p.AutoApprove = false
+		}
+		out = append(out, p)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Trusted != out[j].Trusted {
+			return out[i].Trusted
+		}
+		if out[i].DeviceName != out[j].DeviceName {
+			return out[i].DeviceName < out[j].DeviceName
+		}
+		return out[i].HostID < out[j].HostID
+	})
+	return out
+}
+
+func (s *Service) pruneExpiredLocked(now time.Time) bool {
+	changed := false
+	for id, p := range s.peers {
+		if now.Sub(p.LastSeen) > s.cfg.PeerTTL {
+			delete(s.peers, id)
+			changed = true
+		}
+	}
+	return changed
+}
+
+func (s *Service) visibilityMode() devices.VisibilityMode {
+	if s.cfg.VisibilityMode != nil {
+		return s.cfg.VisibilityMode()
+	}
+	return devices.VisibilityTrustedOnly
+}
+
+func (s *Service) localEndpoint() LocalEndpoint {
+	if s.cfg.LocalEndpoint != nil {
+		ep := s.cfg.LocalEndpoint()
+		if ep.OS == "" {
+			ep.OS = runtime.GOOS
+		}
+		return ep
+	}
+	return LocalEndpoint{OS: runtime.GOOS}
+}
+
+func isVPNOrVirtualName(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	if lower == "" {
+		return false
+	}
+	for _, prefix := range []string{
+		"tun", "tap", "wg", "tailscale", "utun", "ppp", "ipsec", "zt", "nord", "proton", "mullvad", "veth", "docker", "br-", "virbr",
+	} {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) run(ctx context.Context) {
+	defer s.wg.Done()
+
+	var sock PacketSocket
+	var recvCancel context.CancelFunc
+	var recvWG sync.WaitGroup
+
+	closeSocket := func() {
+		if recvCancel != nil {
+			recvCancel()
+			recvCancel = nil
+		}
+		if sock != nil {
+			_ = sock.Close()
+			sock = nil
+		}
+		recvWG.Wait()
+	}
+	defer closeSocket()
+
+	rebind := func() {
+		ep := s.localEndpoint()
+		if ep.LocalIP == "" || strings.EqualFold(ep.InterfaceType, "VPN") || isVPNOrVirtualName(ep.InterfaceName) {
+			closeSocket()
+			s.mu.Lock()
+			s.lastIface = ""
+			s.lastIP = ""
+			s.mu.Unlock()
+			return
+		}
+		ip := net.ParseIP(ep.LocalIP)
+		if ip == nil || ip.IsLoopback() && !strings.HasPrefix(ep.InterfaceName, "lo") {
+			// allow explicit loopback in tests if InterfaceName starts with "lo" or mock transport
+			if ep.LocalIP != "127.0.0.1" && ep.LocalIP != "::1" {
+				closeSocket()
+				return
+			}
+		}
+
+		s.mu.RLock()
+		same := sock != nil && s.lastIface == ep.InterfaceName && s.lastIP == ep.LocalIP
+		s.mu.RUnlock()
+		if same {
+			return
+		}
+
+		closeSocket()
+		opened, err := s.cfg.Transport.Open(ep.InterfaceName, ip)
+		if err != nil {
+			return
+		}
+		sock = opened
+		s.mu.Lock()
+		s.lastIface = ep.InterfaceName
+		s.lastIP = ep.LocalIP
+		s.mu.Unlock()
+
+		var rCtx context.Context
+		rCtx, recvCancel = context.WithCancel(ctx)
+		recvWG.Add(1)
+		go func(sc PacketSocket, c context.Context) {
+			defer recvWG.Done()
+			for {
+				pkt, srcIP, kind, rErr := sc.Recv(c)
+				if rErr != nil {
+					return
+				}
+				if srcIP == nil {
+					continue
+				}
+				if kind == PacketMDNS {
+					if isMDNSFlitnixQuery(pkt) {
+						s.respondIfAllowed(sc)
+					} else if ann, ok := parseMDNSResponse(pkt); ok {
+						s.handleAnnouncement(ann, srcIP)
+					}
+				} else if kind == PacketBeacon {
+					s.handleBeaconPacket(sc, pkt, srcIP)
+				}
+			}
+		}(sock, rCtx)
+	}
+
+	rebind()
+	s.broadcastCycle(sock)
+
+	announceTick := time.NewTicker(s.cfg.AnnounceInterval)
+	defer announceTick.Stop()
+	pruneTick := time.NewTicker(2 * time.Second)
+	defer pruneTick.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.rebindCh:
+			rebind()
+			s.broadcastCycle(sock)
+		case <-s.scanCh:
+			rebind()
+			s.sendQueries(sock)
+			s.broadcastCycle(sock)
+		case <-announceTick.C:
+			rebind()
+			s.broadcastCycle(sock)
+		case <-pruneTick.C:
+			s.mu.Lock()
+			changed := s.pruneExpiredLocked(s.now())
+			var snap []Peer
+			if changed && s.cfg.OnPeersChanged != nil {
+				snap = s.snapshotLocked()
+			}
+			s.mu.Unlock()
+			if changed && s.cfg.OnPeersChanged != nil {
+				s.cfg.OnPeersChanged(snap)
+			}
+		}
+	}
+}
+
+func (s *Service) sendQueries(sock PacketSocket) {
+	if sock == nil || s.visibilityMode() == devices.VisibilityHidden {
+		return
+	}
+	if q, err := buildMDNSQuery(); err == nil {
+		_ = sock.SendMDNS(q)
+	}
+	if b, err := json.Marshal(beaconEnvelope{Kind: "query"}); err == nil {
+		_ = sock.SendBeacon(b)
+	}
+}
+
+func (s *Service) respondIfAllowed(sock PacketSocket) {
+	if sock == nil {
+		return
+	}
+	mode := s.visibilityMode()
+	if mode == devices.VisibilityEveryone || mode == devices.VisibilityTemporaryEveryone {
+		s.broadcastPublic(sock)
+	}
+}
+
+func (s *Service) broadcastCycle(sock PacketSocket) {
+	if sock == nil {
+		return
+	}
+	mode := s.visibilityMode()
+	switch mode {
+	case devices.VisibilityHidden:
+		// Hidden emits zero discovery packets.
+		return
+	case devices.VisibilityTrustedOnly:
+		s.broadcastTrustedProbe(sock)
+	case devices.VisibilityTemporaryEveryone, devices.VisibilityEveryone:
+		s.broadcastPublic(sock)
+	}
+}
+
+func signAnnouncementPayload(hostID, pubKeyHex, name, osName, ver string, port int, ts int64) []byte {
+	return []byte(fmt.Sprintf("flitnix-disc-v1|%s|%s|%s|%s|%s|%d|%d", hostID, pubKeyHex, name, osName, ver, port, ts))
+}
+
+func verifyKeyAndSignature(hostID, pubKeyHex, sigHex string, payload []byte) bool {
+	pubBytes, err := hex.DecodeString(pubKeyHex)
+	if err != nil || len(pubBytes) != ed25519.PublicKeySize {
+		return false
+	}
+	expectedIDBytes := sha256.Sum256(pubBytes)
+	expectedHostID := hex.EncodeToString(expectedIDBytes[:])
+	if !strings.EqualFold(hostID, expectedHostID) {
+		return false
+	}
+	sigBytes, err := hex.DecodeString(sigHex)
+	if err != nil || len(sigBytes) != ed25519.SignatureSize {
+		return false
+	}
+	return ed25519.Verify(ed25519.PublicKey(pubBytes), payload, sigBytes)
+}
+
+func (s *Service) broadcastPublic(sock PacketSocket) {
+	if s.cfg.HostIdentity == nil {
+		return
+	}
+	ep := s.localEndpoint()
+	if ep.Port <= 0 || ep.LocalIP == "" {
+		return
+	}
+	ip := net.ParseIP(ep.LocalIP)
+	if ip == nil {
+		return
+	}
+	name := devices.SanitizeDeviceName(ep.DeviceName)
+	osName := sanitizeToken(ep.OS, "unknown")
+	ver := sanitizeToken(ep.Version, "dev")
+	ts := s.now().UTC().Unix()
+	payload := signAnnouncementPayload(s.cfg.HostIdentity.HostID, s.cfg.HostIdentity.PublicKey, name, osName, ver, ep.Port, ts)
+	sig := s.cfg.HostIdentity.Sign(payload)
+
+	env := beaconEnvelope{
+		Kind:       "announce",
+		HostID:     s.cfg.HostIdentity.HostID,
+		PublicKey:  s.cfg.HostIdentity.PublicKey,
+		DeviceName: name,
+		OS:         osName,
+		Version:    ver,
+		Port:       ep.Port,
+		Timestamp:  ts,
+		Signature:  sig,
+	}
+	if b, err := json.Marshal(env); err == nil {
+		_ = sock.SendBeacon(b)
+	}
+	if mdnsPkt, err := buildMDNSResponse(mdnsAnnouncement{
+		HostID:     env.HostID,
+		PublicKey:  env.PublicKey,
+		DeviceName: env.DeviceName,
+		OS:         env.OS,
+		Version:    env.Version,
+		Port:       uint16(ep.Port),
+		IPs:        []net.IP{ip},
+		Timestamp:  ts,
+		Sig:        sig,
+	}, 20); err == nil {
+		_ = sock.SendMDNS(mdnsPkt)
+	}
+}
+
+func derivePairProbeKey(pubAHex, pubBHex string) ([]byte, bool) {
+	a, errA := hex.DecodeString(pubAHex)
+	b, errB := hex.DecodeString(pubBHex)
+	if errA != nil || errB != nil || len(a) != ed25519.PublicKeySize || len(b) != ed25519.PublicKeySize {
+		return nil, false
+	}
+	h := sha256.New()
+	if bytes.Compare(a, b) <= 0 {
+		h.Write(a)
+		h.Write(b)
+	} else {
+		h.Write(b)
+		h.Write(a)
+	}
+	return h.Sum(nil), true
+}
+
+func computeProbeTagAndMask(sharedKey []byte, epoch int64, salt []byte, hostID string, port int) (tagHex, maskHex string) {
+	mac := hmac.New(sha256.New, sharedKey)
+	mac.Write([]byte("flitnix-probe-v1|"))
+	mac.Write(salt)
+	mac.Write([]byte("|"))
+	mac.Write([]byte(strconv.FormatInt(epoch, 10)))
+	mac.Write([]byte("|"))
+	mac.Write([]byte(hostID))
+	tag := mac.Sum(nil)[:16]
+
+	maskMAC := hmac.New(sha256.New, sharedKey)
+	maskMAC.Write([]byte("flitnix-probe-meta-v1|"))
+	maskMAC.Write(salt)
+	pad := maskMAC.Sum(nil)
+	var plain [2]byte
+	binary.BigEndian.PutUint16(plain[:], uint16(port))
+	plain[0] ^= pad[0]
+	plain[1] ^= pad[1]
+	return hex.EncodeToString(tag), hex.EncodeToString(plain[:])
+}
+
+// broadcastTrustedProbe emits non-identifying unlinkable HMAC tags for already-paired peers ONLY.
+func (s *Service) broadcastTrustedProbe(sock PacketSocket) {
+	if s.cfg.HostIdentity == nil || s.cfg.TrustedDevices == nil {
+		return
+	}
+	ep := s.localEndpoint()
+	if ep.Port <= 0 {
+		return
+	}
+	devs := s.cfg.TrustedDevices()
+	if len(devs) == 0 {
+		return
+	}
+	var salt [16]byte
+	if _, err := rand.Read(salt[:]); err != nil {
+		return
+	}
+	epoch := s.now().UTC().Unix() / 60
+	probes := make([]trustedProbe, 0, len(devs))
+	for _, dev := range devs {
+		sharedKey, ok := derivePairProbeKey(s.cfg.HostIdentity.PublicKey, dev.PublicKey)
+		if !ok {
+			continue
+		}
+		tagHex, maskHex := computeProbeTagAndMask(sharedKey, epoch, salt[:], s.cfg.HostIdentity.HostID, ep.Port)
+		probes = append(probes, trustedProbe{Tag: tagHex, MetaMask: maskHex})
+	}
+	if len(probes) == 0 {
+		return
+	}
+	env := beaconEnvelope{
+		Kind:   "probe",
+		Epoch:  epoch,
+		Salt:   hex.EncodeToString(salt[:]),
+		Probes: probes,
+	}
+	if b, err := json.Marshal(env); err == nil {
+		_ = sock.SendBeacon(b)
+	}
+}
+
+func (s *Service) handleBeaconPacket(sock PacketSocket, pkt []byte, srcIP net.IP) {
+	if len(pkt) > 16384 {
+		return
+	}
+	var env beaconEnvelope
+	if err := json.Unmarshal(pkt, &env); err != nil {
+		return
+	}
+	switch env.Kind {
+	case "query":
+		s.respondIfAllowed(sock)
+	case "announce":
+		s.handleAnnouncement(mdnsAnnouncement{
+			HostID:     env.HostID,
+			PublicKey:  env.PublicKey,
+			DeviceName: env.DeviceName,
+			OS:         env.OS,
+			Version:    env.Version,
+			Port:       uint16(env.Port),
+			IPs:        []net.IP{srcIP},
+			Timestamp:  env.Timestamp,
+			Sig:        env.Signature,
+		}, srcIP)
+	case "probe":
+		s.handleTrustedProbe(env, srcIP)
+	}
+}
+
+func (s *Service) handleTrustedProbe(env beaconEnvelope, srcIP net.IP) {
+	if s.cfg.HostIdentity == nil || s.cfg.TrustedDevices == nil {
+		return
+	}
+	salt, err := hex.DecodeString(env.Salt)
+	if err != nil || len(salt) != 16 || len(env.Probes) == 0 {
+		return
+	}
+	curEpoch := s.now().UTC().Unix() / 60
+	if env.Epoch < curEpoch-1 || env.Epoch > curEpoch+1 {
+		return
+	}
+	devs := s.cfg.TrustedDevices()
+	for _, dev := range devs {
+		if dev.PublicKey == "" || dev.PublicKey == s.cfg.HostIdentity.PublicKey {
+			continue
+		}
+		pubBytes, err := hex.DecodeString(dev.PublicKey)
+		if err != nil || len(pubBytes) != ed25519.PublicKeySize {
+			continue
+		}
+		peerHostSum := sha256.Sum256(pubBytes)
+		peerHostID := hex.EncodeToString(peerHostSum[:])
+
+		sharedKey, ok := derivePairProbeKey(s.cfg.HostIdentity.PublicKey, dev.PublicKey)
+		if !ok {
+			continue
+		}
+		for _, pr := range env.Probes {
+			expectedTag, _ := computeProbeTagAndMask(sharedKey, env.Epoch, salt, peerHostID, 0)
+			if len(pr.Tag) == len(expectedTag) && hmac.Equal([]byte(pr.Tag), []byte(expectedTag)) {
+				maskBytes, mErr := hex.DecodeString(pr.MetaMask)
+				if mErr != nil || len(maskBytes) != 2 {
+					continue
+				}
+				maskMAC := hmac.New(sha256.New, sharedKey)
+				maskMAC.Write([]byte("flitnix-probe-meta-v1|"))
+				maskMAC.Write(salt)
+				pad := maskMAC.Sum(nil)
+				port := int(binary.BigEndian.Uint16([]byte{maskBytes[0] ^ pad[0], maskBytes[1] ^ pad[1]}))
+				if port <= 0 {
+					port = 43821
+				}
+				s.upsertPeer(Peer{
+					HostID:        peerHostID,
+					PublicKey:     dev.PublicKey,
+					DeviceName:    devices.SanitizeDeviceName(dev.Name),
+					OS:            "desktop",
+					Address:       srcIP.String(),
+					Port:          port,
+					Addresses:     []string{srcIP.String()},
+					Trusted:       true,
+					AutoApprove:   dev.AutoApprove,
+					InterfaceName: s.localEndpoint().InterfaceName,
+					LastSeen:      s.now(),
+				})
+				return
+			}
+		}
+	}
+}
+
+func (s *Service) handleAnnouncement(ann mdnsAnnouncement, srcIP net.IP) {
+	if s.cfg.HostIdentity != nil && strings.EqualFold(ann.HostID, s.cfg.HostIdentity.HostID) {
+		return
+	}
+	if s.visibilityMode() == devices.VisibilityHidden {
+		return
+	}
+	if ann.Port == 0 || ann.HostID == "" || ann.PublicKey == "" || ann.Sig == "" {
+		return
+	}
+	now := s.now().UTC()
+	diff := now.Unix() - ann.Timestamp
+	if diff < 0 {
+		diff = -diff
+	}
+	if time.Duration(diff)*time.Second > maxAnnouncementAge {
+		return
+	}
+	cleanName := devices.SanitizeDeviceName(ann.DeviceName)
+	osName := sanitizeToken(ann.OS, "unknown")
+	ver := sanitizeToken(ann.Version, "dev")
+	payload := signAnnouncementPayload(ann.HostID, ann.PublicKey, cleanName, osName, ver, int(ann.Port), ann.Timestamp)
+	if !verifyKeyAndSignature(ann.HostID, ann.PublicKey, ann.Sig, payload) {
+		return
+	}
+
+	addrList := make([]string, 0, len(ann.IPs)+1)
+	seenAddr := make(map[string]struct{})
+	primaryIP := srcIP.String()
+	for _, candidate := range append([]net.IP{srcIP}, ann.IPs...) {
+		if candidate == nil {
+			continue
+		}
+		str := candidate.String()
+		if _, dup := seenAddr[str]; !dup {
+			seenAddr[str] = struct{}{}
+			addrList = append(addrList, str)
+		}
+	}
+
+	s.upsertPeer(Peer{
+		HostID:        strings.ToLower(ann.HostID),
+		PublicKey:     strings.ToLower(ann.PublicKey),
+		DeviceName:    cleanName,
+		OS:            osName,
+		Version:       ver,
+		Address:       primaryIP,
+		Port:          int(ann.Port),
+		Addresses:     addrList,
+		InterfaceName: s.localEndpoint().InterfaceName,
+		LastSeen:      s.now(),
+	})
+}
+
+func (s *Service) upsertPeer(p Peer) {
+	s.mu.Lock()
+	if existingKey, known := s.keyByHostID[p.HostID]; known && !strings.EqualFold(existingKey, p.PublicKey) {
+		// Reject public-key spoofing attempts against a seen HostID.
+		s.mu.Unlock()
+		return
+	}
+	s.keyByHostID[p.HostID] = p.PublicKey
+
+	if _, exists := s.peers[p.HostID]; !exists && len(s.peers) >= MaxDiscoveredPeers {
+		var oldestID string
+		var oldestTime time.Time
+		for k, v := range s.peers {
+			if oldestID == "" || v.LastSeen.Before(oldestTime) {
+				oldestID = k
+				oldestTime = v.LastSeen
+			}
+		}
+		if oldestID != "" {
+			delete(s.peers, oldestID)
+		}
+	}
+	s.peers[p.HostID] = p
+	var snap []Peer
+	if s.cfg.OnPeersChanged != nil {
+		snap = s.snapshotLocked()
+	}
+	s.mu.Unlock()
+
+	if s.cfg.OnPeersChanged != nil {
+		s.cfg.OnPeersChanged(snap)
+	}
+}
+
+func sanitizeToken(raw, fallback string) string {
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(raw) {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '-' || r == '_' {
+			b.WriteRune(r)
+		}
+		if b.Len() >= 24 {
+			break
+		}
+	}
+	if b.Len() == 0 {
+		return fallback
+	}
+	return b.String()
+}
+
+// udpMulticastTransport implements NetworkTransport over standard mDNS + UDP multicast bound to one interface.
+type udpMulticastTransport struct{}
+
+type udpPacketSocket struct {
+	beaconConn *net.UDPConn
+	mdnsConn   *net.UDPConn
+	beaconAddr *net.UDPAddr
+	mdnsAddr   *net.UDPAddr
+	iface      *net.Interface
+	packets    chan incomingPacket
+	closeOnce  sync.Once
+	done       chan struct{}
+}
+
+type incomingPacket struct {
+	pkt   []byte
+	srcIP net.IP
+	kind  PacketKind
+}
+
+func (udpMulticastTransport) Open(ifaceName string, localIP net.IP) (PacketSocket, error) {
+	if localIP == nil || localIP.To4() == nil {
+		return nil, errors.New("discovery: valid IPv4 local interface required")
+	}
+	var iface *net.Interface
+	if ifaceName != "" {
+		if resolved, err := net.InterfaceByName(ifaceName); err == nil {
+			iface = resolved
+		}
+	}
+	beaconGroup := &net.UDPAddr{IP: net.ParseIP(BeaconMulticastV4), Port: BeaconPort}
+	beaconConn, err := net.ListenMulticastUDP("udp4", iface, beaconGroup)
+	if err != nil {
+		return nil, fmt.Errorf("discovery: listen beacon multicast: %w", err)
+	}
+	if iface != nil {
+		_ = ipv4.NewPacketConn(beaconConn).SetMulticastInterface(iface)
+	}
+
+	mdnsGroup := &net.UDPAddr{IP: net.ParseIP(MDNSMulticastV4), Port: MDNSPort}
+	mdnsConn, _ := net.ListenMulticastUDP("udp4", iface, mdnsGroup)
+	if mdnsConn != nil && iface != nil {
+		_ = ipv4.NewPacketConn(mdnsConn).SetMulticastInterface(iface)
+	}
+
+	sock := &udpPacketSocket{
+		beaconConn: beaconConn,
+		mdnsConn:   mdnsConn,
+		beaconAddr: beaconGroup,
+		mdnsAddr:   mdnsGroup,
+		iface:      iface,
+		packets:    make(chan incomingPacket, 64),
+		done:       make(chan struct{}),
+	}
+	sock.startReaders()
+	return sock, nil
+}
+
+func (u *udpPacketSocket) startReaders() {
+	readLoop := func(conn *net.UDPConn, kind PacketKind) {
+		buf := make([]byte, 4096)
+		for {
+			n, src, err := conn.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			cp := make([]byte, n)
+			copy(cp, buf[:n])
+			var ip net.IP
+			if src != nil {
+				ip = src.IP
+			}
+			select {
+			case u.packets <- incomingPacket{pkt: cp, srcIP: ip, kind: kind}:
+			case <-u.done:
+				return
+			default:
+			}
+		}
+	}
+	go readLoop(u.beaconConn, PacketBeacon)
+	if u.mdnsConn != nil {
+		go readLoop(u.mdnsConn, PacketMDNS)
+	}
+}
+
+func (u *udpPacketSocket) SendMDNS(pkt []byte) error {
+	if u.mdnsConn != nil {
+		_, err := u.mdnsConn.WriteToUDP(pkt, u.mdnsAddr)
+		return err
+	}
+	return nil
+}
+
+func (u *udpPacketSocket) SendBeacon(pkt []byte) error {
+	_, err := u.beaconConn.WriteToUDP(pkt, u.beaconAddr)
+	return err
+}
+
+func (u *udpPacketSocket) Recv(ctx context.Context) ([]byte, net.IP, PacketKind, error) {
+	select {
+	case <-ctx.Done():
+		return nil, nil, "", ctx.Err()
+	case <-u.done:
+		return nil, nil, "", errors.New("socket closed")
+	case p := <-u.packets:
+		return p.pkt, p.srcIP, p.kind, nil
+	}
+}
+
+func (u *udpPacketSocket) Close() error {
+	u.closeOnce.Do(func() {
+		close(u.done)
+		if u.beaconConn != nil {
+			_ = u.beaconConn.Close()
+		}
+		if u.mdnsConn != nil {
+			_ = u.mdnsConn.Close()
+		}
+	})
+	return nil
+}
