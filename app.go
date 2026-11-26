@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -646,7 +647,7 @@ func (a *App) ensureServer(listen string) error {
 	defer a.srvMu.Unlock()
 
 	if a.srv != nil {
-		if got := a.srv.Addr(); got != nil && got.String() == listen {
+		if got := a.srv.Addr(); got != nil && sameListenAddr(got.String(), listen) {
 			return nil
 		}
 		fmt.Fprintf(os.Stderr, "flitnix: the listen address changed; the existing sessions cannot stay reachable: pairing_replacement\n")
@@ -654,6 +655,38 @@ func (a *App) ensureServer(listen string) error {
 		a.stopServerLocked()
 	}
 	return a.startServerLocked(listen)
+}
+
+// sameListenAddr reports whether two host:port listen addresses are equivalent,
+// tolerating IPv6 bracketing and non-canonical IP spellings so that
+// a.srv.Addr().String() can be compared to a computed listen address without
+// false mismatches (which would trigger spurious endAllSessions/pairing
+// replacement). Platform-independent.
+func sameListenAddr(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == b {
+		return true
+	}
+	ha, pa, aErr := net.SplitHostPort(a)
+	hb, pb, bErr := net.SplitHostPort(b)
+	if aErr != nil || bErr != nil {
+		return false
+	}
+	if pa != pb {
+		return false
+	}
+	ha = strings.Trim(ha, "[]")
+	hb = strings.Trim(hb, "[]")
+	if ha == hb {
+		return true
+	}
+	ipa, errA := netip.ParseAddr(ha)
+	ipb, errB := netip.ParseAddr(hb)
+	if errA == nil && errB == nil && ipa == ipb {
+		return true
+	}
+	return false
 }
 
 // startServerLocked constructs and serves a new server on listen and
