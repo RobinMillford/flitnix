@@ -1865,7 +1865,7 @@
                 if (typeof retryAfterMs === "number" && retryAfterMs > delay) delay = retryAfterMs;
                 if (card) {
                   card.setBadge("Reconnecting…", "badge--waiting");
-                  card.setMessage("Interrupted (" + errMsg + ") — resuming from " + formatBytes(received) + " (attempt " + retries + "/" + MAX_DL_RETRIES + ")…");
+                  card.setMessage("Interrupted (" + errMsg + ") — resuming from " + fmtBytes(received) + " (attempt " + retries + "/" + MAX_DL_RETRIES + ")…");
                 }
                 return new Promise(function (resolve) {
                   setTimeout(resolve, delay);
@@ -1943,7 +1943,7 @@
                   return reader.read().then(function (result) {
                     if (result.done) {
                       if (totalSize !== null && received < totalSize) {
-                        var shortErr = new Error("stream ended early at " + formatBytes(received) + " / " + formatBytes(totalSize));
+                        var shortErr = new Error("stream ended early at " + fmtBytes(received) + " / " + fmtBytes(totalSize));
                         if (retries < MAX_DL_RETRIES) {
                           return scheduleRetry(shortErr.message);
                         }
@@ -1959,7 +1959,7 @@
                       lastUpdate = now;
                       if (card) {
                         card.setBadge("Downloading", "badge--downloading");
-                        card.setMessage("Streaming and hashing incrementally… (" + formatBytes(received) + (totalSize ? " / " + formatBytes(totalSize) : "") + ")");
+                        card.setMessage("Streaming and hashing incrementally… (" + fmtBytes(received) + (totalSize ? " / " + fmtBytes(totalSize) : "") + ")");
                       }
                     }
                     return writable.write(result.value).then(pump);
@@ -2016,15 +2016,14 @@
   }
 
   // The browser's own download manager fetches the grant URL. It is loaded in
-  // a hidden frame, never by navigating this page: if the server answers with
-  // an error instead of an attachment, a top-level navigation would replace
-  // this page and discard the session token held only in memory (the pairing
-  // link is single-use), which looks like "Session ended". A frame can fail
-  // without costing the session; the progress watcher reports the outcome.
+  // an off-screen frame (never display:none, which iOS Safari can ignore), and
+  // never by navigating this page: if the server answers with an error instead
+  // of an attachment, a top-level navigation would replace this page and
+  // discard the session token held only in memory.
   var downloadFrames = {};
   function startNativeDownload(url, progressId) {
     var frame = document.createElement("iframe");
-    frame.hidden = true;
+    frame.className = "offscreen-frame";
     frame.setAttribute("aria-hidden", "true");
     frame.tabIndex = -1;
     frame.src = url;
@@ -2058,6 +2057,8 @@
   // with a bounded backoff instead of abandoning the watch.
   function watchDownloadProgress(id, grant, card, sources, btn) {
     var failures = 0;
+    var fallbackOffered = false;
+    var startedAt = Date.now();
     activeDownloads[id] = true;
     activeDownloadPolls[id] = tick;
     syncWakeLock();
@@ -2066,6 +2067,14 @@
       api("/api/download-progress/" + encodeURIComponent(id)).then(function (p) {
         failures = 0;
         setReconnecting(false, "download");
+        if (p.state === "pending" && !fallbackOffered && Date.now() - startedAt > 2500 && card && grant && grant.downloadUrl) {
+          fallbackOffered = true;
+          card.setMessage("Waiting for browser download prompt… If it didn't appear (common on iOS Safari), tap Save File below.");
+          var directLink = el("a", "btn btn--small", "Save File");
+          directLink.href = grant.downloadUrl;
+          if (grant.filename) directLink.setAttribute("download", grant.filename);
+          card.setActions([directLink]);
+        }
         if (p.state === "failed" || p.state === "expired") {
           delete activeDownloads[id];
           delete activeDownloadPolls[id];
@@ -2336,6 +2345,23 @@
       addFiles(fileInput.files, "");
       fileInput.value = "";
     });
+    var sendPanel = document.getElementById("send-panel");
+    if (sendPanel) {
+      sendPanel.addEventListener("dragover", function (e) {
+        e.preventDefault();
+        sendPanel.classList.add("panel--dragover");
+      });
+      sendPanel.addEventListener("dragleave", function () {
+        sendPanel.classList.remove("panel--dragover");
+      });
+      sendPanel.addEventListener("drop", function (e) {
+        e.preventDefault();
+        sendPanel.classList.remove("panel--dragover");
+        if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+          addFiles(e.dataTransfer.files, "");
+        }
+      });
+    }
     refreshBtn.addEventListener("click", refreshFiles);
     downloadSelectedBtn.addEventListener("click", function () {
       if (browseState.source) {

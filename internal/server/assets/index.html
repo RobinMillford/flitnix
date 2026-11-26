@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="color-scheme" content="dark">
+<meta name="color-scheme" content="dark light">
 <meta name="theme-color" content="#07111f">
 <meta name="description" content="Flitnix phone transfer page: send files to the desktop and download shared files over the local network.">
 <title>Flitnix</title>
@@ -59,7 +59,7 @@
       <div class="awareness-card__control" id="wake-lock-container"></div>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="send-panel">
       <div class="panel__head">
         <h2>Send to desktop</h2>
         <div class="panel__actions">
@@ -67,7 +67,7 @@
           <button type="button" class="btn btn--ghost" id="pick-folder-btn" hidden>Pick folder</button>
         </div>
       </div>
-      <p class="muted">Each file starts only after you approve it on the desktop. Transfers run one at a time.</p>
+      <p class="muted">Select photos, videos, documents, or folders in original quality. Each transfer starts after desktop approval.</p>
       <input id="file-input" type="file" multiple hidden>
       <input id="folder-input" type="file" webkitdirectory directory multiple hidden>
       <ul class="queue" id="queue" aria-live="polite"></ul>

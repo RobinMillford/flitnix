@@ -170,8 +170,19 @@ select:focus-visible,
   cursor: not-allowed;
   box-shadow: none;
 }
-  opacity: 1;
-  cursor: not-allowed;
+.offscreen-frame {
+  position: fixed;
+  left: -9999px;
+  top: -9999px;
+  width: 1px;
+  height: 1px;
+  border: 0;
+  opacity: 0.01;
+  pointer-events: none;
+}
+.panel--dragover {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(34, 211, 238, 0.2);
 }
 
 .queue { display: grid; gap: 0.6rem; margin: 0.85rem 0 0; padding: 0; list-style: none; }
