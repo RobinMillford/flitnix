@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { main, netenv, transfer, devices } from '../../wailsjs/go/models'
+  import type { main, netenv, transfer, devices, session } from '../../wailsjs/go/models'
   import { formatBytes, percent, speed, calcEta, fmtTime, openExternalURL } from '../utils'
   import ProgressBar from '../components/ProgressBar.svelte'
 
@@ -51,10 +51,18 @@
   export let showToast: (msg: string, type?: any) => void = () => {}
   export let handleOpenDownloadFolder: () => void = () => {}
   export let visibilityState: devices.VisibilityState | null = null
+  export let shortCode: session.ShortCodeView | null = null
   export let setVisibilityModeAction: (mode: string) => void = () => {}
   export let setQRSharingPausedAction: (paused: boolean) => void = () => {}
   export let revokeAllSessionsAction: () => void = () => {}
+  export let regenerateShortCodeAction: (key: string) => void = () => {}
   export let goToHistory: () => void = () => {}
+
+  function copyShortCode() {
+    if (!shortCode?.code) return
+    copyTextToClipboard(shortCode.code)
+    showToast('Copied 6-digit connection code', 'success')
+  }
 
   function formatVisibilityCountdown(sec: number): string {
     if (!sec || sec <= 0) return '0:00'
@@ -303,6 +311,31 @@
             <div class="qr-corner bottom-right"></div>
           </div>
           <span class="qr-caption">Scan with phone camera</span>
+          {#if shortCode}
+            <div class="short-code-card" aria-label="6-digit one-time connection code">
+              <div class="short-code-head">
+                <span>One-time code</span>
+                {#if shortCode.active}
+                  <span class="short-code-ttl tabular">{formatVisibilityCountdown(shortCode.remainingSeconds)}</span>
+                {:else if shortCode.used}
+                  <span class="short-code-state">Used</span>
+                {:else if shortCode.expired}
+                  <span class="short-code-state">Expired</span>
+                {/if}
+              </div>
+              {#if shortCode.active && shortCode.formattedCode}
+                <div class="short-code-value tabular">{shortCode.formattedCode}</div>
+                <div class="short-code-actions">
+                  <button type="button" class="button ghost small" on:click={copyShortCode}>Copy</button>
+                  <button type="button" class="button ghost small" on:click={() => regenerateShortCodeAction(qrKey)}>New Code</button>
+                </div>
+              {:else}
+                <button type="button" class="button secondary small" on:click={() => regenerateShortCodeAction(qrKey)}>
+                  Generate 6-Digit Code
+                </button>
+              {/if}
+            </div>
+          {/if}
         </div>
 
         <div class="hub-active-details-col">
@@ -2036,6 +2069,51 @@
   .approval-reason-hint {
     font-size: 11.5px;
     color: var(--text-secondary);
+  }
+
+  .short-code-card {
+    margin-top: 8px;
+    width: 100%;
+    padding: 8px 10px;
+    border-radius: var(--radius-md, 10px);
+    background: var(--bg-surface-elevated);
+    border: 1px solid var(--border-subtle);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .short-code-head {
+    width: 100%;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+
+  .short-code-ttl {
+    color: var(--accent);
+    font-weight: 700;
+  }
+
+  .short-code-state {
+    color: var(--danger-text);
+    font-weight: 700;
+  }
+
+  .short-code-value {
+    font-size: 20px;
+    font-weight: 800;
+    letter-spacing: 0.14em;
+    color: var(--text-primary);
+  }
+
+  .short-code-actions {
+    display: flex;
+    gap: 6px;
   }
 
   @keyframes fadeIn {

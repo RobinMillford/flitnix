@@ -272,6 +272,7 @@ type App struct {
 	recoveryDir   string
 	settingsStore *settings.Store
 	sessions      *session.Manager
+	shortCodes    *session.ShortCodeManager
 	transfers     *transfer.Service
 	coordinator   *transfer.Coordinator
 	registry      *transfer.Registry
@@ -399,6 +400,7 @@ func NewApp() (*App, error) {
 		quota:         quota,
 		recoveryDir:   filepath.Join(dataDir, "recovery"),
 		settingsStore: settingsStore,
+		shortCodes:    session.NewShortCodeManager(session.ShortCodeConfig{}),
 		transfers:     transfer.NewService(transfer.Config{Store: store, Quota: quota}),
 		coordinator:   transfer.NewCoordinator(transfer.CoordinatorConfig{}),
 		registry:      transfer.NewRegistry(),
@@ -487,6 +489,19 @@ func (a *App) releaseSession(key string) {
 	}
 	for _, source := range a.registry.ListSourceSession(key) {
 		a.registry.RemoveSource(source.ID)
+	}
+	if a.shortCodes != nil {
+		for _, childKey := range a.shortCodes.RevokeForSession(key) {
+			for _, cs := range a.sessions.ActiveSessions() {
+				if cs.Key() == childKey {
+					a.transfers.CancelSession(childKey)
+					_ = a.coordinator.CloseSession(childKey)
+					a.discardEmptyRoots(childKey)
+					a.downloads.CancelSession(childKey)
+					a.sessions.RevokeSession(cs)
+				}
+			}
+		}
 	}
 	a.textStore.Clear(key)
 }
@@ -780,6 +795,7 @@ func (a *App) startServerLocked(listen string) error {
 		RecoveryDir: a.recoveryDir,
 		Services: &server.Services{
 			Sessions:       a.sessions,
+			ShortCodes:     a.shortCodes,
 			Transfers:      a.transfers,
 			Coordinator:    a.coordinator,
 			Registry:       a.registry,
@@ -901,6 +917,9 @@ func (a *App) StartSession(ip string) (SessionView, error) {
 			a.stopServer()
 		}
 		return SessionView{}, err
+	}
+	if a.shortCodes != nil {
+		_, _ = a.shortCodes.GetOrCreate(s.Key())
 	}
 	out := sessionView(s, s.Token())
 	out.InterfaceName = view.Name
@@ -1163,6 +1182,19 @@ func (a *App) EndSession(key string) error {
 		a.registry.RemoveSource(source.ID)
 	}
 	a.sessions.RevokeSession(target)
+	if a.shortCodes != nil {
+		for _, childKey := range a.shortCodes.RevokeForSession(key) {
+			for _, cs := range a.sessions.ActiveSessions() {
+				if cs.Key() == childKey {
+					a.transfers.CancelSession(childKey)
+					_ = a.coordinator.CloseSession(childKey)
+					a.discardEmptyRoots(childKey)
+					a.downloads.CancelSession(childKey)
+					a.sessions.RevokeSession(cs)
+				}
+			}
+		}
+	}
 	if a.sessions.Len() == 0 {
 		a.registry.Clear()
 		if !a.isGuestRoomActive() {
@@ -1170,6 +1202,29 @@ func (a *App) EndSession(key string) error {
 		}
 	}
 	return nil
+}
+
+// GetSessionShortCode returns the current single-use 6-digit connection code for sessionKey.
+func (a *App) GetSessionShortCode(sessionKey string) session.ShortCodeView {
+	if a.shortCodes == nil || sessionKey == "" {
+		return session.ShortCodeView{SessionKey: sessionKey}
+	}
+	cur := a.shortCodes.Current(sessionKey)
+	if cur.Code == "" && !cur.Used && !cur.Expired {
+		created, err := a.shortCodes.GetOrCreate(sessionKey)
+		if err == nil {
+			return created
+		}
+	}
+	return cur
+}
+
+// RegenerateSessionShortCode invalidates any prior short code for sessionKey and issues a fresh 6-digit code.
+func (a *App) RegenerateSessionShortCode(sessionKey string) (session.ShortCodeView, error) {
+	if a.shortCodes == nil {
+		return session.ShortCodeView{}, errors.New("flitnix: connection codes unavailable")
+	}
+	return a.shortCodes.Regenerate(sessionKey)
 }
 
 // ListSessions returns the active sessions. The raw token is never part of

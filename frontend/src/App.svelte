@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { t, setLocale, tFn } from './i18n'
-  import type { main, netenv, doctor, guest, audit, devices, power, version, update, transfer } from '../wailsjs/go/models'
+  import type { main, netenv, doctor, guest, audit, devices, power, version, update, transfer, session } from '../wailsjs/go/models'
   import { OnFileDrop, OnFileDropOff, EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
   import logoUrl from './assets/images/logo-universal.png'
   import { createRefreshScheduler } from './refreshScheduler'
@@ -27,6 +27,7 @@
     PickFilesForSharing, PickFolderForSharing, AddDroppedSources,
     ListSharedFiles, ListSharedSources, RevokeSharedFile, RevokeSharedSource, ReceiveDirectory,
     ListNetworkInterfaces, SessionQR, ServerAddress, GetNetworkState, RefreshNetwork,
+    GetSessionShortCode, RegenerateSessionShortCode,
     StartGuestRoomWithConfig, GetGuestRoomState, ApproveGuest, RejectGuest, RevokeGuest,
     ApproveGuestUpload, RejectGuestUpload, EndGuestRoom, PickGuestDestination, OpenGuestFolder,
     PickExportDestination, ExportGuestCollection,
@@ -82,6 +83,7 @@
   let sleepInhibition: power.Status | null = null
   let storageStatus: transfer.StorageStatus | null = null
   let visibilityState: devices.VisibilityState | null = null
+  let shortCode: session.ShortCodeView | null = null
 
   // Persistent Settings state
   let settingsState: main.SettingsView = {
@@ -273,8 +275,14 @@
       }
       previousPendingTotal = currentPendingTotal
 
-      if (!sessions.length) { qrKey = ''; qrUrl = ''; qrError = '' }
+      if (!sessions.length) { qrKey = ''; qrUrl = ''; qrError = ''; shortCode = null }
       else if (!sessions.some((x) => x.key === qrKey)) fetchQR(sessions[0].key)
+
+      if (sessions.length > 0 && qrKey) {
+        GetSessionShortCode(qrKey).then((sc) => {
+          if (!disposed) shortCode = sc ?? null
+        }).catch(() => {})
+      }
 
       if (sessions.length > 0) {
         ListTextMessages(sessions[0].key).then(msgs => {
@@ -873,6 +881,16 @@
       await RevokeAllSessions()
       refresh()
       showToast('Revoked all active sessions', 'info')
+    } catch (err) {
+      report(err)
+    }
+  }
+
+  async function regenerateShortCodeAction(key: string): Promise<void> {
+    if (!key) return
+    try {
+      shortCode = await RegenerateSessionShortCode(key)
+      showToast('Generated new 6-digit connection code', 'success')
     } catch (err) {
       report(err)
     }
@@ -1478,9 +1496,11 @@
               {showToast}
               {handleOpenDownloadFolder}
               {visibilityState}
+              {shortCode}
               {setVisibilityModeAction}
               {setQRSharingPausedAction}
               {revokeAllSessionsAction}
+              {regenerateShortCodeAction}
               goToHistory={() => switchTab('history')}
             />
           </div>

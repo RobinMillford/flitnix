@@ -148,6 +148,7 @@ type Config struct {
 // receive Store inside the transfer Service) and handed to Config.
 type Services struct {
 	Sessions       *session.Manager
+	ShortCodes     *session.ShortCodeManager
 	Transfers      *transfer.Service
 	Coordinator    *transfer.Coordinator
 	Registry       *transfer.Registry

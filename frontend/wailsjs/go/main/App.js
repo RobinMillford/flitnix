@@ -110,6 +110,10 @@ export function GetPairingStatus() {
   return window['go']['main']['App']['GetPairingStatus']();
 }
 
+export function GetSessionShortCode(arg1) {
+  return window['go']['main']['App']['GetSessionShortCode'](arg1);
+}
+
 export function GetSettings() {
   return window['go']['main']['App']['GetSettings']();
 }
@@ -204,6 +208,10 @@ export function ReArmPairing() {
 
 export function ReceiveDirectory() {
   return window['go']['main']['App']['ReceiveDirectory']();
+}
+
+export function RegenerateSessionShortCode(arg1) {
+  return window['go']['main']['App']['RegenerateSessionShortCode'](arg1);
 }
 
 export function RecentDownloads() {

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"net"
 	"net/http"
 	"net/netip"
@@ -89,6 +90,7 @@ func newRouter(services *Services, stall, downloadStall time.Duration, grants *D
 		// /api/* paths and method mismatches are answered only after
 		// authentication; a token holder learns nothing about the
 		// endpoint set without a live session either way.
+		mux.HandleFunc("POST /api/connect-code", handleConnectCode(services))
 		api := newAPIMux(services, stall, grants)
 		mux.Handle("/api/", requireSession(services, api.ServeHTTP))
 		downloadHandler := serveArchiveDownload(services, grants, downloadStall)
@@ -2228,5 +2230,85 @@ func handleVisibilityGet(svcs *Services) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, svcs.Visibility.Evaluate())
+	}
+}
+
+func clientIPFromRequest(r *http.Request) string {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err == nil && host != "" {
+		return host
+	}
+	return strings.TrimSpace(r.RemoteAddr)
+}
+
+func handleConnectCode(svcs *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if svcs == nil || svcs.ShortCodes == nil || svcs.Sessions == nil {
+			writeError(w, http.StatusNotFound, "connection codes unavailable")
+			return
+		}
+		if svcs.Visibility != nil && svcs.Visibility.Evaluate().QRSharingPaused {
+			writeErrorCode(w, http.StatusForbidden, "QR and code sharing is currently paused by the host", "qr_sharing_paused")
+			return
+		}
+		var req struct {
+			Code string `json:"code"`
+		}
+		if !decodeControlJSON(w, r, &req, "invalid connection code request", rejectUnknownFields) {
+			return
+		}
+		redemption, err := svcs.ShortCodes.Redeem(clientIPFromRequest(r), req.Code)
+		if err != nil {
+			var rateErr *session.ShortCodeRateLimitError
+			if errors.As(err, &rateErr) {
+				secs := int(math.Ceil(rateErr.RetryAfter.Seconds()))
+				if secs < 1 {
+					secs = 1
+				}
+				w.Header().Set("Retry-After", strconv.Itoa(secs))
+				writeErrorCode(w, http.StatusTooManyRequests, rateErr.Error(), "code_rate_limited")
+				return
+			}
+			switch {
+			case errors.Is(err, session.ErrShortCodeExpired):
+				writeErrorCode(w, http.StatusGone, "That connection code expired. Regenerate a new code on the Flitnix desktop.", "code_expired")
+			case errors.Is(err, session.ErrShortCodeUsed):
+				writeErrorCode(w, http.StatusConflict, "That connection code has already been used. Regenerate a new code on the Flitnix desktop.", "code_used")
+			default:
+				writeErrorCode(w, http.StatusUnauthorized, "Invalid 6-digit connection code. Check the code on the Flitnix desktop and try again.", "code_invalid")
+			}
+			return
+		}
+
+		parentActive := false
+		for _, s := range svcs.Sessions.ActiveSessions() {
+			if s.Key() == redemption.SessionKey {
+				parentActive = true
+				break
+			}
+		}
+		if !parentActive {
+			writeErrorCode(w, http.StatusUnauthorized, "That desktop transfer session has ended.", "session_revoked")
+			return
+		}
+
+		newSess, err := svcs.Sessions.Create()
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "could not establish transfer session")
+			return
+		}
+		svcs.ShortCodes.TrackChildSession(redemption.SessionKey, newSess.Key())
+		svcs.RecordContact("connect-code")
+
+		hostID := ""
+		if svcs.HostIdentity != nil {
+			hostID = svcs.HostIdentity.HostID
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"token":      newSess.Token(),
+			"sessionKey": newSess.Key(),
+			"expiresAt":  newSess.ExpiresAt(),
+			"hostId":     hostID,
+		})
 	}
 }

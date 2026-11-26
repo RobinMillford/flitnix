@@ -1514,3 +1514,38 @@ export namespace version {
 	}
 
 }
+
+export namespace session {
+
+	export class ShortCodeView {
+	    code: string;
+	    formattedCode: string;
+	    sessionKey: string;
+	    // Go type: time
+	    createdAt?: any;
+	    // Go type: time
+	    expiresAt?: any;
+	    remainingSeconds: number;
+	    active: boolean;
+	    used: boolean;
+	    expired: boolean;
+
+	    static createFrom(source: any = {}) {
+	        return new ShortCodeView(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.code = source["code"];
+	        this.formattedCode = source["formattedCode"];
+	        this.sessionKey = source["sessionKey"];
+	        this.createdAt = source["createdAt"];
+	        this.expiresAt = source["expiresAt"];
+	        this.remainingSeconds = source["remainingSeconds"];
+	        this.active = source["active"];
+	        this.used = source["used"];
+	        this.expired = source["expired"];
+	    }
+	}
+
+}

@@ -63,6 +63,10 @@
   var flowEl = document.getElementById("flow");
   var rescanCard = document.getElementById("rescan");
   var rescanText = document.getElementById("rescan-text");
+  var connectCodeForm = document.getElementById("connect-code-form");
+  var connectCodeInput = document.getElementById("connect-code-input");
+  var connectCodeBtn = document.getElementById("connect-code-btn");
+  var connectCodeError = document.getElementById("connect-code-error");
   var pickBtn = document.getElementById("pick-btn");
   var pickFolderBtn = document.getElementById("pick-folder-btn");
   var fileInput = document.getElementById("file-input");
@@ -2267,6 +2271,10 @@
 
   function scheduleTextPoll() {
     if (appState.ended) return;
+    if (textPollTimer) {
+      clearInterval(textPollTimer);
+      textPollTimer = null;
+    }
     fetchTextMessages();
     textPollTimer = setInterval(function () {
       if (appState.ended) {
@@ -2277,8 +2285,10 @@
     }, 2500);
   }
 
+  var quickTextInitialized = false;
   function initQuickText() {
-    if (!textForm || !textInput) return;
+    if (quickTextInitialized || !textForm || !textInput) return;
+    quickTextInitialized = true;
     function updateSendBtn() {
       var len = textInput.value.length;
       var trimmed = textInput.value.trim();
@@ -2316,10 +2326,74 @@
     });
   }
 
+  function startConnectedSession() {
+    appState.ended = false;
+    if (rescanCard) rescanCard.hidden = true;
+    setStatus("ready", "Connected — pick files to send or download the shared ones");
+    flowEl.hidden = false;
+    updateAwarenessUI();
+    refreshFiles();
+    initQuickText();
+    scheduleTextPoll();
+  }
+
+  function showCodeError(msg) {
+    if (!connectCodeError) return;
+    connectCodeError.textContent = msg || "";
+    connectCodeError.hidden = !msg;
+  }
+
+  function setupConnectCodeForm() {
+    if (!connectCodeForm || !connectCodeInput) return;
+    connectCodeInput.addEventListener("input", function () {
+      var digits = (connectCodeInput.value || "").replace(/\D+/g, "").slice(0, 6);
+      connectCodeInput.value = digits.length > 3 ? (digits.slice(0, 3) + " " + digits.slice(3)) : digits;
+      showCodeError("");
+    });
+    connectCodeForm.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var digits = (connectCodeInput.value || "").replace(/\D+/g, "");
+      if (digits.length !== 6) {
+        showCodeError("Enter all 6 digits shown on the Flitnix desktop.");
+        return;
+      }
+      showCodeError("");
+      if (connectCodeBtn) connectCodeBtn.disabled = true;
+      fetch("/api/connect-code", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "application/json" },
+        body: JSON.stringify({ code: digits }),
+        cache: "no-store"
+      }).then(function (res) {
+        return readBody(res).then(function (body) {
+          if (res.status >= 200 && res.status < 300 && body && body.token) {
+            return body;
+          }
+          var errMsg = (body && body.error) ? body.error : ("Could not connect (" + res.status + ")");
+          throw new Error(errMsg);
+        });
+      }).then(function (body) {
+        token = body.token;
+        connectCodeInput.value = "";
+        try {
+          if (window.history && window.history.replaceState) {
+            window.history.replaceState(null, "", "#t=" + encodeURIComponent(token));
+          }
+        } catch (_) {}
+        startConnectedSession();
+      }).catch(function (err) {
+        showCodeError((err && err.message) || "Invalid connection code.");
+      }).finally(function () {
+        if (connectCodeBtn) connectCodeBtn.disabled = false;
+      });
+    });
+  }
+
   // ------------------------------------------------------------------
   // Boot
   // ------------------------------------------------------------------
   function boot() {
+    setupConnectCodeForm();
     pickBtn.addEventListener("click", function () { fileInput.click(); });
     if (folderInput && pickFolderBtn &&
         "webkitdirectory" in HTMLInputElement.prototype) {
@@ -2385,20 +2459,15 @@
     if (!token) {
       // No pairing token in this load. No session was ever opened here,
       // so nothing "ended": the status line names the real next step.
-      endSession("Scan the QR code",
-        "Open this page by scanning the QR code shown on the Flitnix desktop. If you reloaded an old tab, the old link was single-use — rescan to reconnect.",
-        "Pairing required");
+      endSession("Scan QR or enter 6-digit code",
+        "Scan the QR code on the Flitnix desktop, or enter the 6-digit connection code shown right below the QR code.",
+        "Ready to connect");
       return;
     }
 
     // The token passes the format check; the desktop itself validates it on
     // the first API call (fresh sessions die if they were revoked already).
-    setStatus("ready", "Connected — pick files to send or download the shared ones");
-    flowEl.hidden = false;
-    updateAwarenessUI();
-    refreshFiles();
-    initQuickText();
-    scheduleTextPoll();
+    startConnectedSession();
   }
 
   boot();

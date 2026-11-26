@@ -509,6 +509,47 @@ select:focus-visible,
 .app__footer { margin-top: 1.5rem; text-align: center; }
 .app__footer p { margin: 0; color: var(--text-faint); font-size: 0.85rem; }
 
+.code-form {
+  margin-top: 1rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--line);
+}
+.code-label {
+  display: block;
+  font-size: 0.88rem;
+  font-weight: 600;
+  margin-bottom: 0.45rem;
+}
+.code-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+.code-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.65rem 0.75rem;
+  font-size: 1.2rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-align: center;
+  border-radius: 0.55rem;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.code-error {
+  margin: 0.5rem 0 0;
+  font-size: 0.85rem;
+  color: var(--danger, #dc2626);
+  font-weight: 500;
+}
+.code-hint {
+  margin: 0.45rem 0 0;
+  font-size: 0.78rem;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
