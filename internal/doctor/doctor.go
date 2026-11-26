@@ -22,11 +22,14 @@ const (
 )
 
 type DiagnosticItem struct {
-	ID          string      `json:"id"`
-	Title       string      `json:"title"`
-	Status      CheckStatus `json:"status"`
-	Message     string      `json:"message"`
-	Remediation string      `json:"remediation,omitempty"`
+	ID            string      `json:"id"`
+	Title         string      `json:"title"`
+	Status        CheckStatus `json:"status"`
+	Message       string      `json:"message"`
+	Remediation   string      `json:"remediation,omitempty"`
+	FirewallState string      `json:"firewallState,omitempty"`
+	AffectedPort  int         `json:"affectedPort,omitempty"`
+	Command       string      `json:"command,omitempty"`
 }
 
 type DiagnosticReport struct {
@@ -43,12 +46,15 @@ type Params struct {
 	ActiveIP         string // e.g. "192.168.1.50"
 	ActiveIface      string // e.g. "wlo1"
 	LastPhoneContact *time.Time
+	GOOS             string
+	ExecutablePath   string
+	CommandRunner    CommandRunner
 }
 
 func RunDiagnostics(p Params) DiagnosticReport {
 	report := DiagnosticReport{
 		Timestamp: time.Now(),
-		Items:     make([]DiagnosticItem, 0, 7),
+		Items:     make([]DiagnosticItem, 0, 8),
 	}
 
 	if p.NetSource == nil {
@@ -342,6 +348,9 @@ func RunDiagnostics(p Params) DiagnosticReport {
 			Message: "Single active network adapter detected; no routing ambiguity.",
 		})
 	}
+
+	// 8. Host firewall inspection (firewall_status)
+	report.Items = append(report.Items, checkFirewallStatus(p))
 
 	// Calculate overall status
 	report.OverallStatus = StatusPass

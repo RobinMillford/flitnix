@@ -10,6 +10,20 @@
 
   let loading: boolean = false
   let errorMsg: string = ''
+  let copiedItemId: string = ''
+
+  async function copyCommand(itemId: string, cmd: string) {
+    if (!cmd) return
+    try {
+      await navigator.clipboard.writeText(cmd)
+      copiedItemId = itemId
+      setTimeout(() => {
+        if (copiedItemId === itemId) copiedItemId = ''
+      }, 1800)
+    } catch {
+      // Fallback ignored if clipboard is restricted
+    }
+  }
 
   export async function runDiagnostics() {
     loading = true
@@ -58,7 +72,7 @@
           </div>
           <div>
             <h3 id="doctor-title">Connection Doctor</h3>
-            <p>7-point network, socket & firewall diagnostics</p>
+            <p>8-point network, socket &amp; firewall diagnostics</p>
           </div>
         </div>
         <button type="button" class="close-btn" on:click={onClose} aria-label="Close dialog">×</button>
@@ -109,13 +123,30 @@
               </div>
               <div class="diag-info">
                 <div class="diag-title-row">
-                  <span class="diag-title">{item.title}</span>
+                  <span class="diag-title">
+                    {item.title}
+                    {#if item.affectedPort}
+                      <span class="diag-port-badge tabular">TCP :{item.affectedPort}</span>
+                    {/if}
+                  </span>
                   <span class="diag-tag {item.status?.toLowerCase()}">{item.status}</span>
                 </div>
                 <div class="diag-message">{item.message}</div>
                 {#if item.remediation}
                   <div class="diag-remediation">
                     <strong>Suggestion:</strong> {item.remediation}
+                  </div>
+                {/if}
+                {#if item.command}
+                  <div class="diag-command-box">
+                    <code>{item.command}</code>
+                    <button
+                      type="button"
+                      class="button ghost small"
+                      on:click={() => copyCommand(item.id, item.command || '')}
+                    >
+                      {copiedItemId === item.id ? 'Copied' : 'Copy Command'}
+                    </button>
                   </div>
                 {/if}
               </div>
@@ -360,6 +391,35 @@
     background: var(--accent-subtle);
     padding: 6px 10px;
     border-radius: 4px;
+  }
+
+  .diag-port-badge {
+    margin-left: 6px;
+    font-size: 10.5px;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-base);
+    color: var(--text-secondary);
+  }
+
+  .diag-command-box {
+    margin-top: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-base);
+  }
+
+  .diag-command-box code {
+    font-size: 11px;
+    word-break: break-all;
+    color: var(--text-primary);
   }
 
   .doctor-footer {
