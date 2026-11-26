@@ -69,11 +69,16 @@ func NewPeerHTTPClient(expectedHostID, expectedPubHex string, onVerified func(ho
 			Timeout:   10 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
+		MaxIdleConnsPerHost:   16,
+		MaxConnsPerHost:       16,
+		WriteBufferSize:       256 * 1024,
+		ReadBufferSize:        256 * 1024,
 		ResponseHeaderTimeout: 30 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 		TLSClientConfig: &tls.Config{
 			MinVersion:         tls.VersionTLS13,
 			InsecureSkipVerify: true, // Pin verification enforced below via VerifyPeerCertificate
+			ClientSessionCache: tls.NewLRUClientSessionCache(64),
 			VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 				hid, pk, err := verifyLeafCertificateIdentity(rawCerts, expectedHostID, expectedPubHex)
 				if err != nil {

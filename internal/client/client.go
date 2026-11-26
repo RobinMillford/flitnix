@@ -319,6 +319,13 @@ func (c *Client) WaitForApproval(ctx context.Context, batchID string, pollInterv
 // the endpoint does not advertise HEAD/PATCH support.
 // SHA-256 is verified over the complete local file against the server's digest.
 func (c *Client) StreamItem(ctx context.Context, batchID, itemID, localPath string, onProgress func(written, total int64)) (ItemResult, error) {
+	return c.StreamItemWithHint(ctx, batchID, itemID, localPath, 0, 0, onProgress)
+}
+
+// StreamItemWithHint streams one item using caller-known offset/chunk hints to
+// skip the initial HEAD roundtrip when starting a fresh resumable batch item,
+// falling back automatically to PUT on 404/405 or HEAD on 409 offset mismatch.
+func (c *Client) StreamItemWithHint(ctx context.Context, batchID, itemID, localPath string, initialOffset, chunkSizeHint int64, onProgress func(written, total int64)) (ItemResult, error) {
 	f, err := os.Open(localPath)
 	if err != nil {
 		return ItemResult{}, fmt.Errorf("client: cannot open local file %s: %w", localPath, err)
@@ -334,6 +341,9 @@ func (c *Client) StreamItem(ctx context.Context, batchID, itemID, localPath stri
 	reqURL := fmt.Sprintf("%s/api/batches/%s/items/%s/content", c.target.BaseURL, url.PathEscape(batchID), url.PathEscape(itemID))
 	policy := c.retryPolicy.normalized()
 	for attempt := 0; ; attempt++ {
+		if attempt == 0 && initialOffset == 0 && chunkSizeHint > 0 {
+			return c.streamItemChunks(ctx, f, localPath, reqURL, declaredSize, 0, chunkSizeHint, onProgress)
+		}
 		offset, chunkSize, supportsResumable, headErr := c.probeHead(ctx, reqURL, declaredSize)
 		if headErr != nil {
 			if !IsRetryableError(headErr) || attempt >= policy.MaxRetries {
@@ -480,7 +490,9 @@ func (c *Client) streamItemChunks(ctx context.Context, f *os.File, localPath, re
 		req, err := http.NewRequestWithContext(ctx, http.MethodPatch, reqURL, &chunkProgressReader{
 			r:          pr,
 			base:       offset,
+			chunkLen:   lenChunk,
 			total:      declaredSize,
+			lastEmitAt: time.Now(),
 			onProgress: onProgress,
 		})
 		if err != nil {
@@ -490,6 +502,7 @@ func (c *Client) streamItemChunks(ctx context.Context, f *os.File, localPath, re
 		req.Header.Set("Host", c.target.Host)
 		req.Header.Set("Content-Type", "application/offset+octet-stream")
 		req.Header.Set("Upload-Offset", strconv.FormatInt(offset, 10))
+		req.Header.Set("X-Flitnix-Compact-Ack", "1")
 		req.ContentLength = lenChunk
 
 		resp, err := c.httpClient.Do(req)
@@ -509,6 +522,9 @@ func (c *Client) streamItemChunks(ctx context.Context, f *os.File, localPath, re
 
 		if resp.StatusCode == http.StatusUnauthorized {
 			return ItemResult{}, ErrUnauthorized
+		}
+		if offset == 0 && (resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed) {
+			return c.streamItemPut(ctx, f, localPath, reqURL, declaredSize, onProgress)
 		}
 		if resp.StatusCode == http.StatusNoContent {
 			consecutiveRetries = 0
@@ -583,18 +599,29 @@ func (c *Client) streamItemChunks(ctx context.Context, f *os.File, localPath, re
 }
 
 type chunkProgressReader struct {
-	r          io.Reader
-	base       int64
-	read       int64
-	total      int64
-	onProgress func(written, total int64)
+	r             io.Reader
+	base          int64
+	read          int64
+	chunkLen      int64
+	total         int64
+	lastEmitBytes int64
+	lastEmitAt    time.Time
+	calls         uint32
+	onProgress    func(written, total int64)
 }
 
 func (c *chunkProgressReader) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
-	if n > 0 {
+	if n > 0 && c.onProgress != nil {
 		c.read += int64(n)
-		if c.onProgress != nil {
+		c.calls++
+		emit := c.read >= c.chunkLen || c.read-c.lastEmitBytes >= 256*1024
+		if !emit && (c.calls&7) == 0 && time.Since(c.lastEmitAt) >= 100*time.Millisecond {
+			emit = true
+		}
+		if emit {
+			c.lastEmitBytes = c.read
+			c.lastEmitAt = time.Now()
 			c.onProgress(c.base+c.read, c.total)
 		}
 	}
@@ -614,6 +641,7 @@ func (c *Client) streamItemPut(ctx context.Context, f *os.File, localPath, reqUR
 	req.Header.Set("Authorization", "Bearer "+c.target.Token())
 	req.Header.Set("Host", c.target.Host)
 	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("X-Flitnix-Compact-Ack", "1")
 	req.ContentLength = declaredSize
 
 	resp, err := c.httpClient.Do(req)

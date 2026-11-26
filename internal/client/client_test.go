@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -266,5 +267,113 @@ func TestReadHiddenInput_EOF(t *testing.T) {
 	_, err = ReadHiddenInput("", r, outW)
 	if err == nil {
 		t.Fatalf("expected error on empty EOF stdin, got nil")
+	}
+}
+
+func TestStreamItemWithHintSkipsHeadAndThrottlesProgress(t *testing.T) {
+	payload := make([]byte, 2<<20) // 2 MiB
+	for i := range payload {
+		payload[i] = byte(i * 31)
+	}
+	tmpPath := filepath.Join(t.TempDir(), "stream.bin")
+	if err := os.WriteFile(tmpPath, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var headCalls atomic.Int32
+	var patchCalls atomic.Int32
+	var putCalls atomic.Int32
+	var allowPatch atomic.Bool
+	allowPatch.Store(true)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodHead:
+			headCalls.Add(1)
+			w.WriteHeader(http.StatusOK)
+		case http.MethodPatch:
+			patchCalls.Add(1)
+			if !allowPatch.Load() {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			if r.Header.Get("X-Flitnix-Compact-Ack") != "1" {
+				t.Errorf("missing X-Flitnix-Compact-Ack header on PATCH")
+			}
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sum := sha256.Sum256(body)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"written": len(body),
+				"sha256":  hex.EncodeToString(sum[:]),
+			})
+		case http.MethodPut:
+			putCalls.Add(1)
+			if r.Header.Get("X-Flitnix-Compact-Ack") != "1" {
+				t.Errorf("missing X-Flitnix-Compact-Ack header on PUT")
+			}
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sum := sha256.Sum256(body)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"written": len(body),
+				"sha256":  hex.EncodeToString(sum[:]),
+			})
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer ts.Close()
+
+	target, err := ParseTarget(ts.URL+"/#tok", "")
+	if err != nil {
+		t.Fatalf("ParseTarget: %v", err)
+	}
+	cli := NewClient(target)
+
+	var progressCount int
+	var lastSent, lastTotal int64
+	res, err := cli.StreamItemWithHint(context.Background(), "b1", "i1", tmpPath, 0, 16<<20, func(sent, total int64) {
+		progressCount++
+		lastSent = sent
+		lastTotal = total
+	})
+	if err != nil {
+		t.Fatalf("StreamItemWithHint PATCH failed: %v", err)
+	}
+	if !res.Verified || res.Written != int64(len(payload)) {
+		t.Fatalf("unexpected PATCH result: %+v", res)
+	}
+	if headCalls.Load() != 0 {
+		t.Fatalf("expected 0 HEAD requests when initialOffset=0 and chunkSizeHint>0, got %d", headCalls.Load())
+	}
+	if patchCalls.Load() != 1 {
+		t.Fatalf("expected 1 PATCH request, got %d", patchCalls.Load())
+	}
+	if lastSent != int64(len(payload)) || lastTotal != int64(len(payload)) {
+		t.Fatalf("final progress = (%d,%d), want (%d,%d)", lastSent, lastTotal, len(payload), len(payload))
+	}
+	// At 256 KiB throttle threshold, 2 MiB produces ~8 callbacks (not 64+ at 32 KiB reads).
+	if progressCount < 2 || progressCount > 24 {
+		t.Fatalf("expected throttled progressCount in [2..24], got %d", progressCount)
+	}
+
+	// Verify automatic fallback to PUT when PATCH returns 405 Method Not Allowed.
+	allowPatch.Store(false)
+	var putProgCount int
+	res2, err := cli.StreamItemWithHint(context.Background(), "b1", "i2", tmpPath, 0, 16<<20, func(sent, total int64) {
+		putProgCount++
+	})
+	if err != nil {
+		t.Fatalf("StreamItemWithHint PUT fallback failed: %v", err)
+	}
+	if !res2.Verified || putCalls.Load() != 1 || putProgCount > 24 {
+		t.Fatalf("unexpected PUT fallback stats: verified=%v putCalls=%d putProgCount=%d", res2.Verified, putCalls.Load(), putProgCount)
 	}
 }

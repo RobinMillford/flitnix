@@ -768,7 +768,10 @@ func (a *App) runPeerTransferJob(ctx context.Context, jobID string, req PeerSend
 	}
 
 	var completedBaseBytes int64
-	startAll := time.Now()
+	var lastUIEmit time.Time
+	lastSpeedAt := time.Now()
+	var lastSpeedBytes int64
+	var emaSpeed float64
 	for idx, localItem := range lm.LocalItems {
 		if idx >= len(batch.Items) {
 			break
@@ -778,13 +781,24 @@ func (a *App) runPeerTransferJob(ctx context.Context, jobID string, req PeerSend
 			j.State = "transferring"
 			j.CurrentFile = localItem.ManifestItem.DisplayName
 		})
-		res, streamErr := c.StreamItem(ctx, batch.ID, remoteItem.ID, localItem.Path, func(sent, _ int64) {
-			elapsed := time.Since(startAll).Seconds()
-			totalSent := completedBaseBytes + sent
-			var spd float64
-			if elapsed > 0.05 {
-				spd = float64(totalSent) / elapsed
+		res, streamErr := c.StreamItemWithHint(ctx, batch.ID, remoteItem.ID, localItem.Path, remoteItem.Transferred, transfer.DefaultChunkSize, func(sent, _ int64) {
+			now := time.Now()
+			if !lastUIEmit.IsZero() && now.Sub(lastUIEmit) < 150*time.Millisecond {
+				return
 			}
+			totalSent := completedBaseBytes + sent
+			if dt := now.Sub(lastSpeedAt).Seconds(); (dt >= 0.05 || (emaSpeed <= 0 && dt > 0)) && totalSent > lastSpeedBytes {
+				inst := float64(totalSent-lastSpeedBytes) / dt
+				if emaSpeed <= 0 {
+					emaSpeed = inst
+				} else {
+					emaSpeed = 0.7*emaSpeed + 0.3*inst
+				}
+				lastSpeedBytes = totalSent
+				lastSpeedAt = now
+			}
+			lastUIEmit = now
+			spd := emaSpeed
 			a.peerMgr.updateJob(jobID, func(j *PeerTransferJob) {
 				j.SentBytes = totalSent
 				j.Speed = spd
@@ -800,9 +814,18 @@ func (a *App) runPeerTransferJob(ctx context.Context, jobID string, req PeerSend
 			return
 		}
 		completedBaseBytes += res.Written
+		now := time.Now()
+		if emaSpeed <= 0 && completedBaseBytes > lastSpeedBytes {
+			if dt := now.Sub(lastSpeedAt).Seconds(); dt > 0 {
+				emaSpeed = float64(completedBaseBytes-lastSpeedBytes) / dt
+			}
+		}
+		lastUIEmit = now
+		spd := emaSpeed
 		a.peerMgr.updateJob(jobID, func(j *PeerTransferJob) {
 			j.CompletedItems = idx + 1
 			j.SentBytes = completedBaseBytes
+			j.Speed = spd
 		})
 	}
 
