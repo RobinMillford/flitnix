@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -59,8 +60,9 @@ type ItemResult struct {
 
 // Client executes outbound transfers against a remote Flitnix HTTP server.
 type Client struct {
-	target     *Target
-	httpClient *http.Client
+	target      *Target
+	httpClient  *http.Client
+	retryPolicy RetryPolicy
 }
 
 // NewClient constructs an outbound transfer client for the given target.
@@ -80,7 +82,13 @@ func NewClient(target *Target) *Client {
 			Transport: transport,
 			Timeout:   0, // Streaming requests use context deadlines rather than a blanket client timeout
 		},
+		retryPolicy: DefaultRetryPolicy(),
 	}
+}
+
+// SetRetryPolicy overrides the automatic chunk retry policy on transient network failures.
+func (c *Client) SetRetryPolicy(policy RetryPolicy) {
+	c.retryPolicy = policy.normalized()
 }
 
 // Target returns the connection target.
@@ -297,9 +305,11 @@ func (c *Client) WaitForApproval(ctx context.Context, batchID string, pollInterv
 	}
 }
 
-// StreamItem streams the payload for one approved item via PUT /api/batches/{batchID}/items/{itemID}/content.
-// Memory use is bounded by streaming chunks directly from the local filesystem.
-// SHA-256 is calculated inline and compared against the server's returned digest.
+// StreamItem streams the payload for one approved item. It queries HEAD for
+// resumable PATCH chunk support first (resuming from the server's durable
+// Upload-Offset when available), and falls back cleanly to single-pass PUT if
+// the endpoint does not advertise HEAD/PATCH support.
+// SHA-256 is verified over the complete local file against the server's digest.
 func (c *Client) StreamItem(ctx context.Context, batchID, itemID, localPath string, onProgress func(written, total int64)) (ItemResult, error) {
 	f, err := os.Open(localPath)
 	if err != nil {
@@ -313,9 +323,282 @@ func (c *Client) StreamItem(ctx context.Context, batchID, itemID, localPath stri
 	}
 	declaredSize := info.Size()
 
+	reqURL := fmt.Sprintf("%s/api/batches/%s/items/%s/content", c.target.BaseURL, url.PathEscape(batchID), url.PathEscape(itemID))
+	policy := c.retryPolicy.normalized()
+	for attempt := 0; ; attempt++ {
+		offset, chunkSize, supportsResumable, headErr := c.probeHead(ctx, reqURL, declaredSize)
+		if headErr != nil {
+			if !IsRetryableError(headErr) || attempt >= policy.MaxRetries {
+				return ItemResult{}, headErr
+			}
+			delay, derr := c.retryDelayOrDeferred(headErr, attempt+1, policy)
+			if derr != nil {
+				return ItemResult{}, derr
+			}
+			if policy.OnRetry != nil {
+				policy.OnRetry(attempt+1, policy.MaxRetries, delay, headErr)
+			}
+			if werr := waitBackoff(ctx, delay); werr != nil {
+				return ItemResult{}, werr
+			}
+			continue
+		}
+		if supportsResumable {
+			return c.streamItemChunks(ctx, f, localPath, reqURL, declaredSize, offset, chunkSize, onProgress)
+		}
+		return c.streamItemPut(ctx, f, localPath, reqURL, declaredSize, onProgress)
+	}
+}
+
+func (c *Client) probeHead(ctx context.Context, reqURL string, declaredSize int64) (offset int64, chunkSize int64, supported bool, err error) {
+	headReq, err := http.NewRequestWithContext(ctx, http.MethodHead, reqURL, nil)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	headReq.Header.Set("Authorization", "Bearer "+c.target.Token())
+	headReq.Header.Set("Host", c.target.Host)
+	headResp, herr := c.httpClient.Do(headReq)
+	if herr != nil {
+		return 0, 0, false, herr
+	}
+	headResp.Body.Close()
+
+	if headResp.StatusCode == http.StatusUnauthorized {
+		return 0, 0, false, ErrUnauthorized
+	}
+	if headResp.StatusCode == http.StatusNotFound || headResp.StatusCode == http.StatusMethodNotAllowed {
+		return 0, 0, false, nil
+	}
+	if headResp.StatusCode == http.StatusOK {
+		parsedOff, oerr := strconv.ParseInt(strings.TrimSpace(headResp.Header.Get("Upload-Offset")), 10, 64)
+		if oerr == nil && parsedOff >= 0 && parsedOff <= declaredSize {
+			cs := transfer.DefaultChunkSize
+			if v, cerr := strconv.ParseInt(strings.TrimSpace(headResp.Header.Get("Upload-Chunk-Size")), 10, 64); cerr == nil && v > 0 {
+				cs = v
+			}
+			return parsedOff, cs, true, nil
+		}
+		return 0, 0, false, nil
+	}
+	return 0, 0, false, &HTTPStatusError{
+		StatusCode: headResp.StatusCode,
+		RetryAfter: RetryAfterHeader(headResp.Header),
+		Message:    fmt.Sprintf("HEAD returned HTTP %d", headResp.StatusCode),
+	}
+}
+
+func computeFilePrefixHash(f *os.File, offset int64) (h io.Writer, sumFunc func() []byte, err error) {
+	hasher := sha256.New()
+	if _, serr := f.Seek(0, io.SeekStart); serr != nil {
+		return nil, nil, serr
+	}
+	if offset > 0 {
+		if _, cerr := io.CopyN(hasher, f, offset); cerr != nil {
+			return nil, nil, cerr
+		}
+	}
+	return hasher, func() []byte { return hasher.Sum(nil) }, nil
+}
+
+func (c *Client) streamItemChunks(ctx context.Context, f *os.File, localPath, reqURL string, declaredSize, offset, chunkSize int64, onProgress func(written, total int64)) (ItemResult, error) {
+	hasher, sumBytes, err := computeFilePrefixHash(f, offset)
+	if err != nil {
+		return ItemResult{}, fmt.Errorf("client: hashing resumed prefix of %s: %w", localPath, err)
+	}
+	if onProgress != nil {
+		onProgress(offset, declaredSize)
+	}
+
+	var lastResult struct {
+		Written int64              `json:"written"`
+		SHA256  string             `json:"sha256"`
+		Batch   transfer.BatchView `json:"batch"`
+	}
+	policy := c.retryPolicy.normalized()
+	consecutiveRetries := 0
+
+	retryWithHead := func(cause error) (bool, error) {
+		if !IsRetryableError(cause) || consecutiveRetries >= policy.MaxRetries {
+			return false, cause
+		}
+		consecutiveRetries++
+		delay, derr := c.retryDelayOrDeferred(cause, consecutiveRetries, policy)
+		if derr != nil {
+			return false, derr
+		}
+		if policy.OnRetry != nil {
+			policy.OnRetry(consecutiveRetries, policy.MaxRetries, delay, cause)
+		}
+		if werr := waitBackoff(ctx, delay); werr != nil {
+			return false, werr
+		}
+		// Reachability probe before resuming chunk stream
+		if perr := c.Ping(ctx); perr != nil {
+			return true, nil // stay in retry loop; next attempt will backoff again
+		}
+		srvOff, srvChunk, _, herr := c.probeHead(ctx, reqURL, declaredSize)
+		if herr != nil {
+			return true, nil
+		}
+		if srvChunk > 0 {
+			chunkSize = srvChunk
+		}
+		if srvOff != offset {
+			offset = srvOff
+		}
+		newHasher, newSum, rerr := computeFilePrefixHash(f, offset)
+		if rerr != nil {
+			return false, rerr
+		}
+		hasher, sumBytes = newHasher, newSum
+		if onProgress != nil {
+			onProgress(offset, declaredSize)
+		}
+		return true, nil
+	}
+
+	for offset < declaredSize || (declaredSize == 0 && offset == 0) {
+		lenChunk := chunkSize
+		if declaredSize-offset < lenChunk {
+			lenChunk = declaredSize - offset
+		}
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			return ItemResult{}, err
+		}
+		// Compute chunk into request without mutating file prefix hasher on failed partial send:
+		// we hash only committed bytes once accepted (or hash prefix cleanly on retry).
+		chunkReader := io.LimitReader(f, lenChunk)
+		pr := io.TeeReader(chunkReader, hasher)
+		req, err := http.NewRequestWithContext(ctx, http.MethodPatch, reqURL, &chunkProgressReader{
+			r:          pr,
+			base:       offset,
+			total:      declaredSize,
+			onProgress: onProgress,
+		})
+		if err != nil {
+			return ItemResult{}, err
+		}
+		req.Header.Set("Authorization", "Bearer "+c.target.Token())
+		req.Header.Set("Host", c.target.Host)
+		req.Header.Set("Content-Type", "application/offset+octet-stream")
+		req.Header.Set("Upload-Offset", strconv.FormatInt(offset, 10))
+		req.ContentLength = lenChunk
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			cont, rerr := retryWithHead(fmt.Errorf("client: chunk streaming failed for %s at offset %d: %w", filepath.Base(localPath), offset, err))
+			if cont {
+				// Recompute prefix hash at confirmed offset so hasher has no partial dirty chunk bytes.
+				if newHasher, newSum, herr := computeFilePrefixHash(f, offset); herr == nil {
+					hasher, sumBytes = newHasher, newSum
+				}
+				continue
+			}
+			return ItemResult{}, rerr
+		}
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode == http.StatusUnauthorized {
+			return ItemResult{}, ErrUnauthorized
+		}
+		if resp.StatusCode == http.StatusNoContent {
+			consecutiveRetries = 0
+			nextOffset := offset + lenChunk
+			if srvOff, serr := strconv.ParseInt(strings.TrimSpace(resp.Header.Get("Upload-Offset")), 10, 64); serr == nil && srvOff >= 0 {
+				nextOffset = srvOff
+			}
+			offset = nextOffset
+			if onProgress != nil {
+				onProgress(offset, declaredSize)
+			}
+			continue
+		}
+		if resp.StatusCode == http.StatusOK {
+			if len(respBody) > 0 {
+				if err := json.Unmarshal(respBody, &lastResult); err != nil {
+					return ItemResult{}, fmt.Errorf("client: invalid stream result JSON: %w", err)
+				}
+			}
+			offset = declaredSize
+			break
+		}
+
+		var errResp struct {
+			Code  string `json:"code"`
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(respBody, &errResp)
+		msg := errResp.Error
+		if msg == "" {
+			msg = string(respBody)
+		}
+		httpErr := &HTTPStatusError{
+			StatusCode: resp.StatusCode,
+			Code:       errResp.Code,
+			RetryAfter: RetryAfterHeader(resp.Header),
+			Message:    msg,
+		}
+		if errResp.Code == "offset_mismatch" {
+			if srvOff, serr := strconv.ParseInt(strings.TrimSpace(resp.Header.Get("Upload-Offset")), 10, 64); serr == nil && srvOff >= 0 && srvOff <= declaredSize {
+				offset = srvOff
+			}
+		}
+		cont, rerr := retryWithHead(httpErr)
+		if cont {
+			if newHasher, newSum, herr := computeFilePrefixHash(f, offset); herr == nil {
+				hasher, sumBytes = newHasher, newSum
+			}
+			continue
+		}
+		return ItemResult{}, rerr
+	}
+
+	if declaredSize == 0 && lastResult.SHA256 == "" {
+		return ItemResult{}, fmt.Errorf("%w: empty upload completed without digest", ErrServerFault)
+	}
+
+	localSHA := fmt.Sprintf("%x", sumBytes())
+	if lastResult.Written != declaredSize {
+		return ItemResult{}, fmt.Errorf("%w: %s written %d bytes, expected %d", ErrSizeMismatch, filepath.Base(localPath), lastResult.Written, declaredSize)
+	}
+	if !strings.EqualFold(localSHA, lastResult.SHA256) {
+		return ItemResult{}, fmt.Errorf("%w: %s local=%s remote=%s", ErrIntegrityMismatch, filepath.Base(localPath), localSHA, lastResult.SHA256)
+	}
+	return ItemResult{
+		Written:     lastResult.Written,
+		SHA256:      lastResult.SHA256,
+		LocalSHA256: localSHA,
+		Verified:    true,
+		Batch:       lastResult.Batch,
+	}, nil
+}
+
+type chunkProgressReader struct {
+	r          io.Reader
+	base       int64
+	read       int64
+	total      int64
+	onProgress func(written, total int64)
+}
+
+func (c *chunkProgressReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if n > 0 {
+		c.read += int64(n)
+		if c.onProgress != nil {
+			c.onProgress(c.base+c.read, c.total)
+		}
+	}
+	return n, err
+}
+
+func (c *Client) streamItemPut(ctx context.Context, f *os.File, localPath, reqURL string, declaredSize int64, onProgress func(written, total int64)) (ItemResult, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return ItemResult{}, err
+	}
 	hashingReader := NewHashingReader(f, declaredSize, onProgress)
 
-	reqURL := fmt.Sprintf("%s/api/batches/%s/items/%s/content", c.target.BaseURL, url.PathEscape(batchID), url.PathEscape(itemID))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, reqURL, hashingReader)
 	if err != nil {
 		return ItemResult{}, err

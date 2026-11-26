@@ -62,6 +62,14 @@ export function DenyPairing(arg1) {
   return window['go']['main']['App']['DenyPairing'](arg1);
 }
 
+export function DiscardBatch(arg1) {
+  return window['go']['main']['App']['DiscardBatch'](arg1);
+}
+
+export function DiscardUpload(arg1) {
+  return window['go']['main']['App']['DiscardUpload'](arg1);
+}
+
 export function DownloadUpdate() {
   return window['go']['main']['App']['DownloadUpdate']();
 }
@@ -104,6 +112,10 @@ export function GetPairingStatus() {
 
 export function GetSettings() {
   return window['go']['main']['App']['GetSettings']();
+}
+
+export function GetStorageStatus() {
+  return window['go']['main']['App']['GetStorageStatus']();
 }
 
 export function ListAuditEvents(arg1) {
@@ -160,6 +172,10 @@ export function OpenDownloadFolder() {
 
 export function OpenGuestFolder() {
   return window['go']['main']['App']['OpenGuestFolder']();
+}
+
+export function PauseBatch(arg1) {
+  return window['go']['main']['App']['PauseBatch'](arg1);
 }
 
 export function PickExportDestination() {
@@ -224,6 +240,10 @@ export function RemoveTrustedDevice(arg1) {
 
 export function ResetSettings() {
   return window['go']['main']['App']['ResetSettings']();
+}
+
+export function ResumeBatch(arg1) {
+  return window['go']['main']['App']['ResumeBatch'](arg1);
 }
 
 export function RevokeGuest(arg1) {

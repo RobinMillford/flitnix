@@ -13,7 +13,7 @@ import (
 
 const (
 	// CurrentSchemaVersion is the current version of the settings file schema.
-	CurrentSchemaVersion = 1
+	CurrentSchemaVersion = 2
 
 	// Allowed themes
 	ThemeSystem = "system"
@@ -32,6 +32,7 @@ type Settings struct {
 	Locale             string    `json:"locale"`
 	DownloadDir        string    `json:"downloadDir"`
 	AutoStartSession   bool      `json:"autoStartSession"`
+	PreserveModTimes   bool      `json:"preserveModTimes"`
 	PreferredInterface string    `json:"preferredInterface"`
 	UpdatedAt          time.Time `json:"updatedAt"`
 }
@@ -44,6 +45,7 @@ func DefaultSettings() Settings {
 		Locale:             "system",
 		DownloadDir:        "", // empty indicates default (~/Downloads/Flitnix)
 		AutoStartSession:   false,
+		PreserveModTimes:   true,
 		PreferredInterface: "",
 		UpdatedAt:          time.Now().UTC(),
 	}
@@ -84,7 +86,7 @@ func NewStore(filePath string) (*Store, error) {
 		return s, nil
 	}
 
-	var loaded Settings
+	loaded := DefaultSettings()
 	if err := json.Unmarshal(data, &loaded); err != nil {
 		// Corrupted file recovery: back up corrupted file and fallback to defaults
 		corruptBackup := fmt.Sprintf("%s.corrupt.%s", filePath, time.Now().UTC().Format("20060102150405"))

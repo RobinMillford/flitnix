@@ -16,6 +16,10 @@
   var MAX_PROGRESS_FAILURES = 20; // consecutive failed progress polls before giving up
   var PAINT_MIN_MS = 200;       // upload progress repaint throttle
   var CANCEL_RETRIES = 3;       // DELETE attempts before showing the real state
+  var MAX_AUTO_RETRIES = 6;     // bounded automatic reconnect attempts on transient drops
+  var RETRY_BASE_MS = 1000;     // 1s, 2s, 4s, 8s, 15s jittered exponential backoff
+  var RETRY_MAX_MS = 15000;
+  var MAX_AUTO_RETRY_WAIT_MS = 5 * 60 * 1000; // matches Go: MaxAutoRetryWait
   var FIREFOX_LARGE_UPLOAD_BYTES = 256 * 1024 * 1024;
 
   // ------------------------------------------------------------------
@@ -66,9 +70,20 @@
   var queueEl = document.getElementById("queue");
   var filesEl = document.getElementById("files");
   var filesEmptyEl = document.getElementById("files-empty");
+  var folderNavEl = document.getElementById("folder-nav");
   var refreshBtn = document.getElementById("refresh-btn");
   var downloadSelectedBtn = document.getElementById("download-selected-btn");
   var filesRefreshGeneration = 0;
+  var browseState = {
+    source: null,
+    prefix: "",
+    items: [],
+    totalEntries: 0,
+    hasMore: false,
+    nextCursor: null,
+    selected: {},
+    itemNames: {}
+  };
 
   var textForm = document.getElementById("text-form");
   var textInput = document.getElementById("text-input");
@@ -492,11 +507,23 @@
       case "declaring": return "Contacting the desktop…";
       case "waiting": return "Waiting for approval on the desktop…";
       case "sending": return "Uploading…";
+      case "resuming": return "Resuming upload…";
+      case "reconnecting": {
+        var recText = job.reconnectAttempt && job.reconnectMax
+          ? "Reconnecting — attempt " + job.reconnectAttempt + "/" + job.reconnectMax
+          : "Reconnecting…";
+        if (job.err) recText += " · " + job.err;
+        return recText;
+      }
+      case "interrupted": return "Interrupted — ready to resume";
+      case "paused": return "Paused";
+      case "verifying": return "Verifying…";
       case "canceling": return "Canceling…";
       case "done": return "Completed";
       case "canceled": return "Canceled";
+      case "discarded": return "Discarded";
       case "failed": return "Failed";
-      case "retrying": return "Retrying from the beginning…";
+      case "retrying": return "Resuming…";
     }
     return job.phase;
   }
@@ -507,7 +534,10 @@
     li.dataset.phase = job.phase;
     var r = job.refs;
     var text = phaseText(job);
-    var active = job.phase === "sending" || job.phase === "done" ||
+    var active = job.phase === "sending" || job.phase === "resuming" ||
+                 job.phase === "reconnecting" ||
+                 job.phase === "interrupted" || job.phase === "paused" ||
+                 job.phase === "verifying" || job.phase === "done" ||
                  (job.phase === "canceling" && job.uploaded > 0);
     r.bar.hidden = !active;
     var renderedPercent = job.size > 0
@@ -519,9 +549,10 @@
     if (r.bar.getAttribute("aria-valuenow") !== String(ariaStep)) {
       r.bar.setAttribute("aria-valuenow", String(ariaStep));
     }
-    if (job.phase === "sending" && job.uploaded > 0 && job.size > 0) {
+    if ((job.phase === "sending" || job.phase === "resuming" || job.phase === "interrupted" || job.phase === "paused") &&
+        job.uploaded > 0 && job.size > 0) {
       text += " " + renderedPercent + "%";
-      if (job.speed > 0) {
+      if ((job.phase === "sending" || job.phase === "resuming") && job.speed > 0) {
         text += " · " + fmtBytes(job.speed) + "/s";
         if (job.eta != null && job.eta > 0) {
           text += " · ETA " + fmtEta(job.eta);
@@ -531,26 +562,24 @@
     r.state.textContent = text;
     r.err.hidden = !job.err;
     if (job.err) r.err.textContent = job.err;
-    // Terminal jobs release their File object: on phones the browser's
-    // blob backing is the largest store a finished job would still pin.
-    // A failed-but-retryable job deliberately keeps the file — Retry
-    // reuploads the same object. paint is idempotent-safe here because
-    // the conditions depend only on the terminal phase, never progress.
-    // A "canceling" job keeps it too: if the desktop refuses or the cancel
-    // cannot be confirmed, the file may still have to be sent.
-    if (job.file && (job.phase === "done" || job.phase === "canceled" ||
+    // Terminal jobs release their File object cleanly. Interrupted / paused /
+    // retryable jobs keep the File reference so Resume can slice from Upload-Offset.
+    if (job.file && (job.phase === "done" || job.phase === "canceled" || job.phase === "discarded" ||
                      (job.phase === "failed" && !job.retryable))) {
       job.file = null;
     }
     // Button is state-dependent.
     var label, action;
-    if (job.phase === "sending" || job.phase === "queued" ||
-        job.phase === "declaring" || job.phase === "waiting") {
+    if (job.phase === "sending" || job.phase === "resuming" || job.phase === "reconnecting" ||
+        job.phase === "queued" || job.phase === "declaring" || job.phase === "waiting" || job.phase === "verifying") {
       label = "Cancel"; action = function () { requestCancel(job); };
     } else if (job.phase === "canceling") {
       label = "Canceling…"; action = function () { /* in flight */ };
-    } else if (job.phase === "done") {
+    } else if (job.phase === "done" || job.phase === "discarded") {
       label = "Dismiss"; action = function () { removeJob(job); };
+    } else if (job.phase === "interrupted" || job.phase === "paused" || job.resumable) {
+      label = "Resume";
+      action = function () { retryJob(job); };
     } else {
       label = job.retryable ? "Retry" : "Dismiss";
       action = job.retryable
@@ -602,8 +631,11 @@
         // read the cache, so a job never has to dereference its File
         // object again. File objects are the only large references a
         // job holds and can then be released at the terminal phase.
-        file: f, name: f.name, size: f.size, id: null, phase: "queued", uploaded: 0,
-        failures: 0, retryable: false, err: null,
+        file: f, name: f.name, size: f.size,
+        lastModifiedMs: typeof f.lastModified === "number" && f.lastModified > 0 ? Math.round(f.lastModified) : 0,
+        id: null, phase: "queued", uploaded: 0,
+        failures: 0, autoRetries: 0, reconnectAttempt: 0, reconnectMax: MAX_AUTO_RETRIES,
+        retryable: false, err: null,
         xhr: null, timer: null, removed: false, cancelRequested: false,
         cancelInFlight: false,
         el: null, refs: null, btnAction: null, batchID: null, itemID: null,
@@ -659,12 +691,14 @@
       paint(job);
       return;
     }
-    if (job.phase === "waiting" || job.phase === "sending") {
+    if (job.phase === "waiting" || job.phase === "sending" || job.phase === "resuming" || job.phase === "reconnecting") {
       job.cancelRequested = true;
       job.phase = "canceling";
+      if (job.timer) { clearTimeout(job.timer); job.timer = null; }
       if (job.xhr) {
         try { job.xhr.abort(); } catch (e) { /* gone */ }
       }
+      setReconnecting(false, "upload");
       paint(job);
       cancelDeclaredItem(job, 1);
       return;
@@ -779,24 +813,40 @@
   }
 
   function retryJob(job) {
-    if (appState.ended) return;
-    job.id = null;
-    job.batchID = null;
-    job.itemID = null;
-    job.phase = "retrying";
+    if (appState.ended || !job.file) return;
     job.err = null;
-    job.uploaded = 0;
     job.failures = 0;
+    job.autoRetries = 0;
+    job.reconnectAttempt = 0;
     job.speed = 0;
     job.eta = 0;
     job.retryable = false;
     job.cancelRequested = false;
     job.cancelInFlight = false;
+    if (job.batchID && job.itemID && job.resumable) {
+      // Resume existing approved batch item directly from authoritative server Upload-Offset
+      job.phase = "resuming";
+      paint(job);
+      syncWakeLock();
+      pumpBusy = true;
+      var resumeSiblings = queue.filter(function (q) {
+        return !q.removed && q.batchID === job.batchID;
+      });
+      activeBatch = { id: job.batchID, jobs: resumeSiblings.length ? resumeSiblings : [job], failures: 0, timer: null };
+      sendBatchItem(job);
+      return;
+    }
+    job.id = null;
+    job.batchID = null;
+    job.itemID = null;
+    job.resumable = false;
+    job.phase = "retrying";
+    job.uploaded = 0;
     if (job.refs && job.refs.fill) job.refs.fill.style.width = "0%";
     if (job.refs && job.refs.bar) job.refs.bar.hidden = true;
     paint(job);
     syncWakeLock();
-    // Fresh restart: start streaming from byte zero with a new transfer allocation
+    // Fresh restart when no durable server batch remains
     setTimeout(function () {
       if (job.removed || appState.ended) return;
       job.phase = "queued";
@@ -825,7 +875,8 @@
         items: jobs.map(function (job) {
           return {
             relativePath: jobs[0].rootName ? job.relativePath : job.name,
-            size: job.size
+            size: job.size,
+            lastModifiedMs: job.lastModifiedMs || undefined
           };
         })
       })
@@ -870,9 +921,13 @@
           return;
         }
         job.phase = "failed";
-        job.err = (!err || !err.status || err.status >= 500)
-          ? "Could not reach the desktop. Check the Wi-Fi connection and retry."
-          : (err.message || "The desktop refuses this batch.");
+        if (err && err.status === 507) {
+          job.err = "Desktop storage is low. Free up disk space before sending these files.";
+        } else {
+          job.err = (!err || !err.status || err.status >= 500)
+            ? "Could not reach the desktop. Check the Wi-Fi connection and retry."
+            : (err.message || "The desktop refuses this batch.");
+        }
         job.retryable = true;
         paint(job);
       });
@@ -912,31 +967,41 @@
       var decided = true;
       switch (item.state) {
         case "completed":
-          phase = "done"; err = null; retryable = false; break;
+          phase = "done"; err = null; retryable = false; job.resumable = false; break;
         case "canceled":
-          phase = "canceled"; err = "Upload canceled."; retryable = false; break;
+          phase = "canceled"; err = "Upload canceled."; retryable = false; job.resumable = false; break;
+        case "discarded":
+          phase = "discarded"; err = "Partial upload discarded."; retryable = false; job.resumable = false; break;
         case "rejected":
-          phase = "failed"; err = "The desktop declined this file."; retryable = false; break;
+          phase = "failed"; err = "The desktop declined this file."; retryable = false; job.resumable = false; break;
         case "failed":
-          phase = "failed"; err = item.error || "Transfer failed."; retryable = true; break;
-        // The server's item vocabulary is queued / pending / approved /
-        // transferring / completed / failed / canceled / rejected
-        // (transfer.ItemState). Reading "uploading" here — the *upload
-        // record* vocabulary — meant this branch never matched: an item that
-        // was really transferring fell through to the idle default and the
-        // row claimed its cancellation "was not confirmed; the file is still
-        // queued" while the bytes were actually in flight.
+          phase = "failed"; err = item.error || "Transfer failed."; retryable = true; job.resumable = false; break;
+      case "interrupted":
+        decided = false;
+        if (!cancelPending && job.phase !== "resuming" && job.phase !== "sending" && job.phase !== "reconnecting") {
+          phase = "interrupted";
+          err = item.error || "Interrupted — ready to resume.";
+          retryable = true;
+          job.resumable = true;
+        }
+        break;
+        case "paused":
+          decided = false;
+          if (!cancelPending) {
+            phase = "paused";
+            err = "Paused on desktop.";
+            retryable = true;
+            job.resumable = true;
+          }
+          break;
         case "transferring":
           decided = false;
           if (!cancelPending) {
             if (job.phase === "canceling") {
-              // The cancel was refused or could not be confirmed: reflect
-              // the real state and drop the intent instead of claiming a
-              // cancellation that never happened.
               job.cancelRequested = false;
               err = "Cancellation was not confirmed; the file is still transferring.";
             }
-            phase = "sending";
+            if (job.phase !== "resuming") phase = "sending";
           }
           break;
         default: // pending / approved / queued: not started yet
@@ -983,17 +1048,20 @@
       for (var i = 0; i < activeBatch.jobs.length; i++) {
         var job = activeBatch.jobs[i];
         if (job.removed || job.phase === "done" || job.phase === "canceled" ||
-            job.phase === "failed") continue;
+            job.phase === "discarded" || job.phase === "failed") continue;
         head = job;
         break;
       }
       if (!head) {
         activeBatch = null; pumpBusy = false; syncWakeLock(); pump(); return;
       }
-      if (head.phase === "canceling") { watchBatch(); return; }
+      if (head.phase === "canceling" || head.phase === "interrupted" || head.phase === "paused" || head.phase === "reconnecting") {
+        watchBatch(); return;
+      }
       if (head.phase === "waiting" &&
-          (batch.approvalState === "approved" || batch.state === "queued")) {
-        head.phase = "sending"; head.uploaded = 0; paint(head);
+          (batch.approvalState === "approved" || batch.state === "queued" || batch.state === "interrupted")) {
+        head.phase = head.uploaded > 0 ? "resuming" : "sending";
+        paint(head);
         sendBatchItem(head);
         return;
       }
@@ -1022,33 +1090,139 @@
     });
   }
 
+  function retryBackoffMs(attempt) {
+    var base = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * Math.pow(2, Math.max(0, attempt - 1)));
+    var jitter = 0.8 + 0.4 * Math.random();
+    return Math.round(base * jitter);
+  }
+
+  // Server-requested delay via the Retry-After header (delta seconds or HTTP
+  // date); 0 when absent/invalid. Parsing lives in upload-client.js so the
+  // worker and page share one policy.
+  function retryAfterMsOf(e) {
+    if (!e || typeof e.retryAfterMs !== "number" || e.retryAfterMs <= 0) return 0;
+    return e.retryAfterMs;
+  }
+
+  function formatRetryAfterMs(ms) {
+    if (ms >= 60000) return Math.round(ms / 1000 / 60) + " min";
+    return Math.round(ms / 100) / 10 + " s";
+  }
+
+  function scheduleAutoRetry(job, e) {
+    job.autoRetries = (job.autoRetries || 0) + 1;
+    if (job.autoRetries > MAX_AUTO_RETRIES || !job.file) {
+      setReconnecting(false, "upload");
+      job.phase = "interrupted";
+      job.err = (e && e.message) || "Upload interrupted — tap Resume to continue.";
+      job.retryable = true;
+      job.resumable = true;
+      paint(job);
+      pumpBusy = false;
+      syncWakeLock();
+      return;
+    }
+    job.phase = "reconnecting";
+    job.reconnectAttempt = job.autoRetries;
+    job.reconnectMax = MAX_AUTO_RETRIES;
+    job.resumable = true;
+    job.retryable = true;
+    job.err = null;
+    setReconnecting(true, "upload");
+    paint(job);
+
+    // Honor any server-requested Retry-After: the wait is the longer of the
+    // jittered backoff and the server request. Past MAX_AUTO_RETRY_WAIT_MS the
+    // item stays deferred (manual retry via the Resume button) instead of
+    // retrying earlier than the server asked.
+    var delay = retryBackoffMs(job.autoRetries);
+    var ra = retryAfterMsOf(e);
+    if (ra > delay) delay = ra;
+    if (delay > MAX_AUTO_RETRY_WAIT_MS) {
+      job.err = "Server asked to retry after " + formatRetryAfterMs(delay) +
+        " — tap Resume when ready.";
+      paint(job);
+      setReconnecting(false, "upload");
+      return;
+    }
+
+    waitThen(job, delay, function () {
+      if (job.removed || appState.ended || job.cancelRequested || !activeBatch) {
+        setReconnecting(false, "upload");
+        return;
+      }
+      fetch("/ping", { cache: "no-store" }).then(function (pingRes) {
+        if (job.removed || appState.ended || job.cancelRequested) return;
+        if (!pingRes.ok) throw new Error("ping failed");
+        setReconnecting(false, "upload");
+        job.phase = "resuming";
+        paint(job);
+        sendBatchItem(job);
+      }).catch(function () {
+        if (job.removed || appState.ended || job.cancelRequested) return;
+        scheduleAutoRetry(job, e);
+      });
+    });
+  }
+
   function sendBatchItem(job) {
     putBatchContent(job).then(function () {
-      if (job.phase === "done" || job.phase === "canceled") return;
-      job.phase = "done"; job.err = null; paint(job);
+      if (job.phase === "done" || job.phase === "canceled" || job.phase === "discarded") return;
+      setReconnecting(false, "upload");
+      job.autoRetries = 0;
+      job.phase = "done"; job.err = null; job.resumable = false; paint(job);
+      if (activeBatch) {
+        activeBatch.jobs.forEach(function (other) {
+          if (other !== job && other.phase === "queued") other.phase = "waiting";
+          if (other !== job) paint(other);
+        });
+      }
       watchBatch();
     }).catch(function (e) {
       if (!activeBatch || job.removed || appState.ended) return;
-      // A row the desktop already settled must not be overwritten by a late
-      // PUT failure (e.g. the server canceled the sink after our DELETE).
-      if (job.phase === "done" || job.phase === "canceled") return;
+      if (job.phase === "done" || job.phase === "canceled" || job.phase === "discarded") return;
       if (job.cancelRequested) {
-        // The phone withdrew this item; the DELETE response is the authority.
-        // The aborted/failed PUT is its expected consequence and must not
-        // tear down the batch or requeue the files behind it.
+        setReconnecting(false, "upload");
         job.phase = "canceling"; job.err = null; job.retryable = false;
         paint(job);
         if (activeBatch) watchBatch();
         return;
       }
       if (e && e.aborted) {
-        job.phase = "canceled"; job.err = "Upload canceled.";
-      } else {
-        job.phase = "failed";
-        job.err = (e && e.message) || "Upload failed.";
-        job.retryable = true;
+        setReconnecting(false, "upload");
+        job.phase = "canceled"; job.err = "Upload canceled."; job.resumable = false;
+        job.batchID = null; job.itemID = null; job.uploaded = 0;
+        activeBatch.jobs.forEach(function (other) {
+          if (other !== job && other.phase === "waiting") other.phase = "queued";
+          if (other !== job) paint(other);
+        });
+        paint(job);
+        activeBatch = null; pumpBusy = false;
+        syncWakeLock();
+        return;
       }
-      // Stale transfer identifiers cleared so retry creates a fresh transfer from byte zero
+      if (e && e.resumable) {
+        if (typeof e.offset === "number" && e.offset > job.uploaded) {
+          job.uploaded = e.offset;
+        }
+        if (e.transient) {
+          scheduleAutoRetry(job, e);
+          return;
+        }
+        setReconnecting(false, "upload");
+        job.phase = e.paused ? "paused" : "interrupted";
+        job.err = (e && e.message) || "Upload interrupted — tap Resume to continue.";
+        job.retryable = true;
+        job.resumable = true;
+        paint(job);
+        pumpBusy = false;
+        syncWakeLock();
+        return;
+      }
+      job.phase = "failed";
+      job.err = (e && e.message) || "Upload failed.";
+      job.retryable = true;
+      job.resumable = false;
       job.batchID = null;
       job.itemID = null;
       job.uploaded = 0;
@@ -1068,23 +1242,22 @@
 
   function putBatchContent(job) {
     var lastPaint = 0;
-    var lastLoaded = 0;
+    var lastLoaded = job.uploaded || 0;
     var lastTime = Date.now();
     var currentSpeed = 0;
 
-    var stream = FlitnixUpload.stream({
+    var stream = FlitnixUpload.streamResumable({
       url: "/api/batches/" + encodeURIComponent(job.batchID) +
         "/items/" + encodeURIComponent(job.itemID) + "/content",
       headers: {
-        "Authorization": "Bearer " + token,
-        "Content-Type": "application/octet-stream"
+        "Authorization": "Bearer " + token
       },
       file: job.file,
       onProgress: function (loaded, total) {
         job.uploaded = Math.min(job.size, loaded);
         var now = Date.now();
         var dt = (now - lastTime) / 1000;
-        if (dt >= 0.25) {
+        if (dt >= 0.25 && loaded >= lastLoaded) {
           var instant = (loaded - lastLoaded) / dt;
           currentSpeed = currentSpeed === 0 ? instant : (0.7 * currentSpeed + 0.3 * instant);
           job.speed = currentSpeed;
@@ -1094,10 +1267,10 @@
             job.eta = Math.round((job.size - job.uploaded) / currentSpeed);
           }
         }
+        if (loaded > 0 && job.phase === "resuming") job.phase = "sending";
         if (now - lastPaint >= PAINT_MIN_MS || loaded === total) { lastPaint = now; paint(job); }
       }
     });
-    // Existing cancel paths abort job.xhr; keep that surface unchanged.
     job.xhr = { abort: stream.abort };
 
     return stream.promise.then(function (res) {
@@ -1105,6 +1278,32 @@
       if (job.removed || appState.ended) throw { aborted: true };
       if (res.status === 401) { endUnauthorized(errorCode(res)); throw { aborted: true }; }
       if (res.status >= 200 && res.status < 300) { diagnoseUpload("completed", job); return; }
+      var code = errorCode(res);
+      if (res.status === 507) {
+        var lowErr = new Error("Desktop storage is low. Free up disk space before resuming.");
+        lowErr.status = 507;
+        lowErr.resumable = true;
+        lowErr.offset = typeof res.offset === "number" ? res.offset : job.uploaded;
+        lowErr.retryAfterMs = retryAfterMsOf(res);
+        throw lowErr;
+      }
+      if (code === "paused") {
+        var pauseErr = new Error("Upload paused on desktop.");
+        pauseErr.resumable = true;
+        pauseErr.paused = true;
+        pauseErr.offset = typeof res.offset === "number" ? res.offset : job.uploaded;
+        throw pauseErr;
+      }
+      if (code === "chunk_interrupted" || code === "stall" ||
+          res.status === 408 || res.status === 429 ||
+          res.status === 502 || res.status === 503 || res.status === 504) {
+        var intErr = new Error("Upload interrupted — reconnecting to continue from saved bytes.");
+        intErr.resumable = true;
+        intErr.transient = true;
+        intErr.offset = typeof res.offset === "number" ? res.offset : job.uploaded;
+        intErr.retryAfterMs = retryAfterMsOf(res);
+        throw intErr;
+      }
       var msg = "Upload failed (" + res.status + ")";
       try { var parsed = JSON.parse(res.responseText); if (parsed && parsed.error) msg = parsed.error; } catch (e) {}
       throw new Error(msg);
@@ -1114,12 +1313,21 @@
         diagnoseUpload(job.cancelRequested ? "canceled" : "aborted", job);
         throw { aborted: true };
       }
+      var off = (err && typeof err.offset === "number") ? err.offset : job.uploaded;
       if (err && err.timeout) {
         diagnoseUpload("timeout", job);
-        throw new Error("Upload timed out. Keep the page visible and retry this file.");
+        var tErr = new Error("Upload timed out. Saved bytes are preserved — reconnecting.");
+        tErr.resumable = true;
+        tErr.transient = true;
+        tErr.offset = off;
+        throw tErr;
       }
       diagnoseUpload("network-error", job);
-      throw new Error("Network error while uploading. The desktop may have received part of this file; retry to send it again.");
+      var nErr = new Error("Network error while uploading. Saved bytes are preserved — reconnecting.");
+      nErr.resumable = true;
+      nErr.transient = true;
+      nErr.offset = off;
+      throw nErr;
     });
   }
 
@@ -1133,10 +1341,20 @@
     refreshBtn.textContent = "Loading…";
     api("/api/sources").then(function (data) {
       if (appState.ended || generation !== filesRefreshGeneration) return;
-      drawFiles(data || []);
+      var list = Array.isArray(data) ? data : [];
+      if (browseState.source) {
+        var stillShared = list.filter(function (s) { return s && s.id === browseState.source.id; })[0];
+        if (stillShared) {
+          browseState.source = stillShared;
+          return loadFolderPage(stillShared, browseState.prefix, 0, false);
+        }
+        resetBrowseState();
+      }
+      drawFiles(list);
     }).catch(function (err) {
       if (appState.ended || (err && err.silent)) return;
       if (generation === filesRefreshGeneration) {
+        resetBrowseState();
         drawFiles([]);
         filesEmptyEl.textContent = err.message || "Could not load the desktop files.";
       }
@@ -1148,7 +1366,26 @@
     });
   }
 
+  function resetBrowseState() {
+    browseState.source = null;
+    browseState.prefix = "";
+    browseState.items = [];
+    browseState.totalEntries = 0;
+    browseState.hasMore = false;
+    browseState.nextCursor = null;
+    browseState.selected = {};
+    browseState.itemNames = {};
+    if (folderNavEl) {
+      folderNavEl.hidden = true;
+      folderNavEl.textContent = "";
+    }
+  }
+
   function drawFiles(list) {
+    if (folderNavEl) {
+      folderNavEl.hidden = true;
+      folderNavEl.textContent = "";
+    }
     filesEl.textContent = "";
     var items = (Array.isArray(list) ? list : []).filter(function (f) {
       return f && f.id && f.name && (f.kind === "file" || f.kind === "folder");
@@ -1165,6 +1402,7 @@
     items.forEach(function (f) {
       filesEl.appendChild(fileRow(f));
     });
+    updateDownloadSelection();
   }
 
   function fileRow(f) {
@@ -1181,12 +1419,171 @@
     check.setAttribute("aria-label", "Select " + f.name);
     check.addEventListener("change", updateDownloadSelection);
     li.appendChild(check);
+    li.appendChild(left);
+    var actions = el("div", "file-item__actions");
+    if (f.kind === "folder") {
+      var browseBtn = el("button", "btn btn--small btn--ghost", "Browse");
+      browseBtn.type = "button";
+      browseBtn.setAttribute("aria-label", "Browse folder " + f.name);
+      browseBtn.addEventListener("click", function () {
+        resetBrowseState();
+        browseState.source = f;
+        loadFolderPage(f, "", 0, false);
+      });
+      actions.appendChild(browseBtn);
+    }
     var btn = el("button", "btn btn--small");
     btn.type = "button";
     btn.textContent = "Download";
     btn.addEventListener("click", function () { downloadSources([f], btn); });
+    actions.appendChild(btn);
+    li.appendChild(actions);
+    return li;
+  }
+
+  function loadFolderPage(source, prefix, cursor, append) {
+    var url = "/api/sources/" + encodeURIComponent(source.id) + "/items?prefix=" + encodeURIComponent(prefix || "") +
+      "&cursor=" + encodeURIComponent(String(cursor || 0)) + "&limit=200";
+    return api(url).then(function (page) {
+      if (appState.ended) return;
+      browseState.source = source;
+      browseState.prefix = page.prefix || "";
+      browseState.totalEntries = page.totalEntries || 0;
+      browseState.hasMore = Boolean(page.hasMore);
+      browseState.nextCursor = typeof page.nextCursor === "number" ? page.nextCursor : null;
+      var newItems = Array.isArray(page.items) ? page.items : [];
+      browseState.items = append ? browseState.items.concat(newItems) : newItems;
+      newItems.forEach(function (entry) {
+        if (entry && entry.id) {
+          browseState.itemNames[entry.id] = entry.name;
+        }
+      });
+      renderFolderView();
+    }).catch(function (err) {
+      if (appState.ended || (err && err.silent)) return;
+      filesEmptyEl.hidden = false;
+      filesEmptyEl.textContent = (err && err.message) || "Could not open folder.";
+    });
+  }
+
+  function renderFolderBreadcrumbs() {
+    if (!folderNavEl || !browseState.source) return;
+    folderNavEl.hidden = false;
+    folderNavEl.textContent = "";
+
+    var backBtn = el("button", "btn btn--small btn--ghost", "← All shared");
+    backBtn.type = "button";
+    backBtn.addEventListener("click", function () {
+      resetBrowseState();
+      refreshFiles();
+    });
+    folderNavEl.appendChild(backBtn);
+
+    var crumbs = el("nav", "breadcrumbs");
+    crumbs.setAttribute("aria-label", "Folder path");
+
+    function addCrumb(label, targetPrefix, isCurrent) {
+      var b = el("button", "breadcrumb-btn", label);
+      b.type = "button";
+      if (isCurrent) {
+        b.setAttribute("aria-current", "location");
+        b.disabled = true;
+      } else {
+        b.addEventListener("click", function () {
+          loadFolderPage(browseState.source, targetPrefix, 0, false);
+        });
+      }
+      crumbs.appendChild(b);
+    }
+
+    var segs = browseState.prefix ? browseState.prefix.split("/").filter(Boolean) : [];
+    addCrumb(browseState.source.name, "", segs.length === 0);
+    var acc = "";
+    segs.forEach(function (seg, idx) {
+      acc = acc ? (acc + "/" + seg) : seg;
+      crumbs.appendChild(el("span", "breadcrumb-sep", "/"));
+      var target = acc;
+      addCrumb(seg, target, idx === segs.length - 1);
+    });
+    folderNavEl.appendChild(crumbs);
+  }
+
+  function renderFolderView() {
+    renderFolderBreadcrumbs();
+    filesEl.textContent = "";
+    var entries = browseState.items || [];
+    filesEmptyEl.hidden = entries.length > 0;
+    if (!entries.length) {
+      filesEmptyEl.textContent = "This folder is empty.";
+    }
+    var actions = document.getElementById("file-actions");
+    if (actions) actions.hidden = false;
+    downloadSelectedBtn.hidden = false;
+
+    entries.forEach(function (entry) {
+      filesEl.appendChild(browseEntryRow(entry));
+    });
+
+    if (browseState.hasMore && browseState.nextCursor !== null) {
+      var moreLi = el("li", "");
+      var moreBtn = el("button", "btn btn--small btn--ghost browse-load-more",
+        "Load more (" + entries.length + " / " + browseState.totalEntries + ")");
+      moreBtn.type = "button";
+      moreBtn.addEventListener("click", function () {
+        moreBtn.disabled = true;
+        moreBtn.textContent = "Loading…";
+        loadFolderPage(browseState.source, browseState.prefix, browseState.nextCursor, true);
+      });
+      moreLi.appendChild(moreBtn);
+      filesEl.appendChild(moreLi);
+    }
+    updateDownloadSelection();
+  }
+
+  function browseEntryRow(entry) {
+    var li = el("li", "file-item");
+    var left = el("div", "file-item__meta");
+    if (entry.kind === "dir") {
+      left.appendChild(el("span", "file-item__name", "📁 " + entry.name + "/"));
+      left.appendChild(el("span", "file-item__size",
+        (entry.itemCount || 0) + " items · " + fmtBytes(entry.totalBytes || 0)));
+      li.appendChild(left);
+      var openBtn = el("button", "btn btn--small btn--ghost", "Open");
+      openBtn.type = "button";
+      openBtn.setAttribute("aria-label", "Open folder " + entry.name);
+      openBtn.addEventListener("click", function () {
+        loadFolderPage(browseState.source, entry.path, 0, false);
+      });
+      li.appendChild(openBtn);
+      return li;
+    }
+
+    var check = document.createElement("input");
+    check.type = "checkbox";
+    check.className = "source-check browse-item-check";
+    check.value = entry.id;
+    check.checked = Boolean(browseState.selected[entry.id]);
+    check.setAttribute("aria-label", "Select " + entry.name);
+    check.addEventListener("change", function () {
+      if (check.checked) {
+        browseState.selected[entry.id] = true;
+      } else {
+        delete browseState.selected[entry.id];
+      }
+      updateDownloadSelection();
+    });
+    li.appendChild(check);
+
+    left.appendChild(el("span", "file-item__name", entry.name));
+    left.appendChild(el("span", "file-item__size", fmtBytes(entry.size || 0)));
     li.appendChild(left);
-    li.appendChild(btn);
+
+    var dlBtn = el("button", "btn btn--small", "Download");
+    dlBtn.type = "button";
+    dlBtn.addEventListener("click", function () {
+      downloadSelectedFolderItems(browseState.source, [entry.id], [{ id: entry.id, name: entry.name }], dlBtn);
+    });
+    li.appendChild(dlBtn);
     return li;
   }
 
@@ -1282,7 +1679,9 @@
         card.setMessage("Verification failed — Checksum mismatch! Actual: " + actualDigest.slice(0, 16) + "…, Expected: " + wantDigest.slice(0, 16) + "…");
         var retry = el("button", "btn btn--small", "Retry Download");
         retry.type = "button";
-        retry.addEventListener("click", function () { downloadSources(sources, btn); });
+        retry.addEventListener("click", function () {
+          if (card && card.retry) card.retry(); else downloadSources(sources, btn);
+        });
         card.setActions([retry]);
       }
     }
@@ -1343,13 +1742,21 @@
   }
 
   function downloadSources(sources, btn) {
+    return runDownloadGrant({ sourceIds: sources.map(function (source) { return source.id; }) }, sources, btn);
+  }
+
+  function downloadSelectedFolderItems(source, itemIds, displaySources, btn) {
+    return runDownloadGrant({ sourceId: source.id, itemIds: itemIds }, displaySources, btn);
+  }
+
+  function runDownloadGrant(grantBody, sources, btn) {
     btn.disabled = true;
     var prev = btn.textContent;
     btn.textContent = "Preparing…";
     fetch("/api/download-grants", {
       method: "POST",
       headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
-      body: JSON.stringify({ sourceIds: sources.map(function (source) { return source.id; }) }),
+      body: JSON.stringify(grantBody),
       cache: "no-store"
     }).then(function (res) {
       if (res.status === 401) {
@@ -1374,6 +1781,9 @@
         activeDownloads[dlKey] = true;
         syncWakeLock();
         var card = renderDownloadIntegrityCard(grant, sources, btn);
+        if (card) {
+          card.retry = function () { runDownloadGrant(grantBody, sources, btn); };
+        }
 
         // Check if browser supports showSaveFilePicker in secure context
         if (typeof window.showSaveFilePicker === "function") {
@@ -1383,65 +1793,183 @@
               card.setMessage("Streaming to storage and hashing incrementally…");
             }
             return handle.createWritable().then(function (writable) {
-              return fetch(grant.downloadUrl).then(function (resp) {
-                if (!resp.ok) throw new Error("HTTP " + resp.status);
-                var streamHasher = (typeof sha256 !== "undefined" && sha256.create) ? sha256.create() : null;
+              var MAX_DL_RETRIES = 6;
+              var received = 0;
+              var totalSize = null;
+              var validatorETag = "";
+              var retries = 0;
+              var streamHasher = (typeof sha256 !== "undefined" && sha256.create) ? sha256.create() : null;
+
+              function isStrongETag(tag) {
+                return Boolean(tag && tag.indexOf("W/") !== 0 && tag.indexOf("w/") !== 0);
+              }
+
+              function parseContentRange(cr) {
+                if (!cr) return null;
+                var m = String(cr).match(/^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i);
+                if (!m) return null;
+                return {
+                  start: parseInt(m[1], 10),
+                  end: parseInt(m[2], 10),
+                  total: m[3] === "*" ? null : parseInt(m[3], 10)
+                };
+              }
+
+              function finishAndVerify() {
+                return writable.close().then(function () {
+                  delete activeDownloads[dlKey];
+                  syncWakeLock();
+                  if (card) card.setBadge("Verifying…", "badge--verifying");
+                  var checkDigest = grant.sha256;
+                  function verifyStream() {
+                    if (streamHasher && checkDigest) {
+                      var actualHex = streamHasher.hex().toLowerCase();
+                      if (actualHex === checkDigest.toLowerCase()) {
+                        if (card) {
+                          card.setBadge("Verified", "badge--verified");
+                          card.setMessage("Verified — Exact SHA-256 match! Saved directly to disk (" + actualHex.slice(0, 16) + "…).");
+                        }
+                      } else if (card) {
+                        card.setBadge("Verification failed", "badge--failed");
+                        card.setMessage("Verification failed — Streamed checksum mismatch!");
+                        var retry = el("button", "btn btn--small", "Retry Download");
+                        retry.type = "button";
+                        retry.addEventListener("click", function () {
+                          if (card && card.retry) card.retry(); else downloadSources(sources, btn);
+                        });
+                        card.setActions([retry]);
+                      }
+                    } else if (card) {
+                      card.setBadge("Downloaded", "badge--waiting");
+                      card.setMessage("File saved directly to disk.");
+                    }
+                  }
+                  if (!checkDigest && grant.progressId) {
+                    api("/api/download-progress/" + encodeURIComponent(grant.progressId)).then(function (p) {
+                      if (p && p.sha256) checkDigest = p.sha256;
+                      if (card && card.setDigest && checkDigest) card.setDigest(checkDigest);
+                      verifyStream();
+                    }).catch(verifyStream);
+                  } else {
+                    verifyStream();
+                  }
+                });
+              }
+
+              function scheduleRetry(errMsg, retryAfterMs) {
+                retries += 1;
+                var base = Math.min(15000, 1000 * Math.pow(2, retries - 1));
+                var delay = Math.round(base * (0.8 + Math.random() * 0.4));
+                // Honor a server-requested Retry-After (never shorter than the
+                // jittered backoff; the caller rejects waits beyond the cap).
+                if (typeof retryAfterMs === "number" && retryAfterMs > delay) delay = retryAfterMs;
+                if (card) {
+                  card.setBadge("Reconnecting…", "badge--waiting");
+                  card.setMessage("Interrupted (" + errMsg + ") — resuming from " + formatBytes(received) + " (attempt " + retries + "/" + MAX_DL_RETRIES + ")…");
+                }
+                return new Promise(function (resolve) {
+                  setTimeout(resolve, delay);
+                }).then(fetchAttempt);
+              }
+
+              function fetchAttempt() {
+                var headers = {};
+                if (received > 0) {
+                  headers["Range"] = "bytes=" + received + "-";
+                  if (isStrongETag(validatorETag)) {
+                    headers["If-Range"] = validatorETag;
+                  }
+                }
+                return fetch(grant.downloadUrl, { headers: headers, cache: "no-store" }).then(function (resp) {
+                  if (resp.status === 416 && received > 0 && totalSize !== null && received === totalSize) {
+                    return finishAndVerify();
+                  }
+                  if (!resp.ok) {
+                    var httpErr = new Error("HTTP " + resp.status);
+                    httpErr.status = resp.status;
+                    httpErr.retryAfterMs = window.FlitnixUpload ?
+                      FlitnixUpload.parseRetryAfterMs(resp.headers && resp.headers.get("Retry-After"), Date.now()) : 0;
+                    throw httpErr;
+                  }
+                  var respETag = resp.headers ? resp.headers.get("ETag") : "";
+                  if (resp.status === 200) {
+                    var cl = resp.headers ? parseInt(resp.headers.get("Content-Length") || "", 10) : NaN;
+                    totalSize = isFinite(cl) && cl >= 0 ? cl : null;
+                    if (isStrongETag(respETag)) validatorETag = respETag;
+                    if (received > 0) {
+                      // Server returned a fresh 200 representation (e.g. If-Range mismatch or archive).
+                      received = 0;
+                      streamHasher = (typeof sha256 !== "undefined" && sha256.create) ? sha256.create() : null;
+                      return writable.truncate(0).then(function () {
+                        return writable.seek(0);
+                      }).then(function () {
+                        return consumeBody(resp);
+                      });
+                    }
+                    return consumeBody(resp);
+                  }
+                  if (resp.status === 206) {
+                    var cr = parseContentRange(resp.headers ? resp.headers.get("Content-Range") : "");
+                    if (!cr || cr.start !== received) {
+                      var mismatchErr = new Error("Unexpected Content-Range offset");
+                      mismatchErr.fatal = true;
+                      throw mismatchErr;
+                    }
+                    if (cr.total !== null) totalSize = cr.total;
+                    if (!validatorETag && isStrongETag(respETag)) validatorETag = respETag;
+                    return consumeBody(resp);
+                  }
+                  return consumeBody(resp);
+                }).catch(function (err) {
+                  if (appState.ended) throw err;
+                  var retryAfterMs = err && typeof err.retryAfterMs === "number" ? err.retryAfterMs : 0;
+                  var retryable = !(err && (err.fatal || err.status === 401 || err.status === 403 || err.status === 404 || err.status === 410));
+                  if (retryable && retries < MAX_DL_RETRIES && received > 0) {
+                    if (retryAfterMs > MAX_AUTO_RETRY_WAIT_MS) {
+                      // Deferred: the server asked for a longer wait than the
+                      // automatic policy allows — surface it instead of retrying early.
+                      throw new Error("Server requested retry after " + formatRetryAfterMs(retryAfterMs));
+                    }
+                    return scheduleRetry(err && err.message ? err.message : "network error", retryAfterMs);
+                  }
+                  throw err;
+                });
+              }
+
+              function consumeBody(resp) {
                 var reader = resp.body.getReader();
-                var received = 0;
                 var lastUpdate = 0;
                 function pump() {
                   return reader.read().then(function (result) {
                     if (result.done) {
-                      return writable.close().then(function () {
-                        delete activeDownloads[dlKey];
-                        syncWakeLock();
-                        if (card) card.setBadge("Verifying…", "badge--verifying");
-                        var checkDigest = grant.sha256;
-                        function verifyStream() {
-                          if (streamHasher && checkDigest) {
-                            var actualHex = streamHasher.hex().toLowerCase();
-                            if (actualHex === checkDigest.toLowerCase()) {
-                              if (card) {
-                                card.setBadge("Verified", "badge--verified");
-                                card.setMessage("Verified — Exact SHA-256 match! Saved directly to disk (" + actualHex.slice(0, 16) + "…).");
-                              }
-                            } else {
-                              if (card) {
-                                card.setBadge("Verification failed", "badge--failed");
-                                card.setMessage("Verification failed — Streamed checksum mismatch!");
-                                var retry = el("button", "btn btn--small", "Retry Download");
-                                retry.type = "button";
-                                retry.addEventListener("click", function () { downloadSources(sources, btn); });
-                                card.setActions([retry]);
-                              }
-                            }
-                          } else if (card) {
-                            card.setBadge("Downloaded", "badge--waiting");
-                            card.setMessage("File saved directly to disk.");
-                          }
+                      if (totalSize !== null && received < totalSize) {
+                        var shortErr = new Error("stream ended early at " + formatBytes(received) + " / " + formatBytes(totalSize));
+                        if (retries < MAX_DL_RETRIES) {
+                          return scheduleRetry(shortErr.message);
                         }
-                        if (!checkDigest && grant.progressId) {
-                          api("/api/download-progress/" + encodeURIComponent(grant.progressId)).then(function (p) {
-                            if (p && p.sha256) checkDigest = p.sha256;
-                            if (card && card.setDigest && checkDigest) card.setDigest(checkDigest);
-                            verifyStream();
-                          }).catch(verifyStream);
-                        } else {
-                          verifyStream();
-                        }
-                      });
+                        throw shortErr;
+                      }
+                      return finishAndVerify();
                     }
+                    retries = 0;
                     if (streamHasher) streamHasher.update(result.value);
                     received += result.value.length;
                     var now = Date.now();
                     if (now - lastUpdate > 200) {
                       lastUpdate = now;
-                      if (card) card.setMessage("Streaming and hashing incrementally… (" + formatBytes(received) + ")");
+                      if (card) {
+                        card.setBadge("Downloading", "badge--downloading");
+                        card.setMessage("Streaming and hashing incrementally… (" + formatBytes(received) + (totalSize ? " / " + formatBytes(totalSize) : "") + ")");
+                      }
                     }
                     return writable.write(result.value).then(pump);
                   });
                 }
                 return pump();
+              }
+
+              return fetchAttempt().catch(function (err) {
+                return writable.abort().catch(function () {}).then(function () { throw err; });
               });
             });
           }).catch(function (e) {
@@ -1452,6 +1980,15 @@
               if (card) {
                 card.setBadge("Canceled", "badge--canceled");
                 card.setMessage("Download save prompt was canceled.");
+              }
+              return;
+            }
+            if (e && (e.status === 401 || e.status === 403 || e.status === 404 || e.status === 410)) {
+              delete activeDownloads[dlKey];
+              syncWakeLock();
+              if (card) {
+                card.setBadge("Canceled or interrupted", "badge--canceled");
+                card.setMessage("Download could not be resumed: " + e.message);
               }
               return;
             }
@@ -1505,8 +2042,15 @@
   }
 
   function updateDownloadSelection() {
+    if (browseState.source) {
+      var ids = Object.keys(browseState.selected);
+      downloadSelectedBtn.disabled = ids.length === 0;
+      downloadSelectedBtn.textContent = ids.length > 0 ? ("Download selected (" + ids.length + ")") : "Download selected";
+      return;
+    }
     var selected = filesEl.querySelectorAll(".source-check:checked");
     downloadSelectedBtn.disabled = selected.length === 0;
+    downloadSelectedBtn.textContent = "Download selected";
   }
 
   // Follows one archive/file download. It polls only while the download is
@@ -1533,7 +2077,9 @@
             if (sources && btn) {
               var retryBtn = el("button", "btn btn--small", "Retry Download");
               retryBtn.type = "button";
-              retryBtn.addEventListener("click", function () { downloadSources(sources, btn); });
+              retryBtn.addEventListener("click", function () {
+                if (card && card.retry) card.retry(); else downloadSources(sources, btn);
+              });
               card.setActions([retryBtn]);
             }
           }
@@ -1566,7 +2112,9 @@
             verifyLabel.appendChild(fileInput);
             var redownloadBtn = el("button", "btn btn--small btn--ghost", "Download Again");
             redownloadBtn.type = "button";
-            redownloadBtn.addEventListener("click", function () { downloadSources(sources, btn); });
+            redownloadBtn.addEventListener("click", function () {
+              if (card && card.retry) card.retry(); else downloadSources(sources, btn);
+            });
             card.setActions([verifyLabel, redownloadBtn]);
           }
           return;
@@ -1790,6 +2338,13 @@
     });
     refreshBtn.addEventListener("click", refreshFiles);
     downloadSelectedBtn.addEventListener("click", function () {
+      if (browseState.source) {
+        var ids = Object.keys(browseState.selected);
+        if (!ids.length) return;
+        var label = ids.length === 1 ? (browseState.itemNames[ids[0]] || "selected file") : (browseState.source.name + ".zip");
+        downloadSelectedFolderItems(browseState.source, ids, [{ id: ids[0], name: label }], downloadSelectedBtn);
+        return;
+      }
       var selected = Array.prototype.slice.call(filesEl.querySelectorAll(".source-check:checked"));
       var sources = selected.map(function (input) {
         return { id: input.value, name: input.getAttribute("aria-label") || "selected source" };

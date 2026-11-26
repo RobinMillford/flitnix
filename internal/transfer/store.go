@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/itsyamin/flitnix/internal/secfile"
 )
@@ -41,9 +43,11 @@ const DefaultReceiveSubpath = "Downloads/Flitnix"
 // are safe for concurrent use; PartFile instances are used by exactly one
 // streaming goroutine.
 type Store struct {
-	mu   sync.RWMutex
-	dir  string
-	link func(oldname, newname string) error
+	mu               sync.RWMutex
+	dir              string
+	link             func(oldname, newname string) error
+	metaKey          []byte
+	preserveModTimes atomic.Bool
 }
 
 // StoreConfig configures a Store.
@@ -51,6 +55,11 @@ type StoreConfig struct {
 	// Dir is the receive directory. Empty selects
 	// DefaultReceiveSubpath under the user's home directory.
 	Dir string
+
+	// MetaKey optionally sets the 32-byte HMAC-SHA256 key used to authenticate
+	// resumable staging metadata sidecars (.meta). When empty, an ephemeral
+	// cryptographic key is generated until SetMetaKey installs a durable key.
+	MetaKey []byte
 }
 
 // NewStore resolves the receive directory. The directory itself is created
@@ -69,7 +78,29 @@ func NewStore(cfg StoreConfig) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("transfer: cannot resolve receive directory %q: %w", dir, err)
 	}
-	return &Store{dir: abs}, nil
+	var key []byte
+	if len(cfg.MetaKey) > 0 {
+		key = append([]byte(nil), cfg.MetaKey...)
+	} else {
+		key = make([]byte, 32)
+		if _, rerr := rand.Read(key); rerr != nil {
+			return nil, fmt.Errorf("transfer: generating ephemeral metadata key: %w", rerr)
+		}
+	}
+	st := &Store{dir: abs, metaKey: key}
+	st.preserveModTimes.Store(true)
+	return st, nil
+}
+
+// SetPreserveModTimes controls whether committed uploads adopt the sender's
+// original modification timestamp when available.
+func (s *Store) SetPreserveModTimes(enabled bool) {
+	s.preserveModTimes.Store(enabled)
+}
+
+// PreserveModTimes reports whether original modification timestamp preservation is active.
+func (s *Store) PreserveModTimes() bool {
+	return s.preserveModTimes.Load()
 }
 
 // Dir returns the absolute receive directory.
@@ -77,6 +108,25 @@ func (s *Store) Dir() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.dir
+}
+
+// SetMetaKey installs the key used to authenticate resumable .meta sidecars.
+func (s *Store) SetMetaKey(key []byte) error {
+	if len(key) < 16 {
+		return errors.New("transfer: metadata authentication key is too short")
+	}
+	copied := append([]byte(nil), key...)
+	s.mu.Lock()
+	s.metaKey = copied
+	s.mu.Unlock()
+	return nil
+}
+
+// MetaKey returns a copy of the active metadata authentication key.
+func (s *Store) MetaKey() []byte {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]byte(nil), s.metaKey...)
 }
 
 // SetDir updates the receive directory. Empty resets to DefaultReceiveSubpath.
@@ -259,14 +309,23 @@ func (s *Store) withinDir(path string) bool {
 // Commit on success, Abort on any failure or cancellation. A PartFile is
 // used by exactly one goroutine at a time.
 type PartFile struct {
-	store    *Store
-	f        *os.File
-	path     string // absolute path of the part file
-	name     string // sanitized final filename candidate
-	finalDir string
+	store     *Store
+	f         *os.File
+	path      string // absolute path of the part file
+	name      string // sanitized final filename candidate
+	finalDir  string
+	modTimeMs int64
 
 	mu      sync.Mutex
 	decided bool // commit or abort already decided the fate of the part file
+}
+
+// SetModTimeMs records an optional sender modification timestamp (Unix ms) to apply
+// atomically prior to publishing the part file.
+func (p *PartFile) SetModTimeMs(ms int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.modTimeMs = ms
 }
 
 // OpenPart creates a unique part file for the sanitized name in the receive
@@ -297,6 +356,9 @@ func (s *Store) OpenPart(name string) (*PartFile, error) {
 		if err != nil {
 			if os.IsExist(err) {
 				continue // virtually impossible; retry with a new suffix
+			}
+			if IsNoSpaceError(err) {
+				return nil, fmt.Errorf("%w: %v", ErrInsufficientStorage, err)
 			}
 			return nil, fmt.Errorf("transfer: cannot create temporary file in %s: %w", dir, err)
 		}
@@ -415,6 +477,9 @@ func (s *Store) OpenPartPath(root, relativePath string) (*PartFile, error) {
 			if os.IsExist(err) {
 				continue
 			}
+			if IsNoSpaceError(err) {
+				return nil, fmt.Errorf("%w: %v", ErrInsufficientStorage, err)
+			}
 			return nil, fmt.Errorf("transfer: cannot create temporary folder file: %w", err)
 		}
 		if err := s.protectPartFile(f, path); err != nil {
@@ -449,6 +514,9 @@ func (p *PartFile) Name() string { return p.name }
 // desktop UI only.
 func (p *PartFile) PartPath() string { return p.path }
 
+// FinalDir returns the parent directory where the published file will land.
+func (p *PartFile) FinalDir() string { return p.finalDir }
+
 // Write appends bytes to the part file.
 func (p *PartFile) Write(b []byte) (int, error) {
 	return p.f.Write(b)
@@ -475,11 +543,18 @@ func (p *PartFile) Commit() (string, error) {
 	if err := p.f.Sync(); err != nil {
 		p.f.Close()
 		_ = os.Remove(p.path)
+		if IsNoSpaceError(err) {
+			return "", fmt.Errorf("%w: %v", ErrInsufficientStorage, err)
+		}
 		return "", fmt.Errorf("transfer: fsync of received data failed: %w", err)
 	}
 	if err := p.f.Close(); err != nil {
 		_ = os.Remove(p.path)
 		return "", fmt.Errorf("transfer: closing received file failed: %w", err)
+	}
+	if p.modTimeMs > 0 && p.store.PreserveModTimes() {
+		modTime := time.UnixMilli(p.modTimeMs)
+		_ = os.Chtimes(p.path, modTime, modTime)
 	}
 
 	for n := 0; n < commitVariants; n++ {

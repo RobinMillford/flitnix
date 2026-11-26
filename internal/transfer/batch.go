@@ -32,6 +32,8 @@ const (
 	BatchStatePending      BatchState = "pending"
 	BatchStateApproved     BatchState = "approved"
 	BatchStateTransferring BatchState = "transferring"
+	BatchStateInterrupted  BatchState = "interrupted"
+	BatchStatePaused       BatchState = "paused"
 	BatchStateCompleted    BatchState = "completed"
 	BatchStateFailed       BatchState = "failed"
 	BatchStateCanceled     BatchState = "canceled"
@@ -56,10 +58,13 @@ const (
 	ItemStatePending      ItemState = "pending"
 	ItemStateApproved     ItemState = "approved"
 	ItemStateTransferring ItemState = "transferring"
+	ItemStateInterrupted  ItemState = "interrupted"
+	ItemStatePaused       ItemState = "paused"
 	ItemStateCompleted    ItemState = "completed"
 	ItemStateFailed       ItemState = "failed"
 	ItemStateCanceled     ItemState = "canceled"
 	ItemStateRejected     ItemState = "rejected"
+	ItemStateDiscarded    ItemState = "discarded"
 )
 
 // TransferBatch is the internal batch record. SessionKey and the item
@@ -84,18 +89,19 @@ type TransferBatch struct {
 
 // TransferItem is the internal ordered item record.
 type TransferItem struct {
-	ID           string
-	BatchID      string
-	Sequence     int
-	RelativePath string
-	DisplayName  string
-	DeclaredSize int64
-	Transferred  int64
-	State        ItemState
-	SHA256       string
-	Error        string
-	SourcePath   string
-	ContentID    string
+	ID             string
+	BatchID        string
+	Sequence       int
+	RelativePath   string
+	DisplayName    string
+	DeclaredSize   int64
+	LastModifiedMs int64
+	Transferred    int64
+	State          ItemState
+	SHA256         string
+	Error          string
+	SourcePath     string
+	ContentID      string
 }
 
 // BatchManifest is the pure control-plane input validated before a batch is
@@ -109,12 +115,13 @@ type BatchManifest struct {
 }
 
 type ManifestItem struct {
-	ID           string `json:"id,omitempty"`
-	Sequence     int    `json:"sequence,omitempty"`
-	RelativePath string `json:"relativePath,omitempty"`
-	DisplayName  string `json:"displayName,omitempty"`
-	Size         int64  `json:"size"`
-	SHA256       string `json:"sha256,omitempty"`
+	ID             string `json:"id,omitempty"`
+	Sequence       int    `json:"sequence,omitempty"`
+	RelativePath   string `json:"relativePath,omitempty"`
+	DisplayName    string `json:"displayName,omitempty"`
+	Size           int64  `json:"size"`
+	LastModifiedMs int64  `json:"lastModifiedMs,omitempty"`
+	SHA256         string `json:"sha256,omitempty"`
 }
 
 // ManifestLimits bounds metadata retained in memory. The defaults are
@@ -189,6 +196,9 @@ func ValidateManifestWithLimits(manifest BatchManifest, limits ManifestLimits) (
 		}
 		if item.Size < 0 {
 			return ValidatedManifest{}, fmt.Errorf("%w: item size must not be negative", ErrInvalidBatch)
+		}
+		if err := ValidateModTimeMs(item.LastModifiedMs); err != nil {
+			return ValidatedManifest{}, fmt.Errorf("%w: %v", ErrInvalidBatch, err)
 		}
 		if item.Size > limits.MaxTotalBytes-out.TotalBytes {
 			return ValidatedManifest{}, fmt.Errorf("%w: declared total size overflows or exceeds the limit", ErrInvalidBatch)
@@ -282,16 +292,18 @@ type BatchView struct {
 }
 
 type ItemView struct {
-	ID           string    `json:"id"`
-	BatchID      string    `json:"batchId"`
-	Sequence     int       `json:"sequence"`
-	RelativePath string    `json:"relativePath,omitempty"`
-	DisplayName  string    `json:"displayName"`
-	DeclaredSize int64     `json:"declaredSize"`
-	Transferred  int64     `json:"transferred"`
-	State        ItemState `json:"state"`
-	SHA256       string    `json:"sha256,omitempty"`
-	Error        string    `json:"error,omitempty"`
+	ID             string    `json:"id"`
+	BatchID        string    `json:"batchId"`
+	Sequence       int       `json:"sequence"`
+	RelativePath   string    `json:"relativePath,omitempty"`
+	DisplayName    string    `json:"displayName"`
+	DeclaredSize   int64     `json:"declaredSize"`
+	LastModifiedMs int64     `json:"lastModifiedMs,omitempty"`
+	Transferred    int64     `json:"transferred"`
+	State          ItemState `json:"state"`
+	Resumable      bool      `json:"resumable,omitempty"`
+	SHA256         string    `json:"sha256,omitempty"`
+	Error          string    `json:"error,omitempty"`
 }
 
 func (b TransferBatch) View() BatchView {
@@ -309,10 +321,31 @@ func (b TransferBatch) View() BatchView {
 }
 
 func (i TransferItem) View() ItemView {
+	resumable := i.Transferred > 0 && (i.State == ItemStateInterrupted || i.State == ItemStatePaused || i.State == ItemStateQueued || i.State == ItemStateTransferring)
 	return ItemView{
 		ID: i.ID, BatchID: i.BatchID, Sequence: i.Sequence,
 		RelativePath: i.RelativePath, DisplayName: i.DisplayName,
-		DeclaredSize: i.DeclaredSize, Transferred: i.Transferred,
-		State: i.State, SHA256: i.SHA256, Error: i.Error,
+		DeclaredSize: i.DeclaredSize, LastModifiedMs: i.LastModifiedMs,
+		Transferred: i.Transferred, State: i.State, Resumable: resumable,
+		SHA256: i.SHA256, Error: i.Error,
 	}
+}
+
+// MaxModTimeFutureSkew bounds how far into the future a client-supplied file
+// modification timestamp may lie before validation rejects it.
+const MaxModTimeFutureSkew = 7 * 24 * time.Hour
+
+// ValidateModTimeMs validates an optional Unix millisecond timestamp (0 means
+// unspecified). Rejects negative values and unreasonable future timestamps.
+func ValidateModTimeMs(ms int64) error {
+	if ms == 0 {
+		return nil
+	}
+	if ms < 0 {
+		return errors.New("lastModifiedMs must not be negative")
+	}
+	if maxMs := time.Now().Add(MaxModTimeFutureSkew).UnixMilli(); ms > maxMs {
+		return errors.New("lastModifiedMs exceeds allowed clock skew")
+	}
+	return nil
 }

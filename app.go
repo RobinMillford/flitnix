@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -151,15 +152,19 @@ type TextMessageView struct {
 // in flight or finished). Received file paths are deliberately not part of
 // the projection: the UI names uploads by their opaque ID and state.
 type UploadView struct {
-	ID       string    `json:"id"`
-	Name     string    `json:"name"`
-	Size     int64     `json:"size"`
-	Created  time.Time `json:"created"`
-	State    string    `json:"state"`
-	Uploaded int64     `json:"uploaded"`
-	Speed    float64   `json:"speed"`
-	SHA256   string    `json:"sha256,omitempty"`
-	Reason   string    `json:"reason,omitempty"`
+	ID              string    `json:"id"`
+	Name            string    `json:"name"`
+	Size            int64     `json:"size"`
+	Created         time.Time `json:"created"`
+	State           string    `json:"state"`
+	Uploaded        int64     `json:"uploaded"`
+	Speed           float64   `json:"speed"`
+	SHA256          string    `json:"sha256,omitempty"`
+	Reason          string    `json:"reason,omitempty"`
+	Resumable       bool      `json:"resumable,omitempty"`
+	CommittedOffset int64     `json:"committedOffset,omitempty"`
+	StorageFits     bool      `json:"storageFits"`
+	StorageWarning  string    `json:"storageWarning,omitempty"`
 }
 
 type DownloadView struct {
@@ -201,16 +206,18 @@ type SharedSourceView struct {
 }
 
 type BatchItemView struct {
-	ID           string `json:"id"`
-	BatchID      string `json:"batchId"`
-	Sequence     int    `json:"sequence"`
-	RelativePath string `json:"relativePath,omitempty"`
-	DisplayName  string `json:"displayName"`
-	DeclaredSize int64  `json:"declaredSize"`
-	Transferred  int64  `json:"transferred"`
-	State        string `json:"state"`
-	SHA256       string `json:"sha256,omitempty"`
-	Error        string `json:"error,omitempty"`
+	ID             string `json:"id"`
+	BatchID        string `json:"batchId"`
+	Sequence       int    `json:"sequence"`
+	RelativePath   string `json:"relativePath,omitempty"`
+	DisplayName    string `json:"displayName"`
+	DeclaredSize   int64  `json:"declaredSize"`
+	LastModifiedMs int64  `json:"lastModifiedMs,omitempty"`
+	Transferred    int64  `json:"transferred"`
+	State          string `json:"state"`
+	Resumable      bool   `json:"resumable,omitempty"`
+	SHA256         string `json:"sha256,omitempty"`
+	Error          string `json:"error,omitempty"`
 }
 
 type BatchView struct {
@@ -228,6 +235,8 @@ type BatchView struct {
 	StartedAt          time.Time       `json:"startedAt,omitempty"`
 	CompletedAt        time.Time       `json:"completedAt,omitempty"`
 	Error              string          `json:"error,omitempty"`
+	StorageFits        bool            `json:"storageFits"`
+	StorageWarning     string          `json:"storageWarning,omitempty"`
 }
 
 // SettingsView is the UI projection of persistent user settings.
@@ -238,6 +247,7 @@ type SettingsView struct {
 	DownloadDir        string `json:"downloadDir"`
 	EffectiveDir       string `json:"effectiveDir"`
 	AutoStartSession   bool   `json:"autoStartSession"`
+	PreserveModTimes   bool   `json:"preserveModTimes"`
 	PreferredInterface string `json:"preferredInterface"`
 }
 
@@ -246,6 +256,8 @@ type App struct {
 	ctx context.Context
 
 	store         *transfer.Store
+	quota         *transfer.QuotaManager
+	recoveryDir   string
 	settingsStore *settings.Store
 	sessions      *session.Manager
 	transfers     *transfer.Service
@@ -281,6 +293,7 @@ type App struct {
 
 	srvMu       sync.Mutex
 	srv         *server.Server
+	srvListen   string
 	serveCancel context.CancelFunc
 	serveDone   chan error
 
@@ -321,6 +334,9 @@ func NewApp() (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	if settingsStore != nil {
+		store.SetPreserveModTimes(settingsStore.Get().PreserveModTimes)
+	}
 	auditStore, err := audit.NewStore(filepath.Join(dataDir, "audit.jsonl"), 10000)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "flitnix: audit store initialization warning: %v\n", err)
@@ -345,14 +361,20 @@ func NewApp() (*App, error) {
 		fmt.Fprintf(os.Stderr, "flitnix: pairing lockout persistence warning: %v\n", err)
 	}
 
+	quota := transfer.NewQuotaManager(transfer.QuotaConfig{DefaultDir: store.Dir()})
+	guestMgr := guest.NewManager()
+	guestMgr.SetQuotaManager(quota)
+
 	a := &App{
 		store:         store,
+		quota:         quota,
+		recoveryDir:   filepath.Join(dataDir, "recovery"),
 		settingsStore: settingsStore,
-		transfers:     transfer.NewService(transfer.Config{Store: store}),
+		transfers:     transfer.NewService(transfer.Config{Store: store, Quota: quota}),
 		coordinator:   transfer.NewCoordinator(transfer.CoordinatorConfig{}),
 		registry:      transfer.NewRegistry(),
 		downloads:     transfer.NewDownloadRegistry(),
-		guestMgr:      guest.NewManager(),
+		guestMgr:      guestMgr,
 		textStore:     textmsg.NewStore(),
 		auditStore:    auditStore,
 		templateStore: templateStore,
@@ -626,7 +648,7 @@ func (a *App) ensureServer(listen string) error {
 	defer a.srvMu.Unlock()
 
 	if a.srv != nil {
-		if got := a.srv.Addr(); got != nil && got.String() == listen {
+		if a.srvListen == listen || (a.srv.Addr() != nil && sameListenAddr(a.srv.Addr().String(), listen)) {
 			return nil
 		}
 		fmt.Fprintf(os.Stderr, "flitnix: the listen address changed; the existing sessions cannot stay reachable: pairing_replacement\n")
@@ -636,12 +658,45 @@ func (a *App) ensureServer(listen string) error {
 	return a.startServerLocked(listen)
 }
 
+// sameListenAddr reports whether two host:port listen addresses are equivalent,
+// tolerating IPv6 bracketing and non-canonical IP spellings so that
+// a.srv.Addr().String() can be compared to a computed listen address without
+// false mismatches (which would trigger spurious endAllSessions/pairing
+// replacement). Platform-independent.
+func sameListenAddr(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == b {
+		return true
+	}
+	ha, pa, aErr := net.SplitHostPort(a)
+	hb, pb, bErr := net.SplitHostPort(b)
+	if aErr != nil || bErr != nil {
+		return false
+	}
+	if pa != pb {
+		return false
+	}
+	ha = strings.Trim(ha, "[]")
+	hb = strings.Trim(hb, "[]")
+	if ha == hb {
+		return true
+	}
+	ipa, errA := netip.ParseAddr(ha)
+	ipb, errB := netip.ParseAddr(hb)
+	if errA == nil && errB == nil && ipa == ipb {
+		return true
+	}
+	return false
+}
+
 // startServerLocked constructs and serves a new server on listen and
 // waits (bounded) for the listener to bind, so StartSession never hands
 // out a token before the server is reachable. Callers must hold srvMu.
 func (a *App) startServerLocked(listen string) error {
 	srv := server.New(server.Config{
-		ListenAddr: listen,
+		ListenAddr:  listen,
+		RecoveryDir: a.recoveryDir,
 		Services: &server.Services{
 			Sessions:       a.sessions,
 			Transfers:      a.transfers,
@@ -669,6 +724,7 @@ func (a *App) startServerLocked(listen string) error {
 		return fmt.Errorf("flitnix: the local server could not start on %s: %w", listen, err)
 	case <-srv.Ready():
 		a.srv, a.serveCancel, a.serveDone = srv, cancel, done
+		a.srvListen = listen
 		return nil
 	case <-time.After(3 * time.Second):
 		cancel()
@@ -698,6 +754,7 @@ func (a *App) stopServerLocked() {
 		// mean an already-stranded Serve, which nothing here can fix.
 	}
 	a.srv, a.serveCancel, a.serveDone = nil, nil, nil
+	a.srvListen = ""
 }
 
 // endAllSessions ends every active session, mirroring EndSession for all
@@ -1048,7 +1105,12 @@ func (a *App) ListSessions() []SessionView {
 
 // ListPendingUploads returns the uploads awaiting the desktop's decision.
 func (a *App) ListPendingUploads() []UploadView {
-	return uploadViews(a.transfers.ListPending())
+	list := a.transfers.ListPending()
+	out := make([]UploadView, 0, len(list))
+	for _, u := range list {
+		out = append(out, a.uploadViewWithStorage(u))
+	}
+	return out
 }
 
 // RecentUploads returns every live and recently finished standalone upload,
@@ -1089,7 +1151,7 @@ func (a *App) ApproveUpload(id string) (UploadView, error) {
 	if err != nil {
 		return UploadView{}, err
 	}
-	return uploadView(up), nil
+	return a.uploadViewWithStorage(up), nil
 }
 
 // RejectUpload refuses the pending upload with the given ID.
@@ -1129,9 +1191,13 @@ func (a *App) requireStandalone(id string) error {
 // decision. A batch leaves this list the moment it is approved, rejected,
 // canceled or ended with its session.
 func (a *App) ListPendingBatches() []BatchView {
-	return a.listBatches(func(v transfer.BatchView) bool {
+	views := a.listBatches(func(v transfer.BatchView) bool {
 		return v.ApprovalState == transfer.ApprovalPending && v.State == transfer.BatchStatePending
 	})
+	for i := range views {
+		views[i] = a.enrichPendingBatchStorage(views[i])
+	}
+	return views
 }
 
 func (a *App) ListBatches() []BatchView {
@@ -1260,6 +1326,9 @@ func (a *App) ApproveBatch(id string) (BatchView, error) {
 			transfer.ErrInvalidTransition)
 	}
 	if err := a.transfers.DecideBatchItems(ids, true); err != nil {
+		if errors.Is(err, transfer.ErrInsufficientStorage) {
+			return BatchView{}, err
+		}
 		// Some record was not pending (for example, it was canceled with its
 		// session). Nothing was approved, and a batch that cannot be released
 		// whole must not stay pending, so close it out in both subsystems.
@@ -1346,6 +1415,72 @@ func (a *App) CancelBatch(id string) error {
 	// and os.Remove refuses it.
 	a.discardEmptyRoot(v)
 	return nil
+}
+
+// PauseBatch suspends an active or interrupted incoming batch while preserving
+// its durably committed partial bytes and staging sidecars for resumption.
+func (a *App) PauseBatch(id string) (BatchView, error) {
+	a.batchMu.Lock()
+	defer a.batchMu.Unlock()
+	key, err := a.findBatchSession(id)
+	if err != nil {
+		return BatchView{}, err
+	}
+	v, contentIDs, err := a.coordinator.PauseBatch(key, id)
+	if err != nil {
+		return BatchView{}, err
+	}
+	for _, cid := range contentIDs {
+		_ = a.transfers.Pause(cid)
+	}
+	return batchView(v), nil
+}
+
+// ResumeBatch re-enables a paused or interrupted batch so clients can continue
+// streaming from their authoritative HEAD offsets.
+func (a *App) ResumeBatch(id string) (BatchView, error) {
+	a.batchMu.Lock()
+	defer a.batchMu.Unlock()
+	key, err := a.findBatchSession(id)
+	if err != nil {
+		return BatchView{}, err
+	}
+	v, contentIDs, err := a.coordinator.ResumeBatch(key, id)
+	if err != nil {
+		return BatchView{}, err
+	}
+	for _, cid := range contentIDs {
+		_ = a.transfers.Resume(cid)
+	}
+	return batchView(v), nil
+}
+
+// DiscardBatch explicitly discards unfinished partial uploads in a batch,
+// deleting .part/.meta files and releasing storage quota reservations.
+func (a *App) DiscardBatch(id string) error {
+	a.batchMu.Lock()
+	defer a.batchMu.Unlock()
+	key, err := a.findBatchSession(id)
+	if err != nil {
+		return err
+	}
+	v, contentIDs, err := a.coordinator.DiscardBatch(key, id)
+	if err != nil {
+		return err
+	}
+	for _, cid := range contentIDs {
+		_ = a.transfers.Discard(cid)
+	}
+	a.discardEmptyRoot(v)
+	return nil
+}
+
+// DiscardUpload explicitly discards a standalone interrupted or paused upload.
+func (a *App) DiscardUpload(id string) error {
+	if err := a.requireStandalone(id); err != nil {
+		return err
+	}
+	return a.transfers.Discard(id)
 }
 
 // listBatches merges the coordinator's batch records over every session
@@ -1538,10 +1673,11 @@ func (a *App) ReceiveDirectory() string { return a.store.Dir() }
 func (a *App) GetSettings() SettingsView {
 	if a.settingsStore == nil {
 		return SettingsView{
-			Version:      settings.CurrentSchemaVersion,
-			Theme:        settings.ThemeSystem,
-			Locale:       "system",
-			EffectiveDir: a.store.Dir(),
+			Version:          settings.CurrentSchemaVersion,
+			Theme:            settings.ThemeSystem,
+			Locale:           "system",
+			EffectiveDir:     a.store.Dir(),
+			PreserveModTimes: true,
 		}
 	}
 	s := a.settingsStore.Get()
@@ -1552,6 +1688,7 @@ func (a *App) GetSettings() SettingsView {
 		DownloadDir:        s.DownloadDir,
 		EffectiveDir:       a.store.Dir(),
 		AutoStartSession:   s.AutoStartSession,
+		PreserveModTimes:   s.PreserveModTimes,
 		PreferredInterface: s.PreferredInterface,
 	}
 }
@@ -1565,7 +1702,8 @@ func (a *App) hasActiveTransfers() bool {
 			return true
 		}
 		for _, u := range a.transfers.List() {
-			if u.State == transfer.StateUploading || u.State == transfer.StateApproved {
+			if u.State == transfer.StateUploading || u.State == transfer.StateApproved ||
+				u.State == transfer.StateInterrupted || u.State == transfer.StatePaused {
 				return true
 			}
 		}
@@ -1577,7 +1715,9 @@ func (a *App) hasActiveTransfers() bool {
 				for _, b := range batches {
 					if b.State == transfer.BatchStateTransferring ||
 						b.State == transfer.BatchStateQueued ||
-						b.State == transfer.BatchStateApproved {
+						b.State == transfer.BatchStateApproved ||
+						b.State == transfer.BatchStateInterrupted ||
+						b.State == transfer.BatchStatePaused {
 						return true
 					}
 				}
@@ -1614,14 +1754,19 @@ func (a *App) SaveSettings(view SettingsView) error {
 		Locale:             view.Locale,
 		DownloadDir:        view.DownloadDir,
 		AutoStartSession:   view.AutoStartSession,
+		PreserveModTimes:   view.PreserveModTimes,
 		PreferredInterface: view.PreferredInterface,
 	}
 	if err := a.settingsStore.Save(s); err != nil {
 		return err
 	}
 	if a.store != nil {
+		a.store.SetPreserveModTimes(a.settingsStore.Get().PreserveModTimes)
 		if err := a.store.SetDir(s.DownloadDir); err != nil {
 			return err
+		}
+		if a.quota != nil {
+			a.quota.SetDefaultDir(a.store.Dir())
 		}
 	}
 	if a.netMonitor != nil {
@@ -1644,9 +1789,22 @@ func (a *App) ResetSettings() (SettingsView, error) {
 		return SettingsView{}, err
 	}
 	if a.store != nil {
+		a.store.SetPreserveModTimes(a.settingsStore.Get().PreserveModTimes)
 		_ = a.store.SetDir("")
+		if a.quota != nil {
+			a.quota.SetDefaultDir(a.store.Dir())
+		}
 	}
 	return a.GetSettings(), nil
+}
+
+// GetStorageStatus returns free disk space, active transfer reservations,
+// and available transfer headroom for the effective receive directory.
+func (a *App) GetStorageStatus() transfer.StorageStatus {
+	if a.quota == nil {
+		return transfer.InspectStorageUnknown(a.ReceiveDirectory())
+	}
+	return a.quota.Status(a.ReceiveDirectory())
 }
 
 // SelectDownloadDirectory opens the native directory dialog for choosing the download directory.
@@ -1689,17 +1847,55 @@ func sessionView(s *session.Session, token string) SessionView {
 	}
 }
 
+func (a *App) uploadViewWithStorage(u transfer.Upload) UploadView {
+	v := uploadView(u)
+	v.StorageFits = true
+	if u.State == transfer.StatePending && a.transfers != nil {
+		fits, st := a.transfers.CheckStorageFit([]string{u.ID}, u.Size)
+		v.StorageFits = fits
+		if !fits {
+			v.StorageWarning = fmt.Sprintf("Insufficient disk space (%d bytes headroom)", st.HeadroomBytes)
+		}
+	}
+	return v
+}
+
+func (a *App) enrichPendingBatchStorage(v BatchView) BatchView {
+	v.StorageFits = true
+	if v.ApprovalState == string(transfer.ApprovalPending) && a.transfers != nil {
+		var ids []string
+		if key, err := a.findBatchSession(v.ID); err == nil {
+			for _, item := range v.Items {
+				if item.State == string(transfer.ItemStatePending) {
+					if cid, cidErr := a.coordinator.ItemContentID(key, v.ID, item.ID); cidErr == nil && cid != "" {
+						ids = append(ids, cid)
+					}
+				}
+			}
+		}
+		fits, st := a.transfers.CheckStorageFit(ids, v.DeclaredTotalBytes)
+		v.StorageFits = fits
+		if !fits {
+			v.StorageWarning = fmt.Sprintf("Exceeds available disk headroom (%d bytes available)", st.HeadroomBytes)
+		}
+	}
+	return v
+}
+
 func uploadView(u transfer.Upload) UploadView {
 	return UploadView{
-		ID:       u.ID,
-		Name:     u.Name,
-		Size:     u.Size,
-		Created:  u.Created,
-		State:    string(u.State),
-		Uploaded: u.Uploaded,
-		Speed:    u.Speed,
-		SHA256:   u.SHA256,
-		Reason:   u.Reason,
+		ID:              u.ID,
+		Name:            u.Name,
+		Size:            u.Size,
+		Created:         u.Created,
+		State:           string(u.State),
+		Uploaded:        u.Uploaded,
+		Speed:           u.Speed,
+		SHA256:          u.SHA256,
+		Reason:          u.Reason,
+		Resumable:       u.Resumable,
+		CommittedOffset: u.CommittedOffset,
+		StorageFits:     true,
 	}
 }
 
@@ -1738,8 +1934,9 @@ func batchView(b transfer.BatchView) BatchView {
 		items = append(items, BatchItemView{
 			ID: item.ID, BatchID: item.BatchID, Sequence: item.Sequence,
 			RelativePath: item.RelativePath, DisplayName: item.DisplayName,
-			DeclaredSize: item.DeclaredSize, Transferred: item.Transferred,
-			State: string(item.State), SHA256: item.SHA256, Error: item.Error,
+			DeclaredSize: item.DeclaredSize, LastModifiedMs: item.LastModifiedMs,
+			Transferred: item.Transferred, State: string(item.State),
+			Resumable: item.Resumable, SHA256: item.SHA256, Error: item.Error,
 		})
 	}
 	return BatchView{
@@ -1748,7 +1945,7 @@ func batchView(b transfer.BatchView) BatchView {
 		DeclaredTotalBytes: b.DeclaredTotalBytes, TransferredBytes: b.TransferredBytes,
 		State: string(b.State), ApprovalState: string(b.ApprovalState),
 		CreatedAt: b.CreatedAt, StartedAt: b.StartedAt, CompletedAt: b.CompletedAt,
-		Error: b.Error,
+		Error: b.Error, StorageFits: true,
 	}
 }
 

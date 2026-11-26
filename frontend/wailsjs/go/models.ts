@@ -464,6 +464,7 @@ export namespace main {
 	    declaredSize: number;
 	    transferred: number;
 	    state: string;
+	    resumable?: boolean;
 	    sha256?: string;
 	    error?: string;
 
@@ -481,6 +482,7 @@ export namespace main {
 	        this.declaredSize = source["declaredSize"];
 	        this.transferred = source["transferred"];
 	        this.state = source["state"];
+	        this.resumable = source["resumable"];
 	        this.sha256 = source["sha256"];
 	        this.error = source["error"];
 	    }
@@ -503,6 +505,8 @@ export namespace main {
 	    // Go type: time
 	    completedAt?: any;
 	    error?: string;
+	    storageFits: boolean;
+	    storageWarning?: string;
 
 	    static createFrom(source: any = {}) {
 	        return new BatchView(source);
@@ -524,6 +528,8 @@ export namespace main {
 	        this.startedAt = this.convertValues(source["startedAt"], null);
 	        this.completedAt = this.convertValues(source["completedAt"], null);
 	        this.error = source["error"];
+	        this.storageFits = source["storageFits"];
+	        this.storageWarning = source["storageWarning"];
 	    }
 
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -903,6 +909,7 @@ export namespace main {
 	    downloadDir: string;
 	    effectiveDir: string;
 	    autoStartSession: boolean;
+	    preserveModTimes: boolean;
 	    preferredInterface: string;
 
 	    static createFrom(source: any = {}) {
@@ -917,6 +924,7 @@ export namespace main {
 	        this.downloadDir = source["downloadDir"];
 	        this.effectiveDir = source["effectiveDir"];
 	        this.autoStartSession = source["autoStartSession"];
+	        this.preserveModTimes = source["preserveModTimes"] !== undefined ? source["preserveModTimes"] : true;
 	        this.preferredInterface = source["preferredInterface"];
 	    }
 	}
@@ -1052,6 +1060,10 @@ export namespace main {
 	    speed: number;
 	    sha256?: string;
 	    reason?: string;
+	    resumable?: boolean;
+	    committedOffset?: number;
+	    storageFits: boolean;
+	    storageWarning?: string;
 
 	    static createFrom(source: any = {}) {
 	        return new UploadView(source);
@@ -1068,6 +1080,10 @@ export namespace main {
 	        this.speed = source["speed"];
 	        this.sha256 = source["sha256"];
 	        this.reason = source["reason"];
+	        this.resumable = source["resumable"];
+	        this.committedOffset = source["committedOffset"];
+	        this.storageFits = source["storageFits"];
+	        this.storageWarning = source["storageWarning"];
 	    }
 
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -1209,6 +1225,45 @@ export namespace power {
 	        this.active = source["active"];
 	        this.holders = source["holders"];
 	        this.reason = source["reason"];
+	        this.error = source["error"];
+	    }
+	}
+
+}
+
+export namespace transfer {
+
+	export class StorageStatus {
+	    targetDir: string;
+	    probeDir: string;
+	    targetExists: boolean;
+	    available: boolean;
+	    status: string;
+	    totalBytes: number;
+	    freeBytes: number;
+	    usedBytes: number;
+	    reservedBytes: number;
+	    headroomBytes: number;
+	    safetyMargin: number;
+	    error?: string;
+
+	    static createFrom(source: any = {}) {
+	        return new StorageStatus(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.targetDir = source["targetDir"];
+	        this.probeDir = source["probeDir"];
+	        this.targetExists = source["targetExists"];
+	        this.available = source["available"];
+	        this.status = source["status"];
+	        this.totalBytes = source["totalBytes"];
+	        this.freeBytes = source["freeBytes"];
+	        this.usedBytes = source["usedBytes"];
+	        this.reservedBytes = source["reservedBytes"];
+	        this.headroomBytes = source["headroomBytes"];
+	        this.safetyMargin = source["safetyMargin"];
 	        this.error = source["error"];
 	    }
 	}

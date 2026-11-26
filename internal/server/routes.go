@@ -312,14 +312,19 @@ func newAPIMux(services *Services, stall time.Duration, grants *DownloadGrantSto
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/uploads", handleUploadDeclare(services, stall))
 	mux.HandleFunc("GET /api/uploads/{id}", handleUploadStatus(services))
+	mux.HandleFunc("HEAD /api/uploads/{id}/content", handleUploadHead(services))
+	mux.HandleFunc("PATCH /api/uploads/{id}/content", handleUploadPatch(services, stall))
 	mux.HandleFunc("PUT /api/uploads/{id}/content", handleUploadContent(services, stall))
 	mux.HandleFunc("POST /api/batches", handleBatchCreate(services))
 	mux.HandleFunc("GET /api/batches/{id}", handleBatchStatus(services))
 	mux.HandleFunc("DELETE /api/batches/{id}/items/{itemID}", handleBatchItemCancel(services))
+	mux.HandleFunc("HEAD /api/batches/{batchID}/items/{itemID}/content", handleBatchHead(services))
+	mux.HandleFunc("PATCH /api/batches/{batchID}/items/{itemID}/content", handleBatchPatch(services, stall))
 	mux.HandleFunc("PUT /api/batches/{batchID}/items/{itemID}/content", handleBatchContent(services, stall))
 	mux.HandleFunc("GET /api/files", serveFilesList(services))
 	mux.HandleFunc("GET /api/files/{id}/download", serveFileDownload(services, stall))
 	mux.HandleFunc("GET /api/sources", serveSourcesList(services))
+	mux.HandleFunc("GET /api/sources/{id}/items", serveSourceItems(services))
 	mux.HandleFunc("POST /api/download-grants", createDownloadGrant(services, grants))
 	mux.HandleFunc("GET /api/download-progress/{id}", serveDownloadProgress(services, grants))
 	mux.HandleFunc("POST /api/text", handleTextMessageSend(services))
@@ -596,14 +601,19 @@ func handleUploadDeclare(svcs *Services, _ time.Duration) http.HandlerFunc {
 		}
 
 		var meta struct {
-			Name   string `json:"name"`
-			Size   int64  `json:"size"`
-			SHA256 string `json:"sha256,omitempty"`
+			Name           string `json:"name"`
+			Size           int64  `json:"size"`
+			LastModifiedMs int64  `json:"lastModifiedMs,omitempty"`
+			SHA256         string `json:"sha256,omitempty"`
 		}
 		dec := json.NewDecoder(bytes.NewReader(body))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&meta); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid upload metadata JSON")
+			return
+		}
+		if err := transfer.ValidateModTimeMs(meta.LastModifiedMs); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid lastModifiedMs")
 			return
 		}
 
@@ -681,6 +691,14 @@ func handleUploadDeclare(svcs *Services, _ time.Duration) http.HandlerFunc {
 		up, err := svcs.Transfers.DeclareWithDigest(sess.Key(), meta.Name, meta.Size, meta.SHA256, authDeviceID)
 		switch {
 		case err == nil:
+			if meta.LastModifiedMs > 0 {
+				if mErr := svcs.Transfers.SetUploadModTime(up.ID, meta.LastModifiedMs); mErr != nil {
+					_ = svcs.Transfers.Cancel(up.ID)
+					writeError(w, http.StatusBadRequest, "invalid lastModifiedMs")
+					return
+				}
+				up.LastModifiedMs = meta.LastModifiedMs
+			}
 			if autoApproveUpload {
 				if decidedUp, decErr := svcs.Transfers.Decide(up.ID, true); decErr == nil {
 					up = decidedUp
@@ -691,8 +709,12 @@ func handleUploadDeclare(svcs *Services, _ time.Duration) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "invalid filename or size")
 			return
 		case errors.Is(err, transfer.ErrNoCapacity):
+			w.Header().Set("Retry-After", "1")
 			writeError(w, http.StatusServiceUnavailable,
 				"too many pending uploads; wait for the desktop to decide on the existing ones")
+			return
+		case errors.Is(err, transfer.ErrInsufficientStorage):
+			writeInsufficientStorage(w)
 			return
 		default:
 			writeError(w, http.StatusInternalServerError, "upload declaration failed")
@@ -955,16 +977,44 @@ func handleBatchCreate(svcs *Services) http.HandlerFunc {
 			}
 		}
 
+		var quotaTempID string
+		if quota := svcs.Transfers.Quota(); quota != nil {
+			dir := svcs.Transfers.Store().Dir()
+			if autoApproveBatch {
+				tempID, qidErr := transfer.NewOpaqueID()
+				if qidErr != nil {
+					writeBatchError(w, qidErr)
+					return
+				}
+				quotaTempID = "batch-pending:" + tempID
+				if qerr := quota.Reserve(quotaTempID, sess.Key(), dir, validated.TotalBytes); qerr != nil {
+					writeBatchError(w, qerr)
+					return
+				}
+			} else {
+				if _, qerr := quota.CheckAvailable(dir, validated.TotalBytes); qerr != nil {
+					writeBatchError(w, qerr)
+					return
+				}
+			}
+		}
+
 		var resolvedRoot string
 		if manifest.Kind == transfer.BatchKindFolder {
 			resolvedRoot, err = svcs.Transfers.Store().AllocateFolderRoot(manifest.RootName)
 			if err != nil {
+				if quotaTempID != "" {
+					svcs.Transfers.Quota().Release(quotaTempID)
+				}
 				writeBatchError(w, err)
 				return
 			}
 		}
 		view, err := svcs.Coordinator.CreateBatch(sess.Key(), manifest)
 		if err != nil {
+			if quotaTempID != "" {
+				svcs.Transfers.Quota().Release(quotaTempID)
+			}
 			// Undo the on-disk root reservation: the batch will never
 			// exist, so the empty directory must not linger on the
 			// desktop's receive disk.
@@ -977,7 +1027,11 @@ func handleBatchCreate(svcs *Services) http.HandlerFunc {
 		// requests. A failure part-way must leave nothing behind: cancel the
 		// records already declared as well as the batch itself.
 		declared := make([]string, 0, len(view.Items))
+		quotaItems := make([]transfer.QuotaBatchItem, 0, len(view.Items))
 		abort := func(cause error) {
+			if quotaTempID != "" {
+				svcs.Transfers.Quota().Release(quotaTempID)
+			}
 			// A failed reserve loop cannot have streamed content in the
 			// pre-approval window (content needs an approved item), so
 			// the discard sees an empty directory; nothing is removed
@@ -996,16 +1050,28 @@ func handleBatchCreate(svcs *Services) http.HandlerFunc {
 			if manifest.Kind == transfer.BatchKindFolder {
 				root, relative = resolvedRoot, item.RelativePath
 			}
-			up, declareErr := svcs.Transfers.DeclareBatchItemWithDigest(sess.Key(), root, relative, item.DisplayName, item.DeclaredSize, item.SHA256, authDeviceID)
+			up, declareErr := svcs.Transfers.DeclareBatchItemPreReserved(sess.Key(), root, relative, item.DisplayName, item.DeclaredSize, item.SHA256, authDeviceID)
 			if declareErr != nil {
 				abort(declareErr)
 				return
 			}
+			if item.LastModifiedMs > 0 {
+				if mErr := svcs.Transfers.SetUploadModTime(up.ID, item.LastModifiedMs); mErr != nil {
+					abort(fmt.Errorf("%w: invalid lastModifiedMs: %v", transfer.ErrInvalidBatch, mErr))
+					return
+				}
+			}
 			declared = append(declared, up.ID)
+			quotaItems = append(quotaItems, transfer.QuotaBatchItem{ID: up.ID, Bytes: item.DeclaredSize})
+			svcs.Transfers.SetBatchContext(up.ID, view.ID, item.ID)
 			if mapErr := svcs.Coordinator.SetItemContentID(sess.Key(), view.ID, item.ID, up.ID); mapErr != nil {
 				abort(mapErr)
 				return
 			}
+		}
+		if quotaTempID != "" {
+			svcs.Transfers.Quota().Replace(quotaTempID, sess.Key(), svcs.Transfers.Store().Dir(), quotaItems)
+			quotaTempID = ""
 		}
 		if autoApproveBatch {
 			if decErr := svcs.Transfers.DecideBatchItems(declared, true); decErr != nil {
@@ -1253,6 +1319,13 @@ func failBatch(svcs *Services, sessionKey string, lease transfer.TransferLease, 
 	}
 }
 
+func writeInsufficientStorage(w http.ResponseWriter) {
+	writeJSON(w, http.StatusInsufficientStorage, map[string]string{
+		"code":  "insufficient_storage",
+		"error": "Desktop storage is low. Free up disk space before sending these files.",
+	})
+}
+
 func writeBatchError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, transfer.ErrBatchNotFound), errors.Is(err, transfer.ErrItemNotFound),
@@ -1264,6 +1337,8 @@ func writeBatchError(w http.ResponseWriter, err error) {
 	case errors.Is(err, transfer.ErrInvalidBatch), errors.Is(err, transfer.ErrInvalidFilename),
 		errors.Is(err, transfer.ErrInvalidRelativePath):
 		writeError(w, http.StatusBadRequest, "invalid batch manifest")
+	case errors.Is(err, transfer.ErrInsufficientStorage):
+		writeInsufficientStorage(w)
 	case errors.Is(err, transfer.ErrNoCapacity):
 		writeError(w, http.StatusServiceUnavailable, "transfer capacity unavailable")
 	default:
@@ -1275,7 +1350,8 @@ func writeBatchError(w http.ResponseWriter, err error) {
 // error. Once streaming begins the response has not been committed yet, so
 // precise codes stay possible: sender-caused stream faults are the client's
 // fault (400), state-machine refusals are conflicts (409 or 404), capacity
-// caps are the server's load condition (503), disk trouble is ours (500).
+// caps are the server's load condition (503), disk exhaustion is 507, and
+// other disk trouble is ours (500).
 func writeUploadStreamError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, transfer.ErrUploadNotFound), errors.Is(err, transfer.ErrWrongSession):
@@ -1287,7 +1363,10 @@ func writeUploadStreamError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "upload is no longer in the content-accepting state")
 	case errors.Is(err, transfer.ErrCanceled):
 		writeError(w, http.StatusConflict, "upload was canceled by the desktop")
+	case errors.Is(err, transfer.ErrInsufficientStorage):
+		writeInsufficientStorage(w)
 	case errors.Is(err, transfer.ErrNoCapacity):
+		w.Header().Set("Retry-After", "1")
 		writeError(w, http.StatusServiceUnavailable, "too many concurrent uploads")
 	case errors.Is(err, transfer.ErrSizeExceeded):
 		writeError(w, http.StatusBadRequest, "body exceeds the approved size")
@@ -1359,6 +1438,26 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 		defer f.Close()
 
 		size := info.Size()
+		snap := captureFileSnapshot(f, sf.Path, info)
+
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("ETag", snap.ETag)
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Content-Disposition", contentDisposition(sf.Name))
+
+		useRange := shouldUseRangeServeContent(r, snap.ETag, info.ModTime())
+		if r.Method == http.MethodHead {
+			if useRange {
+				seeker := &guardedRangeSeeker{f: f, snap: snap, ctx: r.Context(), sess: sess}
+				http.ServeContent(w, r, sf.Name, info.ModTime(), seeker)
+				return
+			}
+			w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 
 		var downloadID string
 		if svcs.Downloads != nil {
@@ -1378,19 +1477,38 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 				defer pLease.Release()
 			}
 		}
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-		w.Header().Set("Accept-Ranges", "none")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("Content-Disposition", contentDisposition(sf.Name))
-		w.Header().Set("Trailer", "Content-Digest, X-Content-SHA256")
-		w.WriteHeader(http.StatusOK)
 
-		// Pin for the streaming duration, then stream. Writes carry a
-		// rolling stall deadline: a receiver that stops draining a live
-		// download is cut after the stall window.
+		// Pin for the streaming duration, then stream.
 		sess.Begin()
 		defer sess.End()
+
+		if useRange {
+			seeker := &guardedRangeSeeker{
+				f:          f,
+				snap:       snap,
+				ctx:        r.Context(),
+				sess:       sess,
+				downloads:  svcs.Downloads,
+				downloadID: downloadID,
+			}
+			http.ServeContent(w, r, sf.Name, info.ModTime(), seeker)
+			seeker.flush()
+			if seeker.err != nil {
+				_ = forceClose(w, f)
+				if svcs.Downloads != nil {
+					svcs.Downloads.Fail(downloadID, publicDownloadError(seeker.err), seeker.read)
+				}
+				return
+			}
+			if svcs.Downloads != nil {
+				svcs.Downloads.Finish(downloadID, seeker.read)
+			}
+			return
+		}
+
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+		w.Header().Set("Trailer", "Content-Digest, X-Content-SHA256")
+		w.WriteHeader(http.StatusOK)
 
 		out := &stallWriter{
 			w:     w,
@@ -1403,8 +1521,10 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 		buf := *bufPtr
 		streamHasher := sha256.New()
 		var written int64
+		var sinceCheck int64
 		var lastReported int64
 		var lastProgressTime time.Time
+		lastCheck := time.Now()
 		for written < size {
 			// A direct download is an authenticated transfer, so a session
 			// that was revoked while the body was streaming must stop here
@@ -1422,11 +1542,23 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 				}
 				return
 			}
+			if sinceCheck >= progressFlushBytes || time.Since(lastCheck) >= progressFlushEvery {
+				sinceCheck = 0
+				lastCheck = time.Now()
+				if !fileMatchesSnapshot(f, snap) {
+					_ = forceClose(w, f)
+					if svcs.Downloads != nil {
+						svcs.Downloads.Fail(downloadID, errSourceChanged.Error(), written)
+					}
+					return
+				}
+			}
 			n, rerr := f.Read(buf)
 			if n > 0 {
 				streamHasher.Write(buf[:n])
 				wn, werr := out.Write(buf[:n])
 				written += int64(wn)
+				sinceCheck += int64(wn)
 				now := time.Now()
 				if svcs.Downloads != nil && (written-lastReported >= 256*1024 || now.Sub(lastProgressTime) >= 250*time.Millisecond || written == size) {
 					svcs.Downloads.Progress(downloadID, written)
@@ -1443,6 +1575,13 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 			}
 			if rerr != nil {
 				if rerr == io.EOF && written == size {
+					if !fileMatchesSnapshot(f, snap) {
+						_ = forceClose(w, f)
+						if svcs.Downloads != nil {
+							svcs.Downloads.Fail(downloadID, errSourceChanged.Error(), written)
+						}
+						return
+					}
 					break
 				}
 				// Short file (shrank mid-stream) or a disk read error:

@@ -224,7 +224,7 @@ func (r *Registry) AddFileSource(path, rawName, sessionKey string) (SharedSource
 	}
 	source := SharedSource{
 		ID: file.ID, Kind: SourceKindFile, Name: file.Name, Path: file.Path,
-		Items:   []SourceItem{{RelativePath: file.Name, Size: file.Size, Path: file.Path}},
+		Items:   []SourceItem{{ID: file.ID, RelativePath: file.Name, Size: file.Size, Path: file.Path}},
 		Session: file.Session, Created: file.Created,
 	}
 	r.mu.Lock()
@@ -293,6 +293,62 @@ func (r *Registry) ListSourceSession(sessionKey string) []SharedSource {
 		}
 	}
 	return out
+}
+
+// BrowseSource returns a bounded, path-confined hierarchy page for a shared source.
+func (r *Registry) BrowseSource(id, prefix string, cursor, limit int) (SourceBrowsePage, error) {
+	source, ok := r.GetSource(id)
+	if !ok {
+		sf, fileOK := r.Get(id)
+		if !fileOK {
+			return SourceBrowsePage{}, ErrNotFound
+		}
+		source = SharedSource{
+			ID: sf.ID, Kind: SourceKindFile, Name: sf.Name,
+			Items: []SourceItem{{ID: sf.ID, RelativePath: sf.Name, Size: sf.Size, Path: sf.Path}},
+		}
+	}
+	return buildBrowseEntries(source, prefix, cursor, limit)
+}
+
+// ResolveSourceItems validates and returns the selected file items inside a
+// shared source, ensuring every resolved path remains confined within source root.
+func (r *Registry) ResolveSourceItems(sourceID string, itemIDs []string) (SharedSource, []SourceItem, error) {
+	if sourceID == "" || len(itemIDs) == 0 || len(itemIDs) > MaxSelectableSourceItems {
+		return SharedSource{}, nil, fmt.Errorf("%w: invalid item selection", ErrInvalidBrowsePrefix)
+	}
+	source, ok := r.GetSource(sourceID)
+	if !ok {
+		sf, fileOK := r.Get(sourceID)
+		if !fileOK {
+			return SharedSource{}, nil, ErrNotFound
+		}
+		source = SharedSource{
+			ID: sf.ID, Kind: SourceKindFile, Name: sf.Name, Path: sf.Path,
+			Items: []SourceItem{{ID: sf.ID, RelativePath: sf.Name, Size: sf.Size, Path: sf.Path}},
+		}
+	}
+	byID := make(map[string]SourceItem, len(source.Items))
+	for _, it := range source.Items {
+		byID[it.ID] = it
+	}
+	seen := make(map[string]bool, len(itemIDs))
+	resolved := make([]SourceItem, 0, len(itemIDs))
+	for _, itemID := range itemIDs {
+		if itemID == "" || seen[itemID] {
+			return SharedSource{}, nil, fmt.Errorf("%w: duplicate or empty item id", ErrInvalidBrowsePrefix)
+		}
+		seen[itemID] = true
+		item, exists := byID[itemID]
+		if !exists {
+			return SharedSource{}, nil, ErrNotFound
+		}
+		if source.Kind == SourceKindFolder && !withinSourceRoot(source.Path, item.Path) {
+			return SharedSource{}, nil, fmt.Errorf("%w: item path escaped source root", ErrInvalidBrowsePrefix)
+		}
+		resolved = append(resolved, item)
+	}
+	return source, resolved, nil
 }
 
 // Clear drops every registration. Called on session end: any previously

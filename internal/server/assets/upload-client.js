@@ -1,54 +1,65 @@
 /*
  * Flitnix upload transport.
  *
- * Provides one streaming primitive used by both the phone page and the guest
- * drop box: a single PUT of a File with live progress, executed in a Web
- * Worker so the transfer is not sharing the page's main thread with layout,
- * painting and progress rendering.
+ * Provides streaming upload primitives for the phone and guest pages, executed
+ * in a dedicated Web Worker with an identical main-thread XHR fallback.
  *
- * When workers are unavailable the same contract is served by a main-thread
- * XMLHttpRequest, so behaviour (and error reporting) is identical either way.
- *
- *   var stream = FlitnixUpload.stream({
- *     url: "/api/...",
+ *   var stream = FlitnixUpload.streamResumable({
+ *     url: "/api/batches/.../items/.../content",
  *     headers: {"Authorization": "Bearer ..."},
  *     file: fileObject,
  *     onProgress: function (loaded, total) { ... }
  *   });
- *   stream.promise.then(function (res) { res.status; res.responseText; });
- *   stream.promise.catch(function (err) { err.aborted; err.network; err.timeout; });
- *   stream.abort();
- *
- * The promise resolves for every completed exchange, including HTTP error
- * statuses, and rejects only for cancellation or a transport failure.
  */
 (function (global) {
   "use strict";
 
   var WORKER_URL = "/static/upload-worker.js";
+  var DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024;
 
   var worker = null;
   var workerBroken = false;
   var pending = Object.create(null);
   var nextId = 1;
 
+  function parseRetryAfterMs(value, now) {
+    // Mirrors the Go client's ParseRetryAfter: delta seconds or an HTTP date;
+    // malformed, negative and missing values yield 0; huge values clamp to
+    // the maximum automatic wait (5 minutes).
+    if (value === null || value === undefined) return 0;
+    var s = String(value).trim();
+    if (!s) return 0;
+    var secs = Number(s);
+    if (isNaN(secs)) {
+      var t = Date.parse(s);
+      if (isNaN(t)) return 0;
+      secs = (t - (now || Date.now())) / 1000;
+    }
+    if (!isFinite(secs) || secs < 0) return 0;
+    if (secs > 86400) return 300000;
+    return Math.round(secs * 1000);
+  }
+
   function workerAvailable() {
     return !workerBroken && typeof Worker !== "undefined";
   }
 
-  function transportError(kind, message) {
+  function transportError(kind, message, offset) {
     if (kind === "abort") {
       var aborted = new Error("upload aborted");
       aborted.aborted = true;
+      aborted.offset = offset;
       return aborted;
     }
     if (kind === "timeout") {
       var timedOut = new Error(message || "Upload timed out.");
       timedOut.timeout = true;
+      timedOut.offset = offset;
       return timedOut;
     }
     var failed = new Error(message || "Network error while uploading.");
     failed.network = true;
+    failed.offset = offset;
     return failed;
   }
 
@@ -75,14 +86,16 @@
       }
       delete pending[msg.uploadId];
       if (msg.type === "done") {
-        entry.resolve({ status: msg.status, responseText: msg.responseText || "" });
+        entry.resolve({
+          status: msg.status,
+          responseText: msg.responseText || "",
+          offset: msg.offset,
+          retryAfterMs: typeof msg.retryAfterMs === "number" ? msg.retryAfterMs : 0
+        });
       } else if (msg.type === "error") {
-        entry.reject(transportError(msg.kind, msg.message));
+        entry.reject(transportError(msg.kind, msg.message, msg.offset));
       }
     };
-    // A worker that cannot start or that dies mid-transfer must not strand
-    // the caller: fail what is in flight and let later calls fall back to
-    // the main thread rather than repeating the failure forever.
     worker.onerror = function () {
       workerBroken = true;
       worker = null;
@@ -91,17 +104,18 @@
     return worker;
   }
 
-  function streamInWorker(opts) {
+  function runInWorker(type, opts) {
     var w = ensureWorker();
     var id = nextId++;
     var promise = new Promise(function (resolve, reject) {
       pending[id] = { onProgress: opts.onProgress, resolve: resolve, reject: reject };
       w.postMessage({
-        type: "start",
+        type: type,
         uploadId: id,
         url: opts.url,
         headers: opts.headers || {},
-        file: opts.file
+        file: opts.file,
+        chunkSize: opts.chunkSize || DEFAULT_CHUNK_SIZE
       });
     });
     return {
@@ -112,7 +126,6 @@
         try {
           w.postMessage({ type: "abort", uploadId: id });
         } catch (e) {
-          // Worker already gone; fail fast instead of waiting forever.
           delete pending[id];
           entry.reject(transportError("abort", ""));
         }
@@ -150,10 +163,161 @@
     return {
       promise: promise,
       abort: function () {
+        try { xhr.abort(); } catch (e) {}
+      }
+    };
+  }
+
+  function streamResumableOnMainThread(opts) {
+    var file = opts.file;
+    var total = file ? file.size : 0;
+    var chunkSize = opts.chunkSize || DEFAULT_CHUNK_SIZE;
+    var offset = 0;
+    var mismatchRetries = 0;
+    var currentXhr = null;
+    var aborted = false;
+
+    function applyHeaders(xhr, extra) {
+      var headers = opts.headers || {};
+      for (var name in headers) {
+        if (Object.prototype.hasOwnProperty.call(headers, name)) {
+          xhr.setRequestHeader(name, headers[name]);
+        }
+      }
+      if (extra) {
+        for (var k in extra) {
+          if (Object.prototype.hasOwnProperty.call(extra, k)) {
+            xhr.setRequestHeader(k, extra[k]);
+          }
+        }
+      }
+    }
+
+    var promise = new Promise(function (resolve, reject) {
+      function queryHead() {
+        if (aborted) { reject(transportError("abort", "", offset)); return; }
+        var xhr = new XMLHttpRequest();
+        currentXhr = xhr;
+        xhr.onload = function () {
+          if (aborted) { reject(transportError("abort", "", offset)); return; }
+          if (xhr.status === 200) {
+            var srvOff = parseInt(xhr.getResponseHeader("Upload-Offset") || "0", 10);
+            if (!isNaN(srvOff) && srvOff >= 0 && srvOff <= total) offset = srvOff;
+            var srvChunk = parseInt(xhr.getResponseHeader("Upload-Chunk-Size") || "0", 10);
+            if (!isNaN(srvChunk) && srvChunk > 0) chunkSize = srvChunk;
+            var upState = xhr.getResponseHeader("X-Upload-State") || "";
+            if (upState === "completed" || (total > 0 && offset === total)) {
+              if (opts.onProgress) opts.onProgress(total, total);
+              resolve({ status: 200, responseText: JSON.stringify({ written: total }), offset: total });
+              return;
+            }
+            if (opts.onProgress) opts.onProgress(offset, total);
+            sendNextChunk();
+            return;
+          }
+          if (xhr.status === 404 || xhr.status === 405) {
+            var fallback = streamOnMainThread(opts);
+            currentXhr = { abort: fallback.abort };
+            fallback.promise.then(resolve, reject);
+            return;
+          }
+          resolve({
+            status: xhr.status,
+            responseText: xhr.responseText || "",
+            offset: offset,
+            retryAfterMs: parseRetryAfterMs(xhr.getResponseHeader("Retry-After"))
+          });
+        };
+        xhr.onerror = function () { reject(transportError("network", "", offset)); };
+        xhr.ontimeout = function () { reject(transportError("timeout", "", offset)); };
+        xhr.onabort = function () { reject(transportError("abort", "", offset)); };
         try {
-          xhr.abort();
-        } catch (e) {
-          // Already settled.
+          xhr.open("HEAD", opts.url);
+          applyHeaders(xhr, null);
+          xhr.send();
+        } catch (err) {
+          reject(transportError("network", (err && err.message) || "", offset));
+        }
+      }
+
+      function sendNextChunk() {
+        if (aborted) { reject(transportError("abort", "", offset)); return; }
+        var end = total === 0 ? 0 : Math.min(total, offset + chunkSize);
+        var slice = total === 0 ? new Blob([]) : file.slice(offset, end);
+        var xhr = new XMLHttpRequest();
+        currentXhr = xhr;
+        xhr.upload.onprogress = function (e) {
+          if (!e.lengthComputable) return;
+          if (opts.onProgress) opts.onProgress(Math.min(total, offset + e.loaded), total);
+        };
+        xhr.onload = function () {
+          if (aborted) { reject(transportError("abort", "", offset)); return; }
+          if (xhr.status === 204) {
+            var srvOff = parseInt(xhr.getResponseHeader("Upload-Offset") || "", 10);
+            offset = (!isNaN(srvOff) && srvOff >= 0) ? srvOff : end;
+            if (opts.onProgress) opts.onProgress(offset, total);
+            mismatchRetries = 0;
+            if (offset < total) sendNextChunk();
+            else resolve({ status: 200, responseText: xhr.responseText || "", offset: total });
+            return;
+          }
+          if (xhr.status === 200) {
+            offset = total;
+            if (opts.onProgress) opts.onProgress(total, total);
+            resolve({ status: 200, responseText: xhr.responseText || "", offset: total });
+            return;
+          }
+          if (xhr.status === 409) {
+            var parsed = null;
+            try { parsed = JSON.parse(xhr.responseText || "{}"); } catch (e) {}
+            if (parsed && parsed.code === "offset_mismatch" && mismatchRetries < 3) {
+              mismatchRetries += 1;
+              var expected = parseInt(xhr.getResponseHeader("Upload-Offset") || String(parsed.expectedOffset || ""), 10);
+              if (!isNaN(expected) && expected >= 0 && expected <= total) {
+                offset = expected;
+                if (opts.onProgress) opts.onProgress(offset, total);
+                if (offset === total && total > 0) {
+                  resolve({ status: 200, responseText: JSON.stringify({ written: total }), offset: total });
+                } else {
+                  sendNextChunk();
+                }
+                return;
+              }
+            }
+          }
+          var hdrOff = parseInt(xhr.getResponseHeader("Upload-Offset") || "", 10);
+          if (!isNaN(hdrOff) && hdrOff >= 0 && hdrOff <= total) offset = hdrOff;
+          resolve({
+            status: xhr.status,
+            responseText: xhr.responseText || "",
+            offset: offset,
+            retryAfterMs: parseRetryAfterMs(xhr.getResponseHeader("Retry-After"))
+          });
+        };
+        xhr.onerror = function () { reject(transportError("network", "", offset)); };
+        xhr.ontimeout = function () { reject(transportError("timeout", "", offset)); };
+        xhr.onabort = function () { reject(transportError("abort", "", offset)); };
+        try {
+          xhr.open("PATCH", opts.url);
+          applyHeaders(xhr, {
+            "Content-Type": "application/offset+octet-stream",
+            "Upload-Offset": String(offset)
+          });
+          xhr.send(slice);
+        } catch (err) {
+          reject(transportError("network", (err && err.message) || "", offset));
+        }
+      }
+
+      queryHead();
+    });
+
+    return {
+      promise: promise,
+      abort: function () {
+        aborted = true;
+        if (currentXhr) {
+          try { currentXhr.abort(); } catch (e) {}
         }
       }
     };
@@ -162,10 +326,8 @@
   function stream(opts) {
     if (workerAvailable()) {
       try {
-        return streamInWorker(opts);
+        return runInWorker("start", opts);
       } catch (err) {
-        // Construction or postMessage failed; use the same-thread path for
-        // this transfer and every later one.
         workerBroken = true;
         worker = null;
       }
@@ -173,5 +335,21 @@
     return streamOnMainThread(opts);
   }
 
-  global.FlitnixUpload = { stream: stream };
+  function streamResumable(opts) {
+    if (workerAvailable()) {
+      try {
+        return runInWorker("startResumable", opts);
+      } catch (err) {
+        workerBroken = true;
+        worker = null;
+      }
+    }
+    return streamResumableOnMainThread(opts);
+  }
+
+  global.FlitnixUpload = {
+    stream: stream,
+    streamResumable: streamResumable,
+    parseRetryAfterMs: parseRetryAfterMs
+  };
 })(typeof self !== "undefined" ? self : this);

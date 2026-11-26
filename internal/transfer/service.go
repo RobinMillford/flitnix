@@ -16,13 +16,16 @@ import (
 type State string
 
 const (
-	StatePending   State = "pending"   // metadata received, awaiting the desktop user's decision
-	StateApproved  State = "approved"  // approved; exactly one content upload is now allowed
-	StateRejected  State = "rejected"  // refused by the desktop user; no content will be uploaded
-	StateUploading State = "uploading" // content stream in progress
-	StateCompleted State = "completed" // received fully, published in the receive directory
-	StateFailed    State = "failed"    // transfer terminated with an error
-	StateCanceled  State = "canceled"  // canceled by the desktop (shutdown or session end)
+	StatePending     State = "pending"     // metadata received, awaiting the desktop user's decision
+	StateApproved    State = "approved"    // approved; content upload is allowed
+	StateRejected    State = "rejected"    // refused by the desktop user; no content will be uploaded
+	StateUploading   State = "uploading"   // content stream in progress
+	StateInterrupted State = "interrupted" // stream dropped mid-transfer with durable partial bytes preserved
+	StatePaused      State = "paused"      // paused by user; partial bytes preserved
+	StateCompleted   State = "completed"   // received fully, published in the receive directory
+	StateFailed      State = "failed"      // transfer terminated with an error
+	StateCanceled    State = "canceled"    // canceled by the desktop (shutdown or session end)
+	StateDiscarded   State = "discarded"   // partial upload explicitly discarded by user
 )
 
 var (
@@ -124,6 +127,10 @@ type Config struct {
 
 	// Limits bounds concurrent uploads. Zero values select defaults.
 	Limits Limits
+
+	// Quota tracks storage headroom and reservations across concurrent uploads.
+	// When nil, NewService initializes a default QuotaManager bound to Store.Dir().
+	Quota *QuotaManager
 }
 
 // Service owns the upload approval machine. All methods are safe for
@@ -133,6 +140,7 @@ type Config struct {
 type Service struct {
 	store  *Store
 	limits Limits
+	quota  *QuotaManager
 
 	mu      sync.Mutex
 	uploads map[string]*upload
@@ -150,35 +158,57 @@ func NewService(cfg Config) *Service {
 		limits.MaxActive = defaultMaxActiveUploads
 	}
 
-	return &Service{store: cfg.Store, limits: limits, uploads: make(map[string]*upload)}
+	quota := cfg.Quota
+	if quota == nil {
+		defaultDir := ""
+		if cfg.Store != nil {
+			defaultDir = cfg.Store.Dir()
+		}
+		quota = NewQuotaManager(QuotaConfig{DefaultDir: defaultDir})
+	}
+
+	return &Service{store: cfg.Store, limits: limits, quota: quota, uploads: make(map[string]*upload)}
 }
 
 // Store exposes the configured storage boundary to the server composition
 // layer for batch-root allocation.
 func (s *Service) Store() *Store { return s.store }
 
+// Quota exposes the service's storage quota and reservation manager.
+func (s *Service) Quota() *QuotaManager { return s.quota }
+
+func (s *Service) targetDir() string {
+	if s.store != nil {
+		return s.store.Dir()
+	}
+	return ""
+}
+
 // Upload is a consistent copy of one upload record for callers outside the
 // package (HTTP handlers, the desktop UI).
 type Upload struct {
-	ID        string    // opaque upload ID
-	Name      string    // sanitized final filename candidate
-	Session   string    // owning session's non-secret key (hex digest)
-	Size      int64     // approved size in bytes
-	Created   time.Time // when the metadata arrived
-	State     State
-	Reason    string  // non-empty on failed/canceled records: why the transfer ended
-	Uploaded  int64   // bytes actually received so far (live)
-	Speed     float64 // measured bytes per second while receiving
-	SHA256    string  // lowercase hex SHA-256 digest of published bytes
-	Published string  // absolute final path; populated exactly in the completed state
+	ID             string    // opaque upload ID
+	Name           string    // sanitized final filename candidate
+	Session        string    // owning session's non-secret key (hex digest)
+	Size           int64     // approved size in bytes
+	LastModifiedMs int64     // optional client-supplied original Unix millisecond mtime
+	Created        time.Time // when the metadata arrived
+	State          State
+	Reason         string  // non-empty on failed/canceled records: why the transfer ended
+	Uploaded       int64   // bytes actually received so far (live)
+	Speed          float64 // measured bytes per second while receiving
+	SHA256         string  // lowercase hex SHA-256 digest of published bytes
+	Published      string  // absolute final path; populated exactly in the completed state
 
 	// BatchLinked is true for a record that belongs to a transfer batch. The
 	// batch coordinator is its only approval authority: such a record is
 	// never offered as an independent approval request.
 	BatchLinked bool
 
-	ExpectedSHA256 string // Expected SHA-256 digest from signed manifest
-	DeviceID       string // Enrolled device ID if transfer was authenticated
+	Resumable       bool   // true when durable partial staging exists on disk
+	CommittedOffset int64  // last durably fsynced offset on disk
+	ExpectedSHA256  string // Expected SHA-256 digest from signed manifest
+	DeviceID        string // Enrolled device ID if transfer was authenticated
 }
 
 // ContentResult describes a successfully received upload body.
@@ -199,13 +229,14 @@ type ContentResult struct {
 // field; Uploaded stays atomic so the streaming goroutine's progress
 // callback never blocks the desktop's polling reads.
 type upload struct {
-	id           string
-	name         string
-	root         string
-	relativePath string
-	session      string
-	size         int64
-	created      time.Time
+	id             string
+	name           string
+	root           string
+	relativePath   string
+	session        string
+	size           int64
+	lastModifiedMs int64
+	created        time.Time
 
 	// managed marks a batch item whose approval is owned by the batch
 	// coordinator. It is fixed at declaration and never changes.
@@ -230,6 +261,20 @@ type upload struct {
 	speed     float64
 	lastAt    time.Time
 	lastBytes int64
+
+	// Resumable chunked transfer state guarded by mu.
+	batchID         string
+	itemID          string
+	partPath        string
+	metaPath        string
+	finalDir        string
+	committedOffset int64
+	chunkSize       int64
+	hashState       []byte
+	chunkInFlight   bool
+	chunkCancel     func()
+	quarantined     bool
+	quarantineMsg   string
 
 	// pub records the single decision a finishing stream and a cancel
 	// contend for. It is taken under mu before any publication work, so
@@ -257,21 +302,24 @@ const (
 // snapshotLocked copies the record; the caller must already hold u.mu.
 func (u *upload) snapshotLocked() Upload {
 	return Upload{
-		ID:        u.id,
-		Name:      u.name,
-		Session:   u.session,
-		Size:      u.size,
-		Created:   u.created,
-		State:     u.state,
-		Reason:    u.reason,
-		Uploaded:  u.uploaded.Load(),
-		Speed:     u.speed,
-		SHA256:    u.sha256,
-		Published: u.published,
+		ID:             u.id,
+		Name:           u.name,
+		Session:        u.session,
+		Size:           u.size,
+		LastModifiedMs: u.lastModifiedMs,
+		Created:        u.created,
+		State:          u.state,
+		Reason:         u.reason,
+		Uploaded:       u.uploaded.Load(),
+		Speed:          u.speed,
+		SHA256:         u.sha256,
+		Published:      u.published,
 
-		BatchLinked:    u.managed,
-		ExpectedSHA256: u.expectedSHA256,
-		DeviceID:       u.deviceID,
+		BatchLinked:     u.managed,
+		Resumable:       u.committedOffset > 0 && (u.state == StateInterrupted || u.state == StatePaused || u.state == StateApproved || u.state == StateUploading),
+		CommittedOffset: u.committedOffset,
+		ExpectedSHA256:  u.expectedSHA256,
+		DeviceID:        u.deviceID,
 	}
 }
 
@@ -294,7 +342,7 @@ func stateOf(u *upload) State {
 
 func isTerminal(st State) bool {
 	switch st {
-	case StateRejected, StateCompleted, StateFailed, StateCanceled:
+	case StateRejected, StateCompleted, StateFailed, StateCanceled, StateDiscarded:
 		return true
 	}
 	return false
@@ -346,6 +394,15 @@ func (s *Service) DeclareBatchItemWithDigest(sessionKey, root, relativePath, raw
 	return s.declare(sessionKey, rawName, root, relativePath, size, true, expectedSHA256, deviceID)
 }
 
+// DeclareBatchItemPreReserved records a batch item whose storage capacity was
+// already atomically reserved by an enclosing batch reservation.
+func (s *Service) DeclareBatchItemPreReserved(sessionKey, root, relativePath, rawName string, size int64, expectedSHA256, deviceID string) (Upload, error) {
+	if (root == "") != (relativePath == "") {
+		return Upload{}, ErrInvalidUpload
+	}
+	return s.declareWithQuota(sessionKey, rawName, root, relativePath, size, true, expectedSHA256, deviceID, false)
+}
+
 // DeclarePath records a folder item whose server-selected root and validated
 // relative path determine its eventual publication location.
 func (s *Service) DeclarePath(sessionKey, root, relativePath, rawName string, size int64) (Upload, error) {
@@ -355,7 +412,26 @@ func (s *Service) DeclarePath(sessionKey, root, relativePath, rawName string, si
 	return s.declare(sessionKey, rawName, root, relativePath, size, false, "", "")
 }
 
+// SetUploadModTime stores a validated client modification timestamp (Unix ms) on an upload.
+func (s *Service) SetUploadModTime(id string, modTimeMs int64) error {
+	if err := ValidateModTimeMs(modTimeMs); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidUpload, err)
+	}
+	u, err := s.lookup(id, "")
+	if err != nil {
+		return err
+	}
+	u.mu.Lock()
+	u.lastModifiedMs = modTimeMs
+	u.mu.Unlock()
+	return nil
+}
+
 func (s *Service) declare(sessionKey, rawName, root, relativePath string, size int64, managed bool, expectedSHA256, deviceID string) (Upload, error) {
+	return s.declareWithQuota(sessionKey, rawName, root, relativePath, size, managed, expectedSHA256, deviceID, true)
+}
+
+func (s *Service) declareWithQuota(sessionKey, rawName, root, relativePath string, size int64, managed bool, expectedSHA256, deviceID string, reserveQuota bool) (Upload, error) {
 	if sessionKey == "" {
 		return Upload{}, ErrWrongSession
 	}
@@ -391,6 +467,11 @@ func (s *Service) declare(sessionKey, rawName, root, relativePath string, size i
 	id, err := newID()
 	if err != nil {
 		return Upload{}, err
+	}
+	if reserveQuota && s.quota != nil {
+		if _, qerr := s.quota.CheckAvailable(s.targetDir(), size); qerr != nil {
+			return Upload{}, qerr
+		}
 	}
 	u := &upload{
 		id:             id,
@@ -497,9 +578,17 @@ func (s *Service) Decide(id string, approve bool) (Upload, error) {
 		return u.snapshotLocked(), fmt.Errorf("%w: current state is %q", ErrAlreadyDecided, u.state)
 	}
 	if approve {
+		if s.quota != nil {
+			if qerr := s.quota.Reserve(u.id, u.session, s.targetDir(), u.size); qerr != nil {
+				return u.snapshotLocked(), qerr
+			}
+		}
 		u.state = StateApproved
 	} else {
 		u.state = StateRejected
+		if s.quota != nil {
+			s.quota.Release(u.id)
+		}
 	}
 	return u.snapshotLocked(), nil
 }
@@ -540,9 +629,18 @@ func (s *Service) DecideBatchItems(ids []string, approve bool) error {
 			u.mu.Unlock()
 		}
 	}()
+	var quotaItems []QuotaBatchItem
+	var sessionKey string
 	for _, u := range records {
 		if u.state != StatePending {
 			return fmt.Errorf("%w: current state is %q", ErrAlreadyDecided, u.state)
+		}
+		sessionKey = u.session
+		quotaItems = append(quotaItems, QuotaBatchItem{ID: u.id, Bytes: u.size})
+	}
+	if approve && s.quota != nil {
+		if qerr := s.quota.ReserveBatch(sessionKey, s.targetDir(), quotaItems); qerr != nil {
+			return qerr
 		}
 	}
 	next := StateRejected
@@ -551,6 +649,9 @@ func (s *Service) DecideBatchItems(ids []string, approve bool) error {
 	}
 	for _, u := range records {
 		u.state = next
+	}
+	if !approve && s.quota != nil {
+		s.quota.ReleaseIDs(ids)
 	}
 	return nil
 }
@@ -596,9 +697,22 @@ func (s *Service) SubmitContentWithPublish(id, sessionKey string, body io.Reader
 	case StateUploading:
 		u.mu.Unlock()
 		return ContentResult{}, ErrUploadUnderway
+	case StatePaused:
+		u.mu.Unlock()
+		return ContentResult{}, ErrUploadPaused
+	case StateDiscarded:
+		u.mu.Unlock()
+		return ContentResult{}, ErrUploadDiscarded
+	case StateInterrupted:
+		u.mu.Unlock()
+		return ContentResult{}, fmt.Errorf("%w: partial upload requires resumable PATCH", ErrAlreadyDecided)
 	case StateCompleted, StateFailed:
 		u.mu.Unlock()
 		return ContentResult{}, fmt.Errorf("%w: state is %q", ErrAlreadyDecided, u.state)
+	}
+	if u.committedOffset > 0 {
+		u.mu.Unlock()
+		return ContentResult{}, fmt.Errorf("%w: partial upload requires resumable PATCH", ErrAlreadyDecided)
 	}
 	// u.state == StateApproved: claim this submission for the stream.
 	var sink contentSink
@@ -613,13 +727,27 @@ func (s *Service) SubmitContentWithPublish(id, sessionKey string, body io.Reader
 		u.mu.Unlock()
 		return ContentResult{}, fmt.Errorf("transfer: cannot prepare the receive file: %w", perr)
 	}
+	if pf, ok := sink.(*PartFile); ok && u.lastModifiedMs > 0 {
+		pf.SetModTimeMs(u.lastModifiedMs)
+	}
 	u.state = StateUploading
 	u.sink = sink
 	u.uploaded.Store(0)
 	u.mu.Unlock()
 
-	result, serr := streamBody(body, sink, u.size, func(written int64) {
+	var spaceCheck func(writtenSoFar, nextBytes int64) error
+	if s.quota != nil {
+		targetDir := s.targetDir()
+		spaceCheck = func(writtenSoFar, nextBytes int64) error {
+			return s.quota.CheckWrite(id, targetDir, writtenSoFar, nextBytes)
+		}
+	}
+
+	result, serr := streamBodyWithSpaceCheck(body, sink, u.size, func(written int64) {
 		u.uploaded.Store(written)
+		if s.quota != nil {
+			s.quota.Advance(id, written)
+		}
 		u.mu.Lock()
 		now := time.Now()
 		if elapsed := now.Sub(u.lastAt).Seconds(); elapsed > 0 {
@@ -631,7 +759,7 @@ func (s *Service) SubmitContentWithPublish(id, sessionKey string, body io.Reader
 		if onProgress != nil {
 			onProgress(u.snapshot())
 		}
-	})
+	}, spaceCheck)
 
 	if serr != nil {
 		_ = sink.Abort()
@@ -641,11 +769,20 @@ func (s *Service) SubmitContentWithPublish(id, sessionKey string, body io.Reader
 		if u.state == StateCanceled {
 			// Cancel decided the fate during streaming: keep the
 			// canceled status honest rather than overwriting failed.
+			if s.quota != nil {
+				s.quota.Release(id)
+			}
 			u.mu.Unlock()
 			return ContentResult{}, fmt.Errorf("%w: %v", ErrCanceled, serr)
 		}
 		u.state = StateFailed
+		if s.quota != nil {
+			s.quota.Release(id)
+		}
 		u.mu.Unlock()
+		if errors.Is(serr, ErrInsufficientStorage) {
+			return ContentResult{}, serr
+		}
 		return ContentResult{}, fmt.Errorf("%s: %w", u.name, serr)
 	}
 
@@ -656,6 +793,9 @@ func (s *Service) SubmitContentWithPublish(id, sessionKey string, body io.Reader
 		u.sink = nil
 		u.reason = fmt.Sprintf("digest mismatch: expected %s, got %s", u.expectedSHA256, result.HexSHA256())
 		u.state = StateFailed
+		if s.quota != nil {
+			s.quota.Release(id)
+		}
 		u.mu.Unlock()
 		return ContentResult{}, ErrDigestMismatch
 	}
@@ -673,6 +813,9 @@ func (s *Service) SubmitContentWithPublish(id, sessionKey string, body io.Reader
 		u.state = StateCanceled
 		u.reason = "canceled"
 		u.sink = nil
+		if s.quota != nil {
+			s.quota.Release(id)
+		}
 		u.mu.Unlock()
 		_ = sink.Abort()
 		return ContentResult{}, fmt.Errorf("%w: canceled before publication", ErrCanceled)
@@ -689,6 +832,9 @@ func (s *Service) SubmitContentWithPublish(id, sessionKey string, body io.Reader
 			u.state = StateCanceled
 			u.reason = "canceled"
 			u.sink = nil
+			if s.quota != nil {
+				s.quota.Release(id)
+			}
 			u.mu.Unlock()
 			_ = sink.Abort()
 			return ContentResult{}, fmt.Errorf("%w: canceled before publication: %v", ErrCanceled, err)
@@ -704,6 +850,9 @@ func (s *Service) SubmitContentWithPublish(id, sessionKey string, body io.Reader
 		// The data arrived intact but atomic publication failed; keep
 		// the record failed and surface the store's precise error.
 		u.reason = cerr.Error()
+		if s.quota != nil {
+			s.quota.Release(id)
+		}
 		if u.state == StateCanceled {
 			// Cancel decided the fate during the commit (its abort won
 			// the publication race): keep the canceled status honest
@@ -713,11 +862,17 @@ func (s *Service) SubmitContentWithPublish(id, sessionKey string, body io.Reader
 		}
 		u.state = StateFailed
 		u.mu.Unlock()
+		if errors.Is(cerr, ErrInsufficientStorage) {
+			return ContentResult{}, cerr
+		}
 		return ContentResult{}, fmt.Errorf("%s: %w", u.name, cerr)
 	}
 	u.state = StateCompleted
 	u.published = final
 	u.sha256 = result.HexSHA256()
+	if s.quota != nil {
+		s.quota.Release(id)
+	}
 	u.mu.Unlock()
 	return ContentResult{Written: result.Written, SHA256: result.HexSHA256(), Path: final}, nil
 }
@@ -780,24 +935,45 @@ func (s *Service) Cancel(id string) error {
 		return err
 	}
 	u.mu.Lock()
+	var chunkCancel func()
+	var partPath, metaPath string
+	var sink contentSink
 	switch u.state {
-	case StatePending, StateApproved:
+	case StatePending, StateApproved, StateInterrupted, StatePaused:
+		u.pub = pubCancelReserved
 		u.state = StateCanceled
+		partPath, metaPath = u.partPath, u.metaPath
+		u.partPath, u.metaPath, u.committedOffset, u.hashState = "", "", 0, nil
+		if s.quota != nil {
+			s.quota.Release(u.id)
+		}
 		u.mu.Unlock()
+		removeResumablePaths(partPath, metaPath)
 	case StateUploading:
-		sink := u.sink
+		sink = u.sink
+		chunkCancel = u.chunkCancel
+		u.pub = pubCancelReserved
 		u.state = StateCanceled
+		partPath, metaPath = u.partPath, u.metaPath
+		u.partPath, u.metaPath, u.committedOffset, u.hashState = "", "", 0, nil
+		if s.quota != nil {
+			s.quota.Release(u.id)
+		}
 		u.mu.Unlock()
+		if chunkCancel != nil {
+			chunkCancel()
+		}
 		if sink != nil {
 			_ = sink.Abort()
 		}
+		removeResumablePaths(partPath, metaPath)
 	default:
 		u.mu.Unlock()
 	}
 	return nil
 }
 
-// CancelSession cancels every pending, approved, or streaming upload owned
+// CancelSession cancels every pending, approved, interrupted, paused, or streaming upload owned
 // by the given session (matched by the session's non-secret key). The
 // desktop calls it when stopping or revoking a session so no half-received
 // file lingers on disk and no orphaned approved record outlives the
@@ -811,7 +987,7 @@ func (s *Service) CancelSession(sessionKey string) {
 	for _, u := range s.uploads {
 		if u.session == sessionKey {
 			switch stateOf(u) {
-			case StatePending, StateApproved, StateUploading:
+			case StatePending, StateApproved, StateInterrupted, StatePaused, StateUploading:
 				targets = append(targets, u)
 			}
 		}
@@ -824,18 +1000,34 @@ func (s *Service) CancelSession(sessionKey string) {
 			continue
 		}
 		switch u.state {
-		case StatePending, StateApproved:
+		case StatePending, StateApproved, StateInterrupted, StatePaused:
+			partPath, metaPath := u.partPath, u.metaPath
+			u.partPath, u.metaPath, u.committedOffset, u.hashState = "", "", 0, nil
 			u.pub = pubCancelReserved
 			u.state = StateCanceled
+			if s.quota != nil {
+				s.quota.Release(u.id)
+			}
 			u.mu.Unlock()
+			removeResumablePaths(partPath, metaPath)
 		case StateUploading:
 			sink := u.sink
+			chunkCancel := u.chunkCancel
+			partPath, metaPath := u.partPath, u.metaPath
+			u.partPath, u.metaPath, u.committedOffset, u.hashState = "", "", 0, nil
 			u.pub = pubCancelReserved
 			u.state = StateCanceled
+			if s.quota != nil {
+				s.quota.Release(u.id)
+			}
 			u.mu.Unlock()
+			if chunkCancel != nil {
+				chunkCancel()
+			}
 			if sink != nil {
 				_ = sink.Abort()
 			}
+			removeResumablePaths(partPath, metaPath)
 		default:
 			u.mu.Unlock()
 		}
@@ -843,8 +1035,9 @@ func (s *Service) CancelSession(sessionKey string) {
 }
 
 // AbortActiveUploads halts every actively streaming upload whose network connection
-// was severed by an interface drop or address change. The unfinalized partial file
-// is removed and the record transitions to StateFailed with an explanatory error.
+// was severed by an interface drop or address change. Single-pass uploads clean up
+// their partial file; resumable uploads preserve their durably committed offset
+// and transition to StateInterrupted so they can resume cleanly.
 func (s *Service) AbortActiveUploads() {
 	s.mu.Lock()
 	var targets []*upload
@@ -861,15 +1054,37 @@ func (s *Service) AbortActiveUploads() {
 			u.mu.Unlock()
 			continue
 		}
+		if u.metaPath != "" || u.chunkInFlight {
+			chunkCancel := u.chunkCancel
+			u.state = StateInterrupted
+			u.reason = "transfer interrupted: network connection lost or interface changed"
+			u.mu.Unlock()
+			if chunkCancel != nil {
+				chunkCancel()
+			}
+			continue
+		}
 		sink := u.sink
 		u.pub = pubCancelReserved
 		u.state = StateFailed
 		u.reason = "transfer interrupted: network connection lost or interface changed"
+		if s.quota != nil {
+			s.quota.Release(u.id)
+		}
 		u.mu.Unlock()
 		if sink != nil {
 			_ = sink.Abort()
 		}
 	}
+}
+
+// CheckStorageFit reports whether the given upload IDs (or fallbackBytes when
+// unreserved) currently fit in the target receive directory headroom.
+func (s *Service) CheckStorageFit(ids []string, fallbackBytes int64) (bool, StorageStatus) {
+	if s.quota == nil {
+		return true, StorageStatus{Status: StorageStatusUnknown}
+	}
+	return s.quota.CheckExistingFit(s.targetDir(), ids, fallbackBytes)
 }
 
 // Get returns a consistent copy of one upload record.

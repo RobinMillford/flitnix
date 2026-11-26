@@ -190,7 +190,7 @@ batch requires explicit approval before any file content is accepted. A
 failure pauses the queue while preserving completed items. Session cancellation
 and application shutdown cancel active work and clean staging data.
 
-Resumable partial-item uploads (tus) are implemented for batch items.
+Resumable chunked partial-item uploads (`HEAD` offset discovery and `PATCH` chunked streaming with HMAC-authenticated `.meta` checkpoints and `Pause` / `Resume` / `Discard` controls) are implemented for both batch items and standalone uploads. Legacy single-pass `PUT .../content` remains supported for backward compatibility.
 
 ## Browser and archive limitations
 
@@ -226,12 +226,9 @@ and removed on unmount.
 - The pending-approval projection lists only batches whose approval is pending
   and whose state is pending. Approved, completed, rejected and canceled
   batches leave it.
-- A content stream that fails or is interrupted ends its batch as failed
-  (the failed item keeps its error, unstarted items are canceled, no partial
-  bytes are counted) without pausing the session queue; the phone recovers by
-  declaring a new batch. A cancellation is not a failure: an item whose upload
-  record was withdrawn ends canceled, its partial bytes are discarded, and its
-  siblings keep going. A desktop cancel stays canceled.
+- **Resumable `PATCH` vs. Single-Pass `PUT` Failure Handling**:
+  - When a client streams resumable chunks via `HEAD` + `PATCH .../content`, a transient mid-chunk drop or stall truncates only the uncommitted tail back to the last durably fsynced `.meta` checkpoint, transitions the active item to `interrupted`, preserves all committed bytes and sibling items in the batch, and resumes from the authoritative `Upload-Offset` on reconnect or process restart.
+  - A legacy single-pass `PUT` content stream that fails or is interrupted ends its batch as failed (the failed item keeps its error, unstarted items are canceled, no partial bytes are counted) without pausing the session queue. A cancellation or explicit `Discard` discards partial bytes and releases reserved quota. A desktop cancel stays canceled.
 - Sessions are pinned for the life of an upload or download stream, and the
   idle window restarts when the stream ends. Idle expiry still applies to a
   session with no live stream and releases its pending and approved records.

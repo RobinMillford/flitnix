@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -582,10 +583,11 @@ func TestDownloadRange_Scenario27_ConcurrentCookieIsolation(t *testing.T) {
 	}
 }
 
-// TestDownloadRange_Scenario28_29_Tier2MutableIgnoresRange tests that an ordinary
-// mutable file (Tier 2) explicitly sets Accept-Ranges: none, ignores Range and
-// If-Range headers, and streams the entire file representation from byte 0.
-func TestDownloadRange_Scenario28_29_Tier2MutableIgnoresRange(t *testing.T) {
+// TestDownloadRange_Scenario28_29_Tier2MutableSupportsRange tests that an ordinary
+// mutable file (Tier 2) advertises Accept-Ranges: bytes and a strong metadata ETag,
+// serves 206 Partial Content when Range/If-Range match, falls back to 200 OK when
+// If-Range is weak or mismatched, and serves 416 for unsatisfiable ranges.
+func TestDownloadRange_Scenario28_29_Tier2MutableSupportsRange(t *testing.T) {
 	// Notice: mockImmutable is NOT called, so isOSImmutable returns false.
 	env := newTestEnv(t)
 	tok := env.token()
@@ -608,29 +610,37 @@ func TestDownloadRange_Scenario28_29_Tier2MutableIgnoresRange(t *testing.T) {
 	if initRec.Code != http.StatusOK {
 		t.Fatalf("initial redemption failed: status=%d", initRec.Code)
 	}
+	if got := initRec.Header().Get("Accept-Ranges"); got != "bytes" {
+		t.Fatalf("initial Accept-Ranges = %q, want bytes", got)
+	}
+	metaETag := initRec.Header().Get("ETag")
+	if metaETag == "" || strings.HasPrefix(metaETag, "W/") || strings.HasPrefix(metaETag, "\"sha256-") {
+		t.Fatalf("unexpected Tier 2 strong metadata ETag: %q", metaETag)
+	}
 	contCookie := extractContinuationCookie(t, initRec, grantID)
 
-	// Scenario 28: Range without If-Range
+	// Scenario 28: Range with matching strong metadata If-Range returns 206
 	s28Req := httptest.NewRequest(http.MethodGet, g.DownloadURL, nil)
 	s28Req.AddCookie(contCookie)
 	s28Req.Header.Set("Range", "bytes=5-20")
+	s28Req.Header.Set("If-Range", metaETag)
 	s28Rec := httptest.NewRecorder()
 	env.srv.Handler().ServeHTTP(s28Rec, s28Req)
 
-	if s28Rec.Code != http.StatusOK {
-		t.Fatalf("scenario 28 status = %d, want 200", s28Rec.Code)
+	if s28Rec.Code != http.StatusPartialContent {
+		t.Fatalf("scenario 28 status = %d, want 206", s28Rec.Code)
 	}
-	if got := s28Rec.Header().Get("Accept-Ranges"); got != "none" {
-		t.Errorf("scenario 28 Accept-Ranges = %q, want none", got)
+	if got := s28Rec.Header().Get("Accept-Ranges"); got != "bytes" {
+		t.Errorf("scenario 28 Accept-Ranges = %q, want bytes", got)
 	}
-	if s28Rec.Header().Get("Content-Range") != "" {
-		t.Errorf("scenario 28 emitted Content-Range header: %q", s28Rec.Header().Get("Content-Range"))
+	if got := s28Rec.Header().Get("Content-Range"); got != fmt.Sprintf("bytes 5-20/%d", len(content)) {
+		t.Errorf("scenario 28 Content-Range = %q", got)
 	}
-	if !bytes.Equal(s28Rec.Body.Bytes(), content) {
-		t.Fatal("scenario 28 body did not return full file starting from byte 0")
+	if !bytes.Equal(s28Rec.Body.Bytes(), content[5:21]) {
+		t.Fatal("scenario 28 body did not return requested byte range")
 	}
 
-	// Scenario 29: Range with weak If-Range
+	// Scenario 29: Range with weak If-Range falls back to 200 full representation
 	s29Req := httptest.NewRequest(http.MethodGet, g.DownloadURL, nil)
 	s29Req.AddCookie(contCookie)
 	s29Req.Header.Set("Range", "bytes=5-20")
@@ -641,8 +651,8 @@ func TestDownloadRange_Scenario28_29_Tier2MutableIgnoresRange(t *testing.T) {
 	if s29Rec.Code != http.StatusOK {
 		t.Fatalf("scenario 29 status = %d, want 200", s29Rec.Code)
 	}
-	if got := s29Rec.Header().Get("Accept-Ranges"); got != "none" {
-		t.Errorf("scenario 29 Accept-Ranges = %q, want none", got)
+	if got := s29Rec.Header().Get("Accept-Ranges"); got != "bytes" {
+		t.Errorf("scenario 29 Accept-Ranges = %q, want bytes", got)
 	}
 	if !bytes.Equal(s29Rec.Body.Bytes(), content) {
 		t.Fatal("scenario 29 body did not return full file starting from byte 0")
@@ -1006,12 +1016,15 @@ func TestPlatformImmutability_Windows_ReadOnlyAttributeFallsBackToTier2(t *testi
 	rec := httptest.NewRecorder()
 	env.srv.Handler().ServeHTTP(rec, req)
 
-	// MUST fall back to Tier 2: 200 OK, full body from byte 0, Accept-Ranges: none
+	// MUST fall back to Tier 2: uses metadata ETag (not "sha256-..."), so Tier 1 If-Range mismatches -> 200 OK full body
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (Tier 2 fallback)", rec.Code)
 	}
-	if got := rec.Header().Get("Accept-Ranges"); got != "none" {
-		t.Errorf("Accept-Ranges = %q, want none", got)
+	if got := rec.Header().Get("Accept-Ranges"); got != "bytes" {
+		t.Errorf("Accept-Ranges = %q, want bytes", got)
+	}
+	if got := rec.Header().Get("ETag"); got == "" || got == fmt.Sprintf("\"sha256-%s\"", sumHex) {
+		t.Errorf("Tier 2 ETag = %q, must not reuse Tier 1 immutable sha256 ETag", got)
 	}
 	if rec.Header().Get("Content-Range") != "" {
 		t.Errorf("unexpected Content-Range header: %q", rec.Header().Get("Content-Range"))
@@ -1165,12 +1178,15 @@ func TestPlatformImmutability_MacOS_UFImmutableFallsBackToTier2(t *testing.T) {
 	rec := httptest.NewRecorder()
 	env.srv.Handler().ServeHTTP(rec, req)
 
-	// MUST fall back to Tier 2: 200 OK, full body from byte 0, Accept-Ranges: none
+	// MUST fall back to Tier 2: uses metadata ETag (not "sha256-..."), so Tier 1 If-Range mismatches -> 200 OK full body
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (Tier 2 fallback)", rec.Code)
 	}
-	if got := rec.Header().Get("Accept-Ranges"); got != "none" {
-		t.Errorf("Accept-Ranges = %q, want none", got)
+	if got := rec.Header().Get("Accept-Ranges"); got != "bytes" {
+		t.Errorf("Accept-Ranges = %q, want bytes", got)
+	}
+	if got := rec.Header().Get("ETag"); got == "" || got == fmt.Sprintf("\"sha256-%s\"", sumHex) {
+		t.Errorf("Tier 2 ETag = %q, must not reuse Tier 1 immutable sha256 ETag", got)
 	}
 	if rec.Header().Get("Content-Range") != "" {
 		t.Errorf("unexpected Content-Range header: %q", rec.Header().Get("Content-Range"))
@@ -1239,5 +1255,215 @@ func TestPlatformImmutability_MacOS_APFSSnapshotQualifiesForTier1(t *testing.T) 
 	}
 	if !bytes.Equal(rec.Body.Bytes(), content[0:16]) {
 		t.Fatal("range body mismatch")
+	}
+}
+
+// TestDownloadRange_G2_Tier2_ResumeEditAnd416 tests the full G2 byte-range
+// lifecycle for mutable Tier 2 grant downloads: matching If-Range resumes at
+// arbitrary offsets with 206 Partial Content, unsatisfiable ranges return 416,
+// and editing the file on disk invalidates the old ETag so resuming with the
+// stale If-Range restarts cleanly with 200 OK instead of splicing bytes.
+func TestDownloadRange_G2_Tier2_ResumeEditAnd416(t *testing.T) {
+	env := newTestEnv(t)
+	tok := env.token()
+
+	partA := bytes.Repeat([]byte("A"), 64*1024)
+	partB := bytes.Repeat([]byte("B"), 64*1024)
+	v1 := append(append([]byte{}, partA...), partB...)
+
+	p := filepath.Join(t.TempDir(), "mutable_video.bin")
+	if err := os.WriteFile(p, v1, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sf, err := env.reg.Add(p, "mutable_video.bin", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	g, initialCookie := env.grantFor(tok, sf.ID)
+	grantID := extractGrantID(g.DownloadURL)
+
+	initRec := env.getDownload(g, initialCookie, nil)
+	if initRec.Code != http.StatusOK {
+		t.Fatalf("initial redemption status = %d", initRec.Code)
+	}
+	etagV1 := initRec.Header().Get("ETag")
+	contCookie := extractContinuationCookie(t, initRec, grantID)
+
+	// 1. Out-of-bounds range returns 416 with Content-Range: bytes */<size>
+	oobReq := httptest.NewRequest(http.MethodGet, g.DownloadURL, nil)
+	oobReq.AddCookie(contCookie)
+	oobReq.Header.Set("Range", fmt.Sprintf("bytes=%d-", len(v1)+10))
+	oobReq.Header.Set("If-Range", etagV1)
+	oobRec := httptest.NewRecorder()
+	env.srv.Handler().ServeHTTP(oobRec, oobReq)
+	if oobRec.Code != http.StatusRequestedRangeNotSatisfiable {
+		t.Fatalf("OOB range status = %d, want 416", oobRec.Code)
+	}
+	if got := oobRec.Header().Get("Content-Range"); got != fmt.Sprintf("bytes */%d", len(v1)) {
+		t.Fatalf("416 Content-Range = %q, want bytes */%d", got, len(v1))
+	}
+
+	// 2. Edit the file on disk (different size & bumped mtime); resuming with stale etagV1 falls back to 200 full fresh file
+	v2 := append(bytes.Repeat([]byte("C"), 64*1024), bytes.Repeat([]byte("D"), 64*1024+512)...)
+	if err := os.WriteFile(p, v2, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	newTime := time.Now().Add(5 * time.Second)
+	_ = os.Chtimes(p, newTime, newTime)
+
+	editReq := httptest.NewRequest(http.MethodGet, g.DownloadURL, nil)
+	editReq.AddCookie(contCookie)
+	editReq.Header.Set("Range", "bytes=65536-")
+	editReq.Header.Set("If-Range", etagV1)
+	editRec := httptest.NewRecorder()
+	env.srv.Handler().ServeHTTP(editRec, editReq)
+	if editRec.Code != http.StatusOK {
+		t.Fatalf("after file edit with stale If-Range: status = %d, want 200", editRec.Code)
+	}
+	if !bytes.Equal(editRec.Body.Bytes(), v2) {
+		t.Fatalf("after file edit: returned %d bytes, want %d full v2 bytes", editRec.Body.Len(), len(v2))
+	}
+	etagV2 := editRec.Header().Get("ETag")
+	if etagV2 == "" || etagV2 == etagV1 {
+		t.Fatalf("expected updated ETag after edit; v1=%q v2=%q", etagV1, etagV2)
+	}
+}
+
+// TestDownloadRange_G2_DirectFileEndpoint verifies HEAD, 206 Range, suffix range,
+// If-Range mismatch 200 fallback, 416, and mid-stream mutation abort on GET /api/files/{id}/download.
+func TestDownloadRange_G2_DirectFileEndpoint(t *testing.T) {
+	live := newLiveEnv(t)
+	tok := live.token()
+
+	content := bytes.Repeat([]byte("0123456789ABCDEF"), 128*1024) // 2 MiB
+	p := filepath.Join(t.TempDir(), "direct_large.bin")
+	if err := os.WriteFile(p, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sf, err := live.reg.Add(p, "direct_large.bin", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dlURL := live.ts.URL + "/api/files/" + sf.ID + "/download"
+
+	// 1. HEAD exposes Accept-Ranges, Content-Length, strong ETag, no body, no Downloads leak
+	headReq, _ := http.NewRequest(http.MethodHead, dlURL, nil)
+	headReq.Header.Set("Authorization", "Bearer "+tok)
+	headResp, err := http.DefaultClient.Do(headReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headResp.Body.Close()
+	if headResp.StatusCode != http.StatusOK {
+		t.Fatalf("HEAD status = %d, want 200", headResp.StatusCode)
+	}
+	if got := headResp.Header.Get("Accept-Ranges"); got != "bytes" {
+		t.Fatalf("HEAD Accept-Ranges = %q, want bytes", got)
+	}
+	etag := headResp.Header.Get("ETag")
+	if etag == "" || strings.HasPrefix(etag, "W/") {
+		t.Fatalf("HEAD ETag = %q, want strong validator", etag)
+	}
+	if len(live.dls.List()) != 0 {
+		t.Fatalf("HEAD created %d download records, want 0", len(live.dls.List()))
+	}
+
+	// 2. Partial Range with matching If-Range -> 206
+	r1Req, _ := http.NewRequest(http.MethodGet, dlURL, nil)
+	r1Req.Header.Set("Authorization", "Bearer "+tok)
+	r1Req.Header.Set("Range", "bytes=1024-65535")
+	r1Req.Header.Set("If-Range", etag)
+	r1Resp, err := http.DefaultClient.Do(r1Req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r1Body, _ := io.ReadAll(r1Resp.Body)
+	r1Resp.Body.Close()
+	if r1Resp.StatusCode != http.StatusPartialContent {
+		t.Fatalf("range 1 status = %d, want 206", r1Resp.StatusCode)
+	}
+	if !bytes.Equal(r1Body, content[1024:65536]) {
+		t.Fatal("range 1 body mismatch")
+	}
+
+	// 3. Suffix range -> last 100 bytes
+	sufReq, _ := http.NewRequest(http.MethodGet, dlURL, nil)
+	sufReq.Header.Set("Authorization", "Bearer "+tok)
+	sufReq.Header.Set("Range", "bytes=-100")
+	sufResp, err := http.DefaultClient.Do(sufReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sufBody, _ := io.ReadAll(sufResp.Body)
+	sufResp.Body.Close()
+	if sufResp.StatusCode != http.StatusPartialContent || !bytes.Equal(sufBody, content[len(content)-100:]) {
+		t.Fatalf("suffix range status=%d len=%d", sufResp.StatusCode, len(sufBody))
+	}
+
+	// 4. Stale If-Range -> 200 full body
+	misReq, _ := http.NewRequest(http.MethodGet, dlURL, nil)
+	misReq.Header.Set("Authorization", "Bearer "+tok)
+	misReq.Header.Set("Range", "bytes=0-99")
+	misReq.Header.Set("If-Range", "\"flit-stale-validator\"")
+	misResp, err := http.DefaultClient.Do(misReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	misBody, _ := io.ReadAll(misResp.Body)
+	misResp.Body.Close()
+	if misResp.StatusCode != http.StatusOK || !bytes.Equal(misBody, content) {
+		t.Fatalf("mismatched If-Range status=%d len=%d, want 200 full", misResp.StatusCode, len(misBody))
+	}
+
+	// 5. Out-of-bounds range -> 416
+	oobReq, _ := http.NewRequest(http.MethodGet, dlURL, nil)
+	oobReq.Header.Set("Authorization", "Bearer "+tok)
+	oobReq.Header.Set("Range", fmt.Sprintf("bytes=%d-", len(content)))
+	oobResp, err := http.DefaultClient.Do(oobReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oobResp.Body.Close()
+	if oobResp.StatusCode != http.StatusRequestedRangeNotSatisfiable {
+		t.Fatalf("OOB status = %d, want 416", oobResp.StatusCode)
+	}
+
+	// 6. Mid-stream file replacement aborts a live ranged stream rather than delivering spliced bytes
+	bigPath := filepath.Join(t.TempDir(), "mutated_stream.bin")
+	const bigSize = 32 << 20
+	sparseFile(t, bigPath, bigSize)
+	sfBig, err := live.reg.Add(bigPath, "mutated_stream.bin", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	liveReq, _ := http.NewRequest(http.MethodGet, live.ts.URL+"/api/files/"+sfBig.ID+"/download", nil)
+	liveReq.Header.Set("Authorization", "Bearer "+tok)
+	liveReq.Header.Set("Range", "bytes=0-")
+	liveResp, err := (&http.Client{}).Do(liveReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer liveResp.Body.Close()
+	first := make([]byte, downloadCopySize)
+	if _, err := io.ReadFull(liveResp.Body, first); err != nil {
+		t.Fatalf("read first chunk: %v", err)
+	}
+	// Replace the file atomically on disk while streaming.
+	// On Windows an open file cannot be renamed over; the server holds the
+	// source open for streaming, so atomic rename-over is impossible there.
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows cannot rename over an open file; mid-stream replacement is verified on Unix")
+	}
+	tmpSwap := bigPath + ".swap"
+	if err := os.WriteFile(tmpSwap, []byte("mutated-short"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmpSwap, bigPath); err != nil {
+		t.Fatal(err)
+	}
+	rest, _ := io.Copy(io.Discard, liveResp.Body)
+	if int64(len(first))+rest >= bigSize {
+		t.Fatalf("mid-stream replaced file still transferred full size (%d >= %d)", int64(len(first))+rest, bigSize)
 	}
 }
