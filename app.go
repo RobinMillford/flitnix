@@ -270,6 +270,7 @@ type App struct {
 
 	store         *transfer.Store
 	quota         *transfer.QuotaManager
+	dataDir       string
 	recoveryDir   string
 	settingsStore *settings.Store
 	sessions      *session.Manager
@@ -287,6 +288,7 @@ type App struct {
 	pairing       *devices.PairingCoordinator
 	visibility    *devices.VisibilityManager
 	discovery     *discovery.Service
+	peerMgr       *peerTransferManager
 	inhibitor     power.Inhibitor
 	updater       *update.Service
 	startupMu     sync.Mutex
@@ -400,6 +402,7 @@ func NewApp() (*App, error) {
 	a := &App{
 		store:         store,
 		quota:         quota,
+		dataDir:       dataDir,
 		recoveryDir:   filepath.Join(dataDir, "recovery"),
 		settingsStore: settingsStore,
 		shortCodes:    session.NewShortCodeManager(session.ShortCodeConfig{}),
@@ -470,6 +473,7 @@ func NewApp() (*App, error) {
 	a.netMonitor.OnChange(func(state netenv.NetworkState) {
 		a.handleNetworkChange(state)
 	})
+	a.peerMgr = newPeerTransferManager(a, dataDir)
 	a.discovery = discovery.NewService(discovery.Config{
 		HostIdentity: a.hostIdentity,
 		TrustedDevices: func() []devices.Device {

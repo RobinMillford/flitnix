@@ -100,6 +100,52 @@ export namespace audit {
 
 }
 
+export namespace client {
+
+	export class PairResult {
+	    hostId: string;
+	    deviceId: string;
+	    hostPublicKey: string;
+	    sasDisplay: string;
+	    hostName: string;
+
+	    static createFrom(source: any = {}) {
+	        return new PairResult(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.hostId = source["hostId"];
+	        this.deviceId = source["deviceId"];
+	        this.hostPublicKey = source["hostPublicKey"];
+	        this.sasDisplay = source["sasDisplay"];
+	        this.hostName = source["hostName"];
+	    }
+	}
+
+	export class PeerProbeInfo {
+	    address: string;
+	    hostId: string;
+	    publicKey: string;
+	    tlsActive: boolean;
+	    reachable: boolean;
+
+	    static createFrom(source: any = {}) {
+	        return new PeerProbeInfo(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.address = source["address"];
+	        this.hostId = source["hostId"];
+	        this.publicKey = source["publicKey"];
+	        this.tlsActive = source["tlsActive"];
+	        this.reachable = source["reachable"];
+	    }
+	}
+
+}
+
 export namespace devices {
 
 	export class Device {
@@ -516,6 +562,155 @@ export namespace guest {
 }
 
 export namespace main {
+
+	export class LocalPeerInfo {
+	    hostId: string;
+	    publicKey: string;
+	    fingerprint: string;
+	    deviceName: string;
+	    os: string;
+	    version: string;
+	    address: string;
+	    port: number;
+
+	    static createFrom(source: any = {}) {
+	        return new LocalPeerInfo(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.hostId = source["hostId"];
+	        this.publicKey = source["publicKey"];
+	        this.fingerprint = source["fingerprint"];
+	        this.deviceName = source["deviceName"];
+	        this.os = source["os"];
+	        this.version = source["version"];
+	        this.address = source["address"];
+	        this.port = source["port"];
+	    }
+	}
+
+	export class PeerPairRequest {
+	    address: string;
+	    port?: number;
+	    expectedHostId?: string;
+	    expectedPubKey?: string;
+	    peerName?: string;
+	    shortCode?: string;
+	    pairingToken?: string;
+
+	    static createFrom(source: any = {}) {
+	        return new PeerPairRequest(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.address = source["address"];
+	        this.port = source["port"];
+	        this.expectedHostId = source["expectedHostId"];
+	        this.expectedPubKey = source["expectedPubKey"];
+	        this.peerName = source["peerName"];
+	        this.shortCode = source["shortCode"];
+	        this.pairingToken = source["pairingToken"];
+	    }
+	}
+
+	export class PeerPairSASPrompt {
+	    requestId: string;
+	    peerName: string;
+	    peerHostId: string;
+	    sas: string;
+	    isPinned: boolean;
+
+	    static createFrom(source: any = {}) {
+	        return new PeerPairSASPrompt(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.requestId = source["requestId"];
+	        this.peerName = source["peerName"];
+	        this.peerHostId = source["peerHostId"];
+	        this.sas = source["sas"];
+	        this.isPinned = source["isPinned"];
+	    }
+	}
+
+	export class PeerSendRequest {
+	    address: string;
+	    port?: number;
+	    expectedHostId?: string;
+	    expectedPubKey?: string;
+	    peerName?: string;
+	    shortCode?: string;
+	    pairingToken?: string;
+	    paths: string[];
+
+	    static createFrom(source: any = {}) {
+	        return new PeerSendRequest(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.address = source["address"];
+	        this.port = source["port"];
+	        this.expectedHostId = source["expectedHostId"];
+	        this.expectedPubKey = source["expectedPubKey"];
+	        this.peerName = source["peerName"];
+	        this.shortCode = source["shortCode"];
+	        this.pairingToken = source["pairingToken"];
+	        this.paths = source["paths"];
+	    }
+	}
+
+	export class PeerTransferJob {
+	    id: string;
+	    peerHostId?: string;
+	    peerName: string;
+	    peerAddress: string;
+	    kind: string;
+	    rootName?: string;
+	    totalItems: number;
+	    completedItems: number;
+	    totalBytes: number;
+	    sentBytes: number;
+	    speed: number;
+	    state: string;
+	    currentFile?: string;
+	    trustedPeer: boolean;
+	    verified: boolean;
+	    error?: string;
+	    // Go type: time
+	    createdAt?: any;
+	    // Go type: time
+	    completedAt?: any;
+
+	    static createFrom(source: any = {}) {
+	        return new PeerTransferJob(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.peerHostId = source["peerHostId"];
+	        this.peerName = source["peerName"];
+	        this.peerAddress = source["peerAddress"];
+	        this.kind = source["kind"];
+	        this.rootName = source["rootName"];
+	        this.totalItems = source["totalItems"];
+	        this.completedItems = source["completedItems"];
+	        this.totalBytes = source["totalBytes"];
+	        this.sentBytes = source["sentBytes"];
+	        this.speed = source["speed"];
+	        this.state = source["state"];
+	        this.currentFile = source["currentFile"];
+	        this.trustedPeer = source["trustedPeer"];
+	        this.verified = source["verified"];
+	        this.error = source["error"];
+	        this.createdAt = source["createdAt"];
+	        this.completedAt = source["completedAt"];
+	    }
+	}
 
 	export class AuditListResult {
 	    entries: audit.Entry[];

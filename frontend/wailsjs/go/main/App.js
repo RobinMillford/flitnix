@@ -38,6 +38,10 @@ export function CancelBatch(arg1) {
   return window['go']['main']['App']['CancelBatch'](arg1);
 }
 
+export function CancelPeerTransfer(arg1) {
+  return window['go']['main']['App']['CancelPeerTransfer'](arg1);
+}
+
 export function CancelUpload(arg1) {
   return window['go']['main']['App']['CancelUpload'](arg1);
 }
@@ -50,8 +54,16 @@ export function ClearAuditHistory() {
   return window['go']['main']['App']['ClearAuditHistory']();
 }
 
+export function ClearCompletedPeerTransfers() {
+  return window['go']['main']['App']['ClearCompletedPeerTransfers']();
+}
+
 export function ClearTextMessages(arg1) {
   return window['go']['main']['App']['ClearTextMessages'](arg1);
+}
+
+export function ConnectAndSendToPeer(arg1) {
+  return window['go']['main']['App']['ConnectAndSendToPeer'](arg1);
 }
 
 export function DeleteGuestTemplate(arg1) {
@@ -86,6 +98,10 @@ export function EndSession(arg1) {
   return window['go']['main']['App']['EndSession'](arg1);
 }
 
+export function EnsurePeerServer() {
+  return window['go']['main']['App']['EnsurePeerServer']();
+}
+
 export function ExportGuestCollection(arg1) {
   return window['go']['main']['App']['ExportGuestCollection'](arg1);
 }
@@ -100,6 +116,10 @@ export function GetBatch(arg1) {
 
 export function GetGuestRoomState() {
   return window['go']['main']['App']['GetGuestRoomState']();
+}
+
+export function GetLocalPeerInfo() {
+  return window['go']['main']['App']['GetLocalPeerInfo']();
 }
 
 export function GetNetworkState() {
@@ -158,6 +178,10 @@ export function ListPendingUploads() {
   return window['go']['main']['App']['ListPendingUploads']();
 }
 
+export function ListPeerTransfers() {
+  return window['go']['main']['App']['ListPeerTransfers']();
+}
+
 export function ListSessions() {
   return window['go']['main']['App']['ListSessions']();
 }
@@ -186,6 +210,14 @@ export function OpenGuestFolder() {
   return window['go']['main']['App']['OpenGuestFolder']();
 }
 
+export function PairWithPeer(arg1) {
+  return window['go']['main']['App']['PairWithPeer'](arg1);
+}
+
+export function InspectPeerTarget(arg1, arg2) {
+  return window['go']['main']['App']['InspectPeerTarget'](arg1, arg2);
+}
+
 export function PauseBatch(arg1) {
   return window['go']['main']['App']['PauseBatch'](arg1);
 }
@@ -196,6 +228,14 @@ export function PickExportDestination() {
 
 export function PickFilesForSharing() {
   return window['go']['main']['App']['PickFilesForSharing']();
+}
+
+export function PickFilesForPeer() {
+  return window['go']['main']['App']['PickFilesForPeer']();
+}
+
+export function PickFolderForPeer() {
+  return window['go']['main']['App']['PickFolderForPeer']();
 }
 
 export function PickFolderForSharing() {
@@ -256,6 +296,10 @@ export function RemoveTrustedDevice(arg1) {
 
 export function ResetSettings() {
   return window['go']['main']['App']['ResetSettings']();
+}
+
+export function ResolvePeerPairingSAS(arg1, arg2) {
+  return window['go']['main']['App']['ResolvePeerPairingSAS'](arg1, arg2);
 }
 
 export function ResumeBatch(arg1) {

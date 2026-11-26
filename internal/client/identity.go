@@ -114,6 +114,30 @@ func LoadOrCreateClientIdentity(filePath string) (*ClientIdentity, error) {
 	return c, nil
 }
 
+// NewClientIdentityFromKeys constructs an in-memory ClientIdentity from an existing
+// Ed25519 public/private hex keypair without touching disk.
+func NewClientIdentityFromKeys(pubHex, privHex string) (*ClientIdentity, error) {
+	pubBytes, err := hex.DecodeString(pubHex)
+	if err != nil || len(pubBytes) != ed25519.PublicKeySize {
+		return nil, devices.ErrInvalidKey
+	}
+	privBytes, err := hex.DecodeString(privHex)
+	if err != nil || len(privBytes) != ed25519.PrivateKeySize {
+		return nil, devices.ErrInvalidKey
+	}
+	pub := ed25519.PublicKey(pubBytes)
+	priv := ed25519.PrivateKey(privBytes)
+	return &ClientIdentity{
+		Version:    1,
+		DeviceID:   devices.Fingerprint(pub),
+		PublicKey:  hex.EncodeToString(pub),
+		PrivateKey: hex.EncodeToString(priv),
+		CreatedAt:  time.Now().UTC(),
+		pubKey:     pub,
+		privKey:    priv,
+	}, nil
+}
+
 // Save persists the ClientIdentity to disk with 0600 permissions atomically.
 func (c *ClientIdentity) Save() error {
 	c.mu.RLock()

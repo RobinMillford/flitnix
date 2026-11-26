@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { t, setLocale, tFn } from './i18n'
-  import type { main, netenv, doctor, guest, audit, devices, power, version, update, transfer, session } from '../wailsjs/go/models'
+  import type { main, netenv, doctor, guest, audit, devices, power, version, update, transfer, session, discovery, client } from '../wailsjs/go/models'
   import { OnFileDrop, OnFileDropOff, EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
   import logoUrl from './assets/images/logo-universal.png'
   import { createRefreshScheduler } from './refreshScheduler'
@@ -12,6 +12,7 @@
 
   // Dedicated Views
   import PersonalTransferView from './views/PersonalTransferView.svelte'
+  import ComputerSharingView from './views/ComputerSharingView.svelte'
   import GuestDropBoxView from './views/GuestDropBoxView.svelte'
   import TemplatesView from './views/TemplatesView.svelte'
   import TrustedDevicesView from './views/TrustedDevicesView.svelte'
@@ -37,11 +38,15 @@
     ListTrustedDevices, RemoveTrustedDevice, SetDeviceAutoApprove, SetDevicePolicy,
     ApprovePairing, DenyPairing, GetPairingStatus, ReArmPairing,
     GetVisibilityState, SetVisibilityMode, SetQRSharingPaused, RevokeAllSessions,
+    GetLocalPeerInfo, EnsurePeerServer, ListNearbyPeers, TriggerNearbyScan,
+    PickFilesForPeer, PickFolderForPeer, ConnectAndSendToPeer, PairWithPeer,
+    InspectPeerTarget, ListPeerTransfers, CancelPeerTransfer, ClearCompletedPeerTransfers,
+    ResolvePeerPairingSAS,
     GetSettings, SaveSettings, ResetSettings, SelectDownloadDirectory, OpenDownloadFolder,
     GetStorageStatus, SleepInhibition, GetAppVersion, CheckForUpdates
   } from '../wailsjs/go/main/App.js'
 
-  const validTabs = ['personal', 'guest', 'templates', 'devices', 'history', 'audit', 'settings'] as const
+  const validTabs = ['personal', 'computers', 'guest', 'templates', 'devices', 'history', 'audit', 'settings'] as const
   type TabName = typeof validTabs[number]
 
   function getInitialTab(): TabName {
@@ -85,6 +90,15 @@
   let visibilityState: devices.VisibilityState | null = null
   let shortCode: session.ShortCodeView | null = null
 
+  // Desktop-to-Desktop (Computer Sharing) state
+  let localPeerInfo: main.LocalPeerInfo | null = null
+  let nearbyPeers: discovery.Peer[] = []
+  let peerTransfers: main.PeerTransferJob[] = []
+  let peerStagedPaths: string[] = []
+  let scanningPeers = false
+  let sendingToPeer = false
+  let pairingSasPrompt: main.PeerPairSASPrompt | null = null
+
   // Persistent Settings state
   let settingsState: main.SettingsView = {
     version: 2,
@@ -123,11 +137,11 @@
   let liveAnnouncement = ''
   let previousPendingTotal = -1
 
-  const tabOrder: Array<'personal' | 'guest' | 'templates' | 'devices' | 'history' | 'audit' | 'settings'> = [
-    'personal', 'guest', 'templates', 'devices', 'history', 'audit', 'settings'
+  const tabOrder: TabName[] = [
+    'personal', 'computers', 'guest', 'templates', 'devices', 'history', 'audit', 'settings'
   ]
 
-  function switchTab(target: 'personal' | 'guest' | 'templates' | 'devices' | 'history' | 'audit' | 'settings'): void {
+  function switchTab(target: TabName): void {
     activeTab = target
     if (target === 'templates') loadTemplates()
     else if (target === 'audit') loadAuditLogs()
@@ -255,9 +269,10 @@
       ListSessions(), ListPendingUploads(), RecentUploads(), RecentDownloads(),
       ListSharedFiles(), ListSharedSources(), ReceiveDirectory(), ServerAddress(),
       ListPendingBatches(), ListBatches(), GetGuestRoomState(), GetPairingStatus(),
-      SleepInhibition(), GetStorageStatus(), GetVisibilityState()
+      SleepInhibition(), GetStorageStatus(), GetVisibilityState(),
+      ListNearbyPeers(), ListPeerTransfers(), GetLocalPeerInfo()
     ]),
-    ([s, p, u, d, f, sourceList, dir, addr, b, allBatches, grState, pStatus, sleepStatus, stStatus, visState]) => {
+    ([s, p, u, d, f, sourceList, dir, addr, b, allBatches, grState, pStatus, sleepStatus, stStatus, visState, peersList, peerJobs, localPeer]) => {
       sessions = s ?? []; pending = p ?? []; uploads = u ?? []; downloads = d ?? []
       files = f ?? []; sources = sourceList ?? []; pendingBatches = b ?? []
       batches = allBatches ?? []
@@ -267,6 +282,9 @@
       sleepInhibition = sleepStatus ?? null
       storageStatus = stStatus ?? null
       visibilityState = visState ?? null
+      nearbyPeers = peersList ?? []
+      peerTransfers = peerJobs ?? []
+      localPeerInfo = localPeer ?? null
       if (!guestDestDir && dir) guestDestDir = dir
 
       const currentPendingTotal = (pending?.length ?? 0) + (pendingBatches?.length ?? 0) + (guestRoomState?.pendingUploads?.length ?? 0)
@@ -517,6 +535,12 @@
 
   function handleDrop(_x: number, _y: number, paths: string[]): void {
     if (!paths.length) return
+    if (activeTab === 'computers') {
+      const merged = new Set([...peerStagedPaths, ...paths])
+      peerStagedPaths = Array.from(merged)
+      showToast(`Staged ${paths.length} item(s) for Computer Sharing`, 'info')
+      return
+    }
     AddDroppedSources(paths).then(() => {
       liveAnnouncement = tFn('announcements.itemsAdded', { count: paths.length })
       refresh()
@@ -896,6 +920,98 @@
     }
   }
 
+  async function ensurePeerServerAction(): Promise<void> {
+    try {
+      await EnsurePeerServer()
+      refresh()
+    } catch {
+      // Non-fatal if network interface is unavailable yet
+    }
+  }
+
+  async function triggerPeerScanAction(): Promise<void> {
+    scanningPeers = true
+    try {
+      nearbyPeers = (await TriggerNearbyScan()) ?? []
+    } catch (err) {
+      report(err)
+    } finally {
+      scanningPeers = false
+    }
+  }
+
+  async function pickPeerFilesAction(): Promise<void> {
+    try {
+      const picked = await PickFilesForPeer()
+      if (picked && picked.length) {
+        const merged = new Set([...peerStagedPaths, ...picked])
+        peerStagedPaths = Array.from(merged)
+      }
+    } catch (err) {
+      report(err)
+    }
+  }
+
+  async function pickPeerFolderAction(): Promise<void> {
+    try {
+      const picked = await PickFolderForPeer()
+      if (picked) {
+        peerStagedPaths = [picked]
+      }
+    } catch (err) {
+      report(err)
+    }
+  }
+
+  async function sendToPeerAction(req: main.PeerSendRequest): Promise<void> {
+    sendingToPeer = true
+    try {
+      const job = await ConnectAndSendToPeer(req)
+      peerTransfers = [job, ...peerTransfers.filter((j) => j.id !== job.id)]
+      peerStagedPaths = []
+      showToast(`Sending to ${job.peerName}…`, 'info')
+    } catch (err) {
+      report(err)
+    } finally {
+      sendingToPeer = false
+    }
+  }
+
+  async function pairWithPeerAction(req: main.PeerPairRequest): Promise<void> {
+    try {
+      const res = await PairWithPeer(req)
+      await loadTrustedDevices()
+      showToast(`Paired with ${req.peerName || res.hostId}`, 'success')
+    } catch (err) {
+      report(err)
+    } finally {
+      pairingSasPrompt = null
+    }
+  }
+
+  async function inspectPeerTargetAction(address: string, port: number): Promise<client.PeerProbeInfo | null> {
+    return await InspectPeerTarget(address, port)
+  }
+
+  async function cancelPeerTransferAction(jobId: string): Promise<void> {
+    try {
+      await CancelPeerTransfer(jobId)
+      refresh()
+    } catch (err) {
+      report(err)
+    }
+  }
+
+  async function clearCompletedPeerTransfersAction(): Promise<void> {
+    await ClearCompletedPeerTransfers()
+    refresh()
+  }
+
+  async function resolvePairSasAction(requestId: string, approved: boolean): Promise<void> {
+    pairingSasPrompt = null
+    await ResolvePeerPairingSAS(requestId, approved)
+  }
+
   async function removeDeviceAction(id: string): Promise<void> {
     try {
       await RemoveTrustedDevice(id)
@@ -909,6 +1025,7 @@
   function pageTitle(tab: string): string {
     switch (tab) {
       case 'personal': return tFn('nav.personal')
+      case 'computers': return tFn('nav.computers')
       case 'guest': return tFn('nav.guest')
       case 'templates': return tFn('nav.templates')
       case 'devices': return tFn('nav.devices')
@@ -922,6 +1039,7 @@
   function pageDescription(tab: string): string {
     switch (tab) {
       case 'personal': return tFn('header.personalDesc')
+      case 'computers': return tFn('header.computersDesc')
       case 'guest': return tFn('header.guestDesc')
       case 'templates': return tFn('header.templatesDesc')
       case 'devices': return tFn('header.devicesDesc')
@@ -1145,6 +1263,22 @@
     EventsOn('visibility:changed', (st: devices.VisibilityState) => {
       visibilityState = st
     })
+    EventsOn('discovery:peers', (peersList: discovery.Peer[]) => {
+      if (!disposed) nearbyPeers = peersList ?? []
+    })
+    EventsOn('peer-transfer:updated', (job: main.PeerTransferJob) => {
+      if (!disposed && job) {
+        const idx = peerTransfers.findIndex((x) => x.id === job.id)
+        if (idx >= 0) {
+          peerTransfers = [...peerTransfers.slice(0, idx), job, ...peerTransfers.slice(idx + 1)]
+        } else {
+          peerTransfers = [job, ...peerTransfers]
+        }
+      }
+    })
+    EventsOn('peer-pair:sas', (prompt: main.PeerPairSASPrompt) => {
+      if (!disposed) pairingSasPrompt = prompt
+    })
     GetAppVersion().then((v) => {
       appVersionInfo = v
     }).catch(report)
@@ -1162,6 +1296,9 @@
       OnFileDropOff()
       EventsOff('network:changed')
       EventsOff('visibility:changed')
+      EventsOff('discovery:peers')
+      EventsOff('peer-transfer:updated')
+      EventsOff('peer-pair:sas')
     }
   })
 </script>
@@ -1207,6 +1344,30 @@
             <span class="tab-badge pulse-green">{pending.length + pendingBatches.length}</span>
           {:else if sessions.length > 0}
             <span class="tab-dot-online" title="Session active"></span>
+          {/if}
+        </button>
+
+        <button
+          type="button"
+          id="tab-computers"
+          role="tab"
+          aria-selected={activeTab === 'computers'}
+          aria-controls="panel-computers"
+          tabindex={activeTab === 'computers' ? 0 : -1}
+          class="nav-tab-btn"
+          class:active={activeTab === 'computers'}
+          on:click={() => switchTab('computers')}
+        >
+          <span class="nav-tab-icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+              <line x1="8" y1="21" x2="16" y2="21"></line>
+              <line x1="12" y1="17" x2="12" y2="21"></line>
+            </svg>
+          </span>
+          <span class="nav-tab-label">{$t('nav.computers')}</span>
+          {#if nearbyPeers.length > 0}
+            <span class="tab-badge">{nearbyPeers.length}</span>
           {/if}
         </button>
 
@@ -1502,6 +1663,38 @@
               {revokeAllSessionsAction}
               {regenerateShortCodeAction}
               goToHistory={() => switchTab('history')}
+            />
+          </div>
+        {:else if activeTab === 'computers'}
+          <div id="panel-computers" role="tabpanel" aria-labelledby="tab-computers" tabindex="0">
+            <ComputerSharingView
+              {localPeerInfo}
+              {nearbyPeers}
+              {peerTransfers}
+              stagedPaths={peerStagedPaths}
+              {visibilityState}
+              {pending}
+              {pendingBatches}
+              {serverAddress}
+              scanning={scanningPeers}
+              sending={sendingToPeer}
+              {pairingSasPrompt}
+              ensurePeerServerAction={ensurePeerServerAction}
+              triggerScanAction={triggerPeerScanAction}
+              {setVisibilityModeAction}
+              pickFilesAction={pickPeerFilesAction}
+              pickFolderAction={pickPeerFolderAction}
+              clearStagedAction={() => { peerStagedPaths = [] }}
+              {sendToPeerAction}
+              {pairWithPeerAction}
+              {inspectPeerTargetAction}
+              {cancelPeerTransferAction}
+              clearCompletedAction={clearCompletedPeerTransfersAction}
+              {resolvePairSasAction}
+              {decide}
+              {decideBatch}
+              {handleOpenDownloadFolder}
+              {isBusy}
             />
           </div>
         {:else if activeTab === 'guest'}

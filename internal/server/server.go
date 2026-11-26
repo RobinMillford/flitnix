@@ -323,6 +323,11 @@ func (s *Server) bind() (net.Listener, error) {
 		if bindErr != nil {
 			return
 		}
+		if s.cfg.Services != nil && s.cfg.Services.HostIdentity != nil {
+			if cert, certErr := NewHostIdentityCertificate(s.cfg.Services.HostIdentity); certErr == nil {
+				ln = newTLSPeekListener(ln, cert)
+			}
+		}
 		s.mu.Lock()
 		s.listener = ln
 		s.mu.Unlock()

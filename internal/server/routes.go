@@ -92,8 +92,11 @@ func newRouter(services *Services, stall, downloadStall time.Duration, grants *D
 		// endpoint set without a live session either way.
 		mux.HandleFunc("POST /api/connect-code", handleConnectCode(services))
 		devLimiter := newDeviceSessionLimiter()
+		peerStore := newPeerChallengeStore()
 		mux.HandleFunc("POST /api/device-sessions/challenge", handleDeviceSessionChallenge(services, devLimiter))
 		mux.HandleFunc("POST /api/device-sessions/verify", handleDeviceSessionVerify(services, devLimiter))
+		mux.HandleFunc("POST /api/peer/challenge", handlePeerChallenge(services, devLimiter, peerStore))
+		mux.HandleFunc("POST /api/peer/connect", handlePeerConnect(services, devLimiter, peerStore))
 		api := newAPIMux(services, stall, grants)
 		mux.Handle("/api/", requireSession(services, api.ServeHTTP))
 		downloadHandler := serveArchiveDownload(services, grants, downloadStall)
