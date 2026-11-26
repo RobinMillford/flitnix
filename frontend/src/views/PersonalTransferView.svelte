@@ -65,7 +65,13 @@
     return ['pending', 'approved', 'uploading', 'interrupted', 'paused'].includes(u.state)
   }
   function activeDownload(d: main.DownloadView): boolean {
-    return ['starting', 'transferring', 'finalizing'].includes(d.state)
+    return ['starting', 'transferring', 'finalizing', 'paused'].includes(d.state)
+  }
+  function downloadStateLabel(d: main.DownloadView): string {
+    if (d.state === 'paused') return `Paused — ${formatBytes(d.written)} of ${formatBytes(d.size)}`
+    if (d.state === 'starting') return 'Starting…'
+    if (d.state === 'finalizing') return 'Finishing…'
+    return d.state
   }
   function activeBatch(b: main.BatchView): boolean {
     return b.approvalState === 'approved' && ['queued', 'transferring', 'interrupted', 'paused'].includes(b.state)
@@ -396,7 +402,7 @@
                   · ETA {calcEta(d.written, d.size, d.speed)}
                 {/if}
               </span>
-              <span class="transfer-substatus">{d.state}</span>
+              <span class="transfer-substatus">{downloadStateLabel(d)}</span>
             </div>
           </div>
         {/each}
