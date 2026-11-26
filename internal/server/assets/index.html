@@ -44,6 +44,15 @@
   <section class="card card--warn" id="rescan" hidden>
     <h2>Scan the QR code</h2>
     <p id="rescan-text">Open this page by scanning the QR code shown on the Flitnix desktop. Each link works for one session only.</p>
+    <form id="connect-code-form" class="code-form" autocomplete="off">
+      <label for="connect-code-input" class="code-label">Or enter the 6-digit code shown on Flitnix:</label>
+      <div class="code-row">
+        <input id="connect-code-input" class="code-input" type="text" inputmode="numeric" pattern="[0-9\s\-]*" maxlength="7" placeholder="482 915" autocomplete="one-time-code" aria-label="6-digit connection code">
+        <button type="submit" class="btn" id="connect-code-btn">Connect</button>
+      </div>
+      <p class="code-error" id="connect-code-error" hidden role="alert"></p>
+      <p class="muted code-hint">Look under the QR code in Flitnix on your computer. Codes expire quickly and work once.</p>
+    </form>
   </section>
 
   <section class="flow" id="flow" hidden>

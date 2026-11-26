@@ -6,6 +6,7 @@ import {guest} from '../models';
 import {version} from '../models';
 import {netenv} from '../models';
 import {devices} from '../models';
+import {session} from '../models';
 import {audit} from '../models';
 import {doctor} from '../models';
 import {power} from '../models';
@@ -65,6 +66,8 @@ export function GetNetworkState():Promise<netenv.NetworkState>;
 
 export function GetPairingStatus():Promise<devices.PairingStatusView>;
 
+export function GetSessionShortCode(arg1:string):Promise<session.ShortCodeView>;
+
 export function GetSettings():Promise<main.SettingsView>;
 
 export function GetStorageStatus():Promise<transfer.StorageStatus>;
@@ -112,6 +115,8 @@ export function PickGuestDestination():Promise<string>;
 export function ReArmPairing():Promise<void>;
 
 export function ReceiveDirectory():Promise<string>;
+
+export function RegenerateSessionShortCode(arg1:string):Promise<session.ShortCodeView>;
 
 export function RecentDownloads():Promise<Array<main.DownloadView>>;
 
