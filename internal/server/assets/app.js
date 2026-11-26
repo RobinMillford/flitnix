@@ -26,11 +26,16 @@
   // Token: read once, then scrub the fragment.
   // ------------------------------------------------------------------
   var token = null;
+  var requestedDeviceId = null;
   var frag = window.location.hash || "";
   if (frag.length > 1) {
     var cand = frag.slice(1);
     try { cand = decodeURIComponent(cand); } catch (err) { /* keep raw */ }
-    if (TOKEN_RE.test(cand)) token = cand;
+    if (TOKEN_RE.test(cand)) {
+      token = cand;
+    } else if (cand.indexOf("device=") === 0) {
+      requestedDeviceId = cand.slice(7).split("&")[0] || null;
+    }
   }
 
   function diagnoseUpload(kind, job) {
@@ -45,7 +50,7 @@
     return /Firefox/i.test(navigator.userAgent || "") &&
       bytes >= FIREFOX_LARGE_UPLOAD_BYTES;
   }
-  if (frag) {
+  if (token && frag) {
     // One-time use: the link disappears from the address bar (and from any
     // "reopen tab" paste target) the moment the page takes the token.
     window.history.replaceState(null, "",
@@ -67,6 +72,25 @@
   var connectCodeInput = document.getElementById("connect-code-input");
   var connectCodeBtn = document.getElementById("connect-code-btn");
   var connectCodeError = document.getElementById("connect-code-error");
+  var reconnectPanel = document.getElementById("reconnect-panel");
+  var reconnectLabel = document.getElementById("reconnect-label");
+  var reconnectBtn = document.getElementById("reconnect-btn");
+  var reconnectForgetBtn = document.getElementById("reconnect-forget-btn");
+  var reconnectError = document.getElementById("reconnect-error");
+  var trustPanel = document.getElementById("trust-panel");
+  var trustBadge = document.getElementById("trust-badge");
+  var trustDesc = document.getElementById("trust-desc");
+  var pairControls = document.getElementById("pair-controls");
+  var pairDeviceNameInput = document.getElementById("pair-device-name");
+  var pairStartBtn = document.getElementById("pair-start-btn");
+  var pairSasBox = document.getElementById("pair-sas-box");
+  var pairSasCode = document.getElementById("pair-sas-code");
+  var pairStatusText = document.getElementById("pair-status-text");
+  var pairedInfoBox = document.getElementById("paired-info-box");
+  var pairedMetaText = document.getElementById("paired-meta-text");
+  var copyReconnectBtn = document.getElementById("copy-reconnect-btn");
+  var unpairLocalBtn = document.getElementById("unpair-local-btn");
+  var pairError = document.getElementById("pair-error");
   var pickBtn = document.getElementById("pick-btn");
   var pickFolderBtn = document.getElementById("pick-folder-btn");
   var fileInput = document.getElementById("file-input");
@@ -2326,12 +2350,317 @@
     });
   }
 
+  function defaultBrowserDeviceName() {
+    var ua = navigator.userAgent || "";
+    if (/iPhone/i.test(ua)) return "iPhone Safari";
+    if (/iPad/i.test(ua)) return "iPad Safari";
+    if (/Android/i.test(ua)) return "Android Browser";
+    return "Mobile Browser";
+  }
+
+  function showPairError(msg) {
+    if (!pairError) return;
+    pairError.textContent = msg || "";
+    pairError.hidden = !msg;
+  }
+
+  function showReconnectError(msg) {
+    if (!reconnectError) return;
+    reconnectError.textContent = msg || "";
+    reconnectError.hidden = !msg;
+  }
+
+  function setPairedUI(rec) {
+    if (!trustPanel) return;
+    if (rec && rec.deviceId) {
+      if (trustBadge) {
+        trustBadge.className = "badge badge--done";
+        trustBadge.textContent = "Paired";
+      }
+      if (pairControls) pairControls.hidden = true;
+      if (pairSasBox) pairSasBox.hidden = true;
+      if (pairedInfoBox) pairedInfoBox.hidden = false;
+      if (pairedMetaText) {
+        pairedMetaText.textContent = "Trusted as \"" + (rec.deviceName || "This Browser") + "\". Bookmark the one-tap URL below to reconnect without scanning a new QR code.";
+      }
+      if (copyReconnectBtn) {
+        copyReconnectBtn.onclick = function () {
+          var bookmarkUrl = window.location.origin + "/#device=" + encodeURIComponent(rec.deviceId);
+          copyToClipboard(bookmarkUrl, function () {
+            copyReconnectBtn.textContent = "Copied Bookmark URL!";
+            setTimeout(function () { copyReconnectBtn.textContent = "Copy One-Tap Bookmark URL"; }, 1800);
+          });
+        };
+      }
+      if (unpairLocalBtn) {
+        unpairLocalBtn.onclick = function () {
+          unpairLocalBtn.disabled = true;
+          api("/api/devices/" + encodeURIComponent(rec.deviceId), { method: "DELETE" }).catch(function () {})
+            .then(function () {
+              return window.FlitnixDeviceCrypto.removePairedHost(rec.deviceId);
+            })
+            .then(function () {
+              setPairedUI(null);
+            })
+            .finally(function () {
+              unpairLocalBtn.disabled = false;
+            });
+        };
+      }
+      return;
+    }
+    if (trustBadge) {
+      trustBadge.className = "badge badge--waiting";
+      trustBadge.textContent = "Not paired";
+    }
+    if (pairControls) pairControls.hidden = false;
+    if (pairSasBox) pairSasBox.hidden = true;
+    if (pairedInfoBox) pairedInfoBox.hidden = true;
+  }
+
+  var trustedPairingBound = false;
+  function initTrustedPairingUI() {
+    if (!trustPanel) return;
+    var cryptoApi = window.FlitnixDeviceCrypto;
+    if (!cryptoApi || typeof indexedDB === "undefined") {
+      if (trustDesc) {
+        trustDesc.textContent = "Device pairing is unavailable in private browsing modes without IndexedDB. QR and 6-digit codes continue working normally.";
+      }
+      if (pairControls) pairControls.hidden = true;
+      return;
+    }
+    if (pairDeviceNameInput && !pairDeviceNameInput.value) {
+      pairDeviceNameInput.value = defaultBrowserDeviceName();
+    }
+    cryptoApi.listPairedHostsForOrigin(window.location.origin).then(function (hosts) {
+      var match = (hosts && hosts.length > 0) ? hosts[0] : null;
+      if (!match) {
+        setPairedUI(null);
+        return;
+      }
+      return api("/api/devices").then(function (list) {
+        var enrolled = Array.isArray(list) && list.some(function (d) { return d && d.id === match.deviceId; });
+        if (!enrolled) {
+          return cryptoApi.removePairedHost(match.deviceId).then(function () { setPairedUI(null); });
+        }
+        setPairedUI(match);
+      }).catch(function () {
+        setPairedUI(match);
+      });
+    }).catch(function () {
+      setPairedUI(null);
+    });
+
+    if (trustedPairingBound || !pairStartBtn) return;
+    trustedPairingBound = true;
+    pairStartBtn.addEventListener("click", function () {
+      var deviceName = (pairDeviceNameInput && pairDeviceNameInput.value.trim()) || defaultBrowserDeviceName();
+      showPairError("");
+      pairStartBtn.disabled = true;
+      var identity;
+      var eph;
+      var challengeResp;
+      cryptoApi.getOrCreateIdentity().then(function (idRec) {
+        identity = idRec;
+        eph = cryptoApi.createEphemeralPairingData();
+        return api("/api/pair/challenge", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            clientPublicKey: identity.publicKeyHex,
+            clientCommitment: eph.commitmentHex
+          })
+        });
+      }).then(function (chal) {
+        challengeResp = chal;
+        return api("/api/pair/reveal", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            pairingNonce: chal.pairingNonce,
+            clientEphemeralKey: eph.ephemeralPublicKeyHex,
+            clientSalt: eph.saltHex
+          })
+        });
+      }).then(function (rev) {
+        var verified = cryptoApi.completeHostReveal({
+          token: token,
+          hostPublicKeyHex: challengeResp.hostPublicKey,
+          hostCommitmentHex: challengeResp.hostCommitment,
+          hostEphemeralHex: rev.hostEphemeralKey,
+          hostSaltHex: rev.hostSalt,
+          hostProofHex: rev.hostProof,
+          pairingNonceHex: challengeResp.pairingNonce,
+          clientPublicKeyHex: identity.publicKeyHex,
+          clientCommitmentHex: eph.commitmentHex,
+          clientEphemeralPublicKey: eph.ephemeralPublicKey,
+          clientEphemeralSecretKey: eph.ephemeralSecretKey,
+          clientSecretKeyHex: identity.secretKeyHex
+        });
+        if (pairSasCode) pairSasCode.textContent = verified.sas;
+        if (pairStatusText) pairStatusText.textContent = "Confirm this code on the Flitnix desktop prompt to approve…";
+        if (pairSasBox) pairSasBox.hidden = false;
+
+        return api("/api/pair/request", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            deviceName: deviceName,
+            clientPublicKey: identity.publicKeyHex,
+            pairingNonce: challengeResp.pairingNonce,
+            clientProof: verified.clientProofHex
+          })
+        });
+      }).then(function (enrolled) {
+        if (!enrolled || !enrolled.deviceId) {
+          throw new Error("Desktop rejected pairing or returned invalid response");
+        }
+        return cryptoApi.savePairedHost({
+          origin: window.location.origin,
+          hostId: challengeResp.hostId,
+          deviceId: enrolled.deviceId,
+          deviceName: deviceName,
+          hostPublicKey: challengeResp.hostPublicKey
+        }).then(function (saved) {
+          try {
+            if (window.history && window.history.replaceState) {
+              window.history.replaceState(null, "", "#device=" + encodeURIComponent(enrolled.deviceId));
+            }
+          } catch (_) {}
+          setPairedUI(saved);
+        });
+      }).catch(function (err) {
+        if (pairSasBox) pairSasBox.hidden = true;
+        showPairError((err && err.message) || "Pairing failed.");
+      }).finally(function () {
+        pairStartBtn.disabled = false;
+      });
+    });
+  }
+
+  function performOneTapReconnect(rec) {
+    var cryptoApi = window.FlitnixDeviceCrypto;
+    if (!cryptoApi || !rec || !rec.deviceId) return Promise.reject(new Error("Missing paired device"));
+    showReconnectError("");
+    if (reconnectBtn) reconnectBtn.disabled = true;
+    var identity;
+    var challengeData;
+    return cryptoApi.loadIdentity().then(function (idRec) {
+      if (!idRec || !idRec.secretKeyHex) {
+        throw new Error("Device signing key not found in browser storage. Pair this browser again.");
+      }
+      identity = idRec;
+      return fetch("/api/device-sessions/challenge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "application/json" },
+        body: JSON.stringify({ deviceId: rec.deviceId }),
+        cache: "no-store"
+      });
+    }).then(function (res) {
+      return readBody(res).then(function (body) {
+        if (res.status >= 200 && res.status < 300) return body;
+        var err = new Error((body && body.error) || ("Challenge failed (" + res.status + ")"));
+        err.code = body && body.code;
+        err.status = res.status;
+        throw err;
+      });
+    }).then(function (chal) {
+      challengeData = chal;
+      var signature = cryptoApi.signDeviceSessionChallenge({
+        hostId: chal.hostId,
+        deviceId: chal.deviceId,
+        nonce: chal.nonce,
+        timestamp: chal.timestamp,
+        secretKeyHex: identity.secretKeyHex
+      });
+      return fetch("/api/device-sessions/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "application/json" },
+        body: JSON.stringify({
+          deviceId: chal.deviceId,
+          hostId: chal.hostId,
+          nonce: chal.nonce,
+          timestamp: chal.timestamp,
+          signature: signature
+        }),
+        cache: "no-store"
+      });
+    }).then(function (res) {
+      return readBody(res).then(function (body) {
+        if (res.status >= 200 && res.status < 300 && body && body.token) return body;
+        var err = new Error((body && body.error) || ("Verification failed (" + res.status + ")"));
+        err.code = body && body.code;
+        err.status = res.status;
+        throw err;
+      });
+    }).then(function (sessionResp) {
+      token = sessionResp.token;
+      try {
+        if (window.history && window.history.replaceState) {
+          window.history.replaceState(null, "", "#device=" + encodeURIComponent(sessionResp.deviceId));
+        }
+      } catch (_) {}
+      startConnectedSession();
+    }).catch(function (err) {
+      if (err && err.code === "device_revoked") {
+        cryptoApi.removePairedHost(rec.deviceId).catch(function () {});
+        if (reconnectPanel) reconnectPanel.hidden = true;
+        showCodeError("This browser's trusted pairing was removed on the desktop. Scan QR or use a 6-digit code.");
+      } else {
+        showReconnectError((err && err.message) || "Reconnect failed.");
+      }
+    }).finally(function () {
+      if (reconnectBtn) reconnectBtn.disabled = false;
+    });
+  }
+
+  function initOneTapReconnect() {
+    var cryptoApi = window.FlitnixDeviceCrypto;
+    if (!cryptoApi || typeof indexedDB === "undefined" || !reconnectPanel) return;
+    var lookup = requestedDeviceId
+      ? cryptoApi.getPairedHostByDeviceId(requestedDeviceId)
+      : cryptoApi.listPairedHostsForOrigin(window.location.origin).then(function (list) {
+          return (list && list.length > 0) ? list[0] : null;
+        });
+    lookup.then(function (rec) {
+      if (!rec || !rec.deviceId) {
+        reconnectPanel.hidden = true;
+        return;
+      }
+      if (reconnectLabel) {
+        reconnectLabel.textContent = "Paired browser detected (" + (rec.deviceName || "Trusted Device") + ")";
+      }
+      reconnectPanel.hidden = false;
+      if (reconnectBtn) {
+        reconnectBtn.onclick = function () { performOneTapReconnect(rec); };
+      }
+      if (reconnectForgetBtn) {
+        reconnectForgetBtn.onclick = function () {
+          cryptoApi.removePairedHost(rec.deviceId).then(function () {
+            reconnectPanel.hidden = true;
+            try {
+              if (window.history && window.history.replaceState) {
+                window.history.replaceState(null, "", window.location.pathname + window.location.search);
+              }
+            } catch (_) {}
+          });
+        };
+      }
+      if (requestedDeviceId && rec.deviceId === requestedDeviceId) {
+        performOneTapReconnect(rec);
+      }
+    }).catch(function () {
+      reconnectPanel.hidden = true;
+    });
+  }
+
   function startConnectedSession() {
     appState.ended = false;
     if (rescanCard) rescanCard.hidden = true;
     setStatus("ready", "Connected — pick files to send or download the shared ones");
     flowEl.hidden = false;
     updateAwarenessUI();
+    initTrustedPairingUI();
     refreshFiles();
     initQuickText();
     scheduleTextPoll();
@@ -2377,7 +2706,7 @@
         connectCodeInput.value = "";
         try {
           if (window.history && window.history.replaceState) {
-            window.history.replaceState(null, "", "#t=" + encodeURIComponent(token));
+            window.history.replaceState(null, "", window.location.pathname + window.location.search);
           }
         } catch (_) {}
         startConnectedSession();
@@ -2460,8 +2789,9 @@
       // No pairing token in this load. No session was ever opened here,
       // so nothing "ended": the status line names the real next step.
       endSession("Scan QR or enter 6-digit code",
-        "Scan the QR code on the Flitnix desktop, or enter the 6-digit connection code shown right below the QR code.",
+        "Scan the QR code on the Flitnix desktop, enter the 6-digit connection code, or tap One-Tap Reconnect if previously paired.",
         "Ready to connect");
+      initOneTapReconnect();
       return;
     }
 

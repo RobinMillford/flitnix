@@ -91,6 +91,9 @@ func newRouter(services *Services, stall, downloadStall time.Duration, grants *D
 		// authentication; a token holder learns nothing about the
 		// endpoint set without a live session either way.
 		mux.HandleFunc("POST /api/connect-code", handleConnectCode(services))
+		devLimiter := newDeviceSessionLimiter()
+		mux.HandleFunc("POST /api/device-sessions/challenge", handleDeviceSessionChallenge(services, devLimiter))
+		mux.HandleFunc("POST /api/device-sessions/verify", handleDeviceSessionVerify(services, devLimiter))
 		api := newAPIMux(services, stall, grants)
 		mux.Handle("/api/", requireSession(services, api.ServeHTTP))
 		downloadHandler := serveArchiveDownload(services, grants, downloadStall)
