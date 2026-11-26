@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -41,22 +40,6 @@ func upIf(name string) net.Interface {
 		Flags:        net.FlagUp | net.FlagBroadcast | net.FlagMulticast,
 		HardwareAddr: []byte{0x02, 0x11, 0x22, 0x33, 0x44, 0x55},
 	}
-}
-
-// newTestApp builds a fully wired App whose runtime context is ready and
-// whose network source is injectable. tests re-point a.source at fakes.
-func newTestApp(t *testing.T) *App {
-	t.Helper()
-	cfgDir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", cfgDir)
-	t.Setenv("AppData", cfgDir)
-	a, err := NewApp()
-	if err != nil {
-		t.Fatalf("NewApp: %v", err)
-	}
-	a.startup(context.Background())
-	t.Cleanup(func() { a.shutdown(context.Background()) })
-	return a
 }
 
 // tempSharedFile creates one real regular file for registry.Add, which
@@ -303,9 +286,6 @@ func TestEnsureServerBindsExplicitAddress(t *testing.T) {
 }
 
 func TestEnsureServerReusesSameAddress(t *testing.T) {
-	if runtime.GOOS == "darwin" {
-		t.Skip("macOS runners cannot bind the alternate loopback alias, so loopTestIP falls back to 127.0.0.1 while netenv selects the LAN IP; the two bind addresses differ and pairing_replacement revokes sessions")
-	}
 	a := newTestApp(t)
 	ip := loopTestIP(t)
 	probeLANPort(t, ip)
@@ -479,9 +459,6 @@ func TestStartSessionEndToEnd(t *testing.T) {
 }
 
 func TestStartSessionSecondCallIsTheSameAddress(t *testing.T) {
-	if runtime.GOOS == "darwin" {
-		t.Skip("macOS runners: StartSession('') picks loopback 127.0.0.1 while StartSession(lanIP) picks 192.168.x.x; the bind address genuinely changes")
-	}
 	a := newTestApp(t)
 	lip := lanIPv4(t)
 	probeLANPort(t, lip)
@@ -559,9 +536,6 @@ func TestSessionQREndToEnd(t *testing.T) {
 // ---- end-of-session lifecycle coupling ----
 
 func TestEndSessionStopsServerWhenLastLeaves(t *testing.T) {
-	if runtime.GOOS == "darwin" {
-		t.Skip("macOS runners: netenv interface selection and loopback alias differ from Linux/Windows, changing the server bind address mid-test")
-	}
 	a := newTestApp(t)
 	ip := loopTestIP(t)
 	probeLANPort(t, ip)
