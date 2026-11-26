@@ -221,4 +221,50 @@ func TestTwoDesktopInstancesBidirectionalAndTrustedTransfer(t *testing.T) {
 	if doneRev.State != "completed" || !doneRev.Verified {
 		t.Fatalf("reverse peer job failed: %+v", doneRev)
 	}
+
+	// 5. TOFU violation: if addrB suddenly serves a rotated/swapped HostID, ConnectAndSendToPeer fails closed!
+	cfgC := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfgC)
+	appC, err := NewApp()
+	if err != nil {
+		t.Fatalf("NewApp C: %v", err)
+	}
+	t.Cleanup(func() { appC.shutdown(context.Background()) })
+	if err := appC.ensureServer("127.0.0.1:0"); err != nil {
+		t.Fatalf("appC.ensureServer: %v", err)
+	}
+	_, _ = appC.SetVisibilityMode(string(devices.VisibilityEveryone))
+	jobTofuMismatch, err := appA.ConnectAndSendToPeer(PeerSendRequest{
+		Address:        appC.ServerAddress(),
+		ExpectedHostID: probeB.HostID,
+		ExpectedPubKey: probeB.PublicKey,
+		Paths:          []string{safeFile},
+	})
+	if err != nil {
+		t.Fatalf("jobTofuMismatch kickoff: %v", err)
+	}
+	doneTofu := waitForPeerJobDone(t, appA, jobTofuMismatch.ID, 5*time.Second)
+	if doneTofu.State != "failed" {
+		t.Fatalf("expected TOFU hostId mismatch to fail closed, got %+v", doneTofu)
+	}
+
+	// 6. Authority key swap without ExpectedHostID against previously paired LastAddress (addrB) vs appC?
+	// Even if A removes B's trust on B side, A must surface revocation clearly instead of falling back silently.
+	if err := appB.RemoveTrustedDevice(pairRes.DeviceID); err != nil {
+		t.Fatalf("B RemoveTrustedDevice: %v", err)
+	}
+	_, _ = appB.SetVisibilityMode(string(devices.VisibilityEveryone))
+	jobRevoked, err := appA.ConnectAndSendToPeer(PeerSendRequest{
+		Address:        addrB,
+		ExpectedHostID: probeB.HostID,
+		ExpectedPubKey: probeB.PublicKey,
+		Paths:          []string{safeFile},
+	})
+	if err != nil {
+		t.Fatalf("jobRevoked kickoff: %v", err)
+	}
+	doneRevoked := waitForPeerJobDone(t, appA, jobRevoked.ID, 5*time.Second)
+	if doneRevoked.State != "failed" {
+		t.Fatalf("expected revoked peer to fail explicitly instead of silently downgrading, got %+v", doneRevoked)
+	}
 }

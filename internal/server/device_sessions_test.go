@@ -254,6 +254,39 @@ const cryptoApi = require(process.env.ASSETS_DIR + "/device-crypto.js");
     headers: { "Authorization": "Bearer " + rcSession.token }
   });
   assert.strictEqual(filesRes.status, 200, "reconnected token failed /api/files");
+
+  // Verify completeHostReveal fails closed when expectedHostIdHex does not match hostPublicKeyHex.
+  assert.throws(() => {
+    cryptoApi.completeHostReveal({
+      token: qrToken,
+      expectedHostIdHex: "0000000000000000000000000000000000000000000000000000000000000000",
+      hostPublicKeyHex: chal.hostPublicKey,
+      hostCommitmentHex: chal.hostCommitment,
+      hostEphemeralHex: rev.hostEphemeralKey,
+      hostSaltHex: rev.hostSalt,
+      hostProofHex: rev.hostProof,
+      pairingNonceHex: chal.pairingNonce,
+      clientPublicKeyHex: id.publicKeyHex,
+      clientCommitmentHex: eph.commitmentHex,
+      clientEphemeralPublicKey: eph.ephemeralPublicKey,
+      clientEphemeralSecretKey: eph.ephemeralSecretKey,
+      clientSecretKeyHex: id.secretKeyHex
+    });
+  }, /hostId does not match/);
+
+  // Verify probeStorage fails closed (no silent fallback) when IndexedDB is unavailable or blocked.
+  await assert.rejects(() => cryptoApi.probeStorage(), /IndexedDB unavailable/);
+
+  // Verify self-removal revokes the active device session immediately.
+  const delRes = await fetch(baseUrl + "/api/devices/" + encodeURIComponent(enrolled.deviceId), {
+    method: "DELETE",
+    headers: { "Authorization": "Bearer " + qrToken }
+  });
+  assert.strictEqual(delRes.status, 200, "device self-remove failed");
+  const afterRevokeRes = await fetch(baseUrl + "/api/files", {
+    headers: { "Authorization": "Bearer " + rcSession.token }
+  });
+  assert.strictEqual(afterRevokeRes.status, 401, "revoked device session token still accepted");
 })();
 `
 	cmd := exec.Command("node", "-e", script)
@@ -265,5 +298,22 @@ const cryptoApi = require(process.env.ASSETS_DIR + "/device-crypto.js");
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("JS crypto interop failed: %v\nOutput:\n%s", err, string(out))
+	}
+
+	// Verify PairingCoordinator.Reveal rejects cross-session token hijacking fail-closed.
+	sess2, err := h.svcs.Sessions.Create()
+	if err != nil {
+		t.Fatalf("Sessions.Create: %v", err)
+	}
+	pubHex := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	commitHex := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	d1 := h.sess.Digest()
+	chal, err := h.svcs.Pairing.InitChallenge(d1[:], pubHex, commitHex)
+	if err != nil {
+		t.Fatalf("InitChallenge: %v", err)
+	}
+	d2 := sess2.Digest()
+	if _, err := h.svcs.Pairing.Reveal(d2[:], chal.PairingNonce, pubHex, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"); err == nil {
+		t.Fatal("expected Reveal with mismatched session token to fail closed")
 	}
 }

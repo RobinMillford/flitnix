@@ -1,17 +1,19 @@
 package discovery
 
 import (
-	"bytes"
 	"context"
+	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"net"
 	"runtime"
 	"sort"
@@ -50,18 +52,19 @@ const (
 
 // Peer represents one sanitized, cryptographically bound desktop instance on the LAN.
 type Peer struct {
-	HostID        string    `json:"hostId"`
-	PublicKey     string    `json:"publicKey"`
-	DeviceName    string    `json:"deviceName"`
-	OS            string    `json:"os"`
-	Version       string    `json:"version"`
-	Address       string    `json:"address"`
-	Port          int       `json:"port"`
-	Addresses     []string  `json:"addresses,omitempty"`
-	Trusted       bool      `json:"trusted"`
-	AutoApprove   bool      `json:"autoApprove"`
-	InterfaceName string    `json:"interfaceName,omitempty"`
-	LastSeen      time.Time `json:"lastSeen"`
+	HostID              string    `json:"hostId"`
+	PublicKey           string    `json:"publicKey"`
+	DeviceName          string    `json:"deviceName"`
+	OS                  string    `json:"os"`
+	Version             string    `json:"version"`
+	Address             string    `json:"address"`
+	Port                int       `json:"port"`
+	Addresses           []string  `json:"addresses,omitempty"`
+	Trusted             bool      `json:"trusted"`
+	AutoApprove         bool      `json:"autoApprove"`
+	NameConflictWarning bool      `json:"nameConflictWarning,omitempty"`
+	InterfaceName       string    `json:"interfaceName,omitempty"`
+	LastSeen            time.Time `json:"lastSeen"`
 }
 
 // LocalEndpoint describes the currently selected local LAN interface and service port.
@@ -109,6 +112,7 @@ type beaconEnvelope struct {
 	OS         string         `json:"os,omitempty"`
 	Version    string         `json:"version,omitempty"`
 	Port       int            `json:"port,omitempty"`
+	IPs        []string       `json:"ips,omitempty"`
 	Timestamp  int64          `json:"ts,omitempty"`
 	Signature  string         `json:"sig,omitempty"`
 	Epoch      int64          `json:"epoch,omitempty"`
@@ -126,16 +130,17 @@ type Service struct {
 	cfg Config
 	now func() time.Time
 
-	mu          sync.RWMutex
-	peers       map[string]Peer
-	keyByHostID map[string]string
-	running     bool
-	cancel      context.CancelFunc
-	wg          sync.WaitGroup
-	scanCh      chan struct{}
-	rebindCh    chan struct{}
-	lastIface   string
-	lastIP      string
+	mu             sync.RWMutex
+	peers          map[string]Peer
+	keyByHostID    map[string]string
+	lastAnnounceTS map[string]int64
+	running        bool
+	cancel         context.CancelFunc
+	wg             sync.WaitGroup
+	scanCh         chan struct{}
+	rebindCh       chan struct{}
+	lastIface      string
+	lastIP         string
 }
 
 // NewService creates a nearby LAN discovery service.
@@ -153,12 +158,13 @@ func NewService(cfg Config) *Service {
 		cfg.Transport = udpMulticastTransport{}
 	}
 	return &Service{
-		cfg:         cfg,
-		now:         cfg.Now,
-		peers:       make(map[string]Peer),
-		keyByHostID: make(map[string]string),
-		scanCh:      make(chan struct{}, 1),
-		rebindCh:    make(chan struct{}, 1),
+		cfg:            cfg,
+		now:            cfg.Now,
+		peers:          make(map[string]Peer),
+		keyByHostID:    make(map[string]string),
+		lastAnnounceTS: make(map[string]int64),
+		scanCh:         make(chan struct{}, 1),
+		rebindCh:       make(chan struct{}, 1),
 	}
 }
 
@@ -222,22 +228,33 @@ func (s *Service) Peers() []Peer {
 
 func (s *Service) snapshotLocked() []Peer {
 	trustedByPub := make(map[string]devices.Device)
+	trustedByName := make(map[string]string)
 	if s.cfg.TrustedDevices != nil {
 		for _, dev := range s.cfg.TrustedDevices() {
-			trustedByPub[dev.PublicKey] = dev
+			pk := strings.ToLower(dev.PublicKey)
+			trustedByPub[pk] = dev
+			if clean := strings.ToLower(devices.SanitizeDeviceName(dev.Name)); clean != "" {
+				trustedByName[clean] = pk
+			}
 		}
 	}
 	out := make([]Peer, 0, len(s.peers))
 	for _, p := range s.peers {
-		if dev, ok := trustedByPub[p.PublicKey]; ok {
+		pkLower := strings.ToLower(p.PublicKey)
+		if dev, ok := trustedByPub[pkLower]; ok {
 			p.Trusted = true
 			p.AutoApprove = dev.AutoApprove
+			p.NameConflictWarning = false
 			if dev.Name != "" && p.DeviceName == "" {
 				p.DeviceName = dev.Name
 			}
 		} else {
 			p.Trusted = false
 			p.AutoApprove = false
+			cleanName := strings.ToLower(devices.SanitizeDeviceName(p.DeviceName))
+			if expectedPK, collides := trustedByName[cleanName]; collides && expectedPK != pkLower {
+				p.NameConflictWarning = true
+			}
 		}
 		out = append(out, p)
 	}
@@ -455,8 +472,103 @@ func (s *Service) broadcastCycle(sock PacketSocket) {
 	}
 }
 
-func signAnnouncementPayload(hostID, pubKeyHex, name, osName, ver string, port int, ts int64) []byte {
-	return []byte(fmt.Sprintf("flitnix-disc-v1|%s|%s|%s|%s|%s|%d|%d", hostID, pubKeyHex, name, osName, ver, port, ts))
+func signAnnouncementPayload(hostID, pubKeyHex, name, osName, ver string, port int, ips []string, ts int64) []byte {
+	cleanIPs := normalizeSortedIPStrings(ips)
+	return []byte(fmt.Sprintf("flitnix-disc-v2|%s|%s|%s|%s|%s|%d|%s|%d", hostID, pubKeyHex, name, osName, ver, port, strings.Join(cleanIPs, ","), ts))
+}
+
+func normalizeSortedIPStrings(ips []string) []string {
+	seen := make(map[string]struct{}, len(ips))
+	out := make([]string, 0, len(ips))
+	for _, raw := range ips {
+		parsed := net.ParseIP(strings.TrimSpace(raw))
+		if parsed == nil || parsed.IsUnspecified() || parsed.IsMulticast() {
+			continue
+		}
+		s := parsed.String()
+		if _, ok := seen[s]; !ok {
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func ipStringsFromNet(ips []net.IP) []string {
+	raw := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		if ip != nil {
+			raw = append(raw, ip.String())
+		}
+	}
+	return normalizeSortedIPStrings(raw)
+}
+
+var curve25519P = func() *big.Int {
+	p := new(big.Int).Lsh(big.NewInt(1), 255)
+	return p.Sub(p, big.NewInt(19))
+}()
+
+func ed25519PrivateToX25519(privHex string) (*ecdh.PrivateKey, bool) {
+	raw, err := hex.DecodeString(privHex)
+	if err != nil || len(raw) != ed25519.PrivateKeySize {
+		return nil, false
+	}
+	h := sha512.Sum512(raw[:32])
+	h[0] &= 248
+	h[31] &= 127
+	h[31] |= 64
+	k, err := ecdh.X25519().NewPrivateKey(h[:32])
+	if err != nil {
+		return nil, false
+	}
+	return k, true
+}
+
+func ed25519PublicToX25519(pubHex string) (*ecdh.PublicKey, bool) {
+	raw, err := hex.DecodeString(pubHex)
+	if err != nil || len(raw) != ed25519.PublicKeySize {
+		return nil, false
+	}
+	// Little-endian y coordinate in 255 bits; clear sign bit (MSB of last byte).
+	var le [32]byte
+	copy(le[:], raw)
+	le[31] &^= 0x80
+	var be [32]byte
+	for i := 0; i < 32; i++ {
+		be[i] = le[31-i]
+	}
+	y := new(big.Int).SetBytes(be[:])
+	if y.Cmp(curve25519P) >= 0 {
+		return nil, false
+	}
+	one := big.NewInt(1)
+	den := new(big.Int).Sub(curve25519P, y)
+	den.Add(den, one)
+	den.Mod(den, curve25519P)
+	if den.Sign() == 0 {
+		return nil, false
+	}
+	denInv := new(big.Int).ModInverse(den, curve25519P)
+	if denInv == nil {
+		return nil, false
+	}
+	num := new(big.Int).Add(one, y)
+	num.Mod(num, curve25519P)
+	u := new(big.Int).Mul(num, denInv)
+	u.Mod(u, curve25519P)
+
+	uBE := u.Bytes()
+	var uLE [32]byte
+	for i := 0; i < len(uBE); i++ {
+		uLE[i] = uBE[len(uBE)-1-i]
+	}
+	pk, err := ecdh.X25519().NewPublicKey(uLE[:])
+	if err != nil {
+		return nil, false
+	}
+	return pk, true
 }
 
 func verifyKeyAndSignature(hostID, pubKeyHex, sigHex string, payload []byte) bool {
@@ -492,7 +604,8 @@ func (s *Service) broadcastPublic(sock PacketSocket) {
 	osName := sanitizeToken(ep.OS, "unknown")
 	ver := sanitizeToken(ep.Version, "dev")
 	ts := s.now().UTC().Unix()
-	payload := signAnnouncementPayload(s.cfg.HostIdentity.HostID, s.cfg.HostIdentity.PublicKey, name, osName, ver, ep.Port, ts)
+	ips := []string{ip.String()}
+	payload := signAnnouncementPayload(s.cfg.HostIdentity.HostID, s.cfg.HostIdentity.PublicKey, name, osName, ver, ep.Port, ips, ts)
 	sig := s.cfg.HostIdentity.Sign(payload)
 
 	env := beaconEnvelope{
@@ -503,6 +616,7 @@ func (s *Service) broadcastPublic(sock PacketSocket) {
 		OS:         osName,
 		Version:    ver,
 		Port:       ep.Port,
+		IPs:        ips,
 		Timestamp:  ts,
 		Signature:  sig,
 	}
@@ -524,36 +638,48 @@ func (s *Service) broadcastPublic(sock PacketSocket) {
 	}
 }
 
-func derivePairProbeKey(pubAHex, pubBHex string) ([]byte, bool) {
-	a, errA := hex.DecodeString(pubAHex)
-	b, errB := hex.DecodeString(pubBHex)
-	if errA != nil || errB != nil || len(a) != ed25519.PublicKeySize || len(b) != ed25519.PublicKeySize {
+// derivePairProbeKey computes a true secret shared key via Ed25519->X25519 Diffie-Hellman
+// so passive eavesdroppers who only observe public keys cannot correlate or forge probes.
+func derivePairProbeKey(localHost *devices.HostIdentity, peerPubHex string) ([]byte, bool) {
+	if localHost == nil {
+		return nil, false
+	}
+	privX, ok := ed25519PrivateToX25519(localHost.PrivateKey)
+	if !ok {
+		return nil, false
+	}
+	pubX, ok := ed25519PublicToX25519(peerPubHex)
+	if !ok {
+		return nil, false
+	}
+	sharedSecret, err := privX.ECDH(pubX)
+	if err != nil {
 		return nil, false
 	}
 	h := sha256.New()
-	if bytes.Compare(a, b) <= 0 {
-		h.Write(a)
-		h.Write(b)
-	} else {
-		h.Write(b)
-		h.Write(a)
-	}
+	h.Write([]byte("flitnix-probe-key-v2|"))
+	h.Write(sharedSecret)
 	return h.Sum(nil), true
 }
 
-func computeProbeTagAndMask(sharedKey []byte, epoch int64, salt []byte, hostID string, port int) (tagHex, maskHex string) {
+func computeProbeTagAndMask(sharedKey []byte, epoch int64, salt []byte, senderHostID, senderIP string, port int) (tagHex, maskHex string) {
+	saltHex := hex.EncodeToString(salt)
 	mac := hmac.New(sha256.New, sharedKey)
-	mac.Write([]byte("flitnix-probe-v1|"))
-	mac.Write(salt)
+	mac.Write([]byte("flitnix-probe-v2|"))
+	mac.Write([]byte(saltHex))
 	mac.Write([]byte("|"))
 	mac.Write([]byte(strconv.FormatInt(epoch, 10)))
 	mac.Write([]byte("|"))
-	mac.Write([]byte(hostID))
+	mac.Write([]byte(strings.ToLower(senderHostID)))
+	mac.Write([]byte("|"))
+	mac.Write([]byte(senderIP))
+	mac.Write([]byte("|"))
+	mac.Write([]byte(strconv.Itoa(port)))
 	tag := mac.Sum(nil)[:16]
 
 	maskMAC := hmac.New(sha256.New, sharedKey)
-	maskMAC.Write([]byte("flitnix-probe-meta-v1|"))
-	maskMAC.Write(salt)
+	maskMAC.Write([]byte("flitnix-probe-meta-v2|"))
+	maskMAC.Write([]byte(saltHex))
 	pad := maskMAC.Sum(nil)
 	var plain [2]byte
 	binary.BigEndian.PutUint16(plain[:], uint16(port))
@@ -562,13 +688,13 @@ func computeProbeTagAndMask(sharedKey []byte, epoch int64, salt []byte, hostID s
 	return hex.EncodeToString(tag), hex.EncodeToString(plain[:])
 }
 
-// broadcastTrustedProbe emits non-identifying unlinkable HMAC tags for already-paired peers ONLY.
+// broadcastTrustedProbe emits non-identifying unlinkable ECDH-authenticated HMAC tags for already-paired peers ONLY.
 func (s *Service) broadcastTrustedProbe(sock PacketSocket) {
 	if s.cfg.HostIdentity == nil || s.cfg.TrustedDevices == nil {
 		return
 	}
 	ep := s.localEndpoint()
-	if ep.Port <= 0 {
+	if ep.Port <= 0 || ep.LocalIP == "" {
 		return
 	}
 	devs := s.cfg.TrustedDevices()
@@ -582,11 +708,11 @@ func (s *Service) broadcastTrustedProbe(sock PacketSocket) {
 	epoch := s.now().UTC().Unix() / 60
 	probes := make([]trustedProbe, 0, len(devs))
 	for _, dev := range devs {
-		sharedKey, ok := derivePairProbeKey(s.cfg.HostIdentity.PublicKey, dev.PublicKey)
+		sharedKey, ok := derivePairProbeKey(s.cfg.HostIdentity, dev.PublicKey)
 		if !ok {
 			continue
 		}
-		tagHex, maskHex := computeProbeTagAndMask(sharedKey, epoch, salt[:], s.cfg.HostIdentity.HostID, ep.Port)
+		tagHex, maskHex := computeProbeTagAndMask(sharedKey, epoch, salt[:], s.cfg.HostIdentity.HostID, ep.LocalIP, ep.Port)
 		probes = append(probes, trustedProbe{Tag: tagHex, MetaMask: maskHex})
 	}
 	if len(probes) == 0 {
@@ -615,6 +741,12 @@ func (s *Service) handleBeaconPacket(sock PacketSocket, pkt []byte, srcIP net.IP
 	case "query":
 		s.respondIfAllowed(sock)
 	case "announce":
+		ips := make([]net.IP, 0, len(env.IPs))
+		for _, sIP := range env.IPs {
+			if parsed := net.ParseIP(strings.TrimSpace(sIP)); parsed != nil {
+				ips = append(ips, parsed)
+			}
+		}
 		s.handleAnnouncement(mdnsAnnouncement{
 			HostID:     env.HostID,
 			PublicKey:  env.PublicKey,
@@ -622,7 +754,7 @@ func (s *Service) handleBeaconPacket(sock PacketSocket, pkt []byte, srcIP net.IP
 			OS:         env.OS,
 			Version:    env.Version,
 			Port:       uint16(env.Port),
-			IPs:        []net.IP{srcIP},
+			IPs:        ips,
 			Timestamp:  env.Timestamp,
 			Sig:        env.Signature,
 		}, srcIP)
@@ -632,7 +764,10 @@ func (s *Service) handleBeaconPacket(sock PacketSocket, pkt []byte, srcIP net.IP
 }
 
 func (s *Service) handleTrustedProbe(env beaconEnvelope, srcIP net.IP) {
-	if s.cfg.HostIdentity == nil || s.cfg.TrustedDevices == nil {
+	if s.cfg.HostIdentity == nil || s.cfg.TrustedDevices == nil || srcIP == nil {
+		return
+	}
+	if s.visibilityMode() == devices.VisibilityHidden {
 		return
 	}
 	salt, err := hex.DecodeString(env.Salt)
@@ -643,9 +778,11 @@ func (s *Service) handleTrustedProbe(env beaconEnvelope, srcIP net.IP) {
 	if env.Epoch < curEpoch-1 || env.Epoch > curEpoch+1 {
 		return
 	}
+	saltHex := hex.EncodeToString(salt)
+	srcIPStr := srcIP.String()
 	devs := s.cfg.TrustedDevices()
 	for _, dev := range devs {
-		if dev.PublicKey == "" || dev.PublicKey == s.cfg.HostIdentity.PublicKey {
+		if dev.PublicKey == "" || strings.EqualFold(dev.PublicKey, s.cfg.HostIdentity.PublicKey) {
 			continue
 		}
 		pubBytes, err := hex.DecodeString(dev.PublicKey)
@@ -655,52 +792,70 @@ func (s *Service) handleTrustedProbe(env beaconEnvelope, srcIP net.IP) {
 		peerHostSum := sha256.Sum256(pubBytes)
 		peerHostID := hex.EncodeToString(peerHostSum[:])
 
-		sharedKey, ok := derivePairProbeKey(s.cfg.HostIdentity.PublicKey, dev.PublicKey)
+		sharedKey, ok := derivePairProbeKey(s.cfg.HostIdentity, dev.PublicKey)
 		if !ok {
 			continue
 		}
+		maskMAC := hmac.New(sha256.New, sharedKey)
+		maskMAC.Write([]byte("flitnix-probe-meta-v2|"))
+		maskMAC.Write([]byte(saltHex))
+		pad := maskMAC.Sum(nil)
+
 		for _, pr := range env.Probes {
-			expectedTag, _ := computeProbeTagAndMask(sharedKey, env.Epoch, salt, peerHostID, 0)
+			maskBytes, mErr := hex.DecodeString(pr.MetaMask)
+			if mErr != nil || len(maskBytes) != 2 {
+				continue
+			}
+			port := int(binary.BigEndian.Uint16([]byte{maskBytes[0] ^ pad[0], maskBytes[1] ^ pad[1]}))
+			if port <= 0 {
+				continue
+			}
+			expectedTag, _ := computeProbeTagAndMask(sharedKey, env.Epoch, salt, peerHostID, srcIPStr, port)
 			if len(pr.Tag) == len(expectedTag) && hmac.Equal([]byte(pr.Tag), []byte(expectedTag)) {
-				maskBytes, mErr := hex.DecodeString(pr.MetaMask)
-				if mErr != nil || len(maskBytes) != 2 {
-					continue
-				}
-				maskMAC := hmac.New(sha256.New, sharedKey)
-				maskMAC.Write([]byte("flitnix-probe-meta-v1|"))
-				maskMAC.Write(salt)
-				pad := maskMAC.Sum(nil)
-				port := int(binary.BigEndian.Uint16([]byte{maskBytes[0] ^ pad[0], maskBytes[1] ^ pad[1]}))
-				if port <= 0 {
-					port = 43821
-				}
 				s.upsertPeer(Peer{
 					HostID:        peerHostID,
-					PublicKey:     dev.PublicKey,
+					PublicKey:     strings.ToLower(dev.PublicKey),
 					DeviceName:    devices.SanitizeDeviceName(dev.Name),
 					OS:            "desktop",
-					Address:       srcIP.String(),
+					Address:       srcIPStr,
 					Port:          port,
-					Addresses:     []string{srcIP.String()},
+					Addresses:     []string{srcIPStr},
 					Trusted:       true,
 					AutoApprove:   dev.AutoApprove,
 					InterfaceName: s.localEndpoint().InterfaceName,
 					LastSeen:      s.now(),
-				})
+				}, env.Epoch*60)
 				return
 			}
 		}
 	}
 }
 
+func (s *Service) isTrustedPublicKey(pubKeyHex string) bool {
+	if s.cfg.TrustedDevices == nil {
+		return false
+	}
+	for _, dev := range s.cfg.TrustedDevices() {
+		if strings.EqualFold(dev.PublicKey, pubKeyHex) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Service) handleAnnouncement(ann mdnsAnnouncement, srcIP net.IP) {
 	if s.cfg.HostIdentity != nil && strings.EqualFold(ann.HostID, s.cfg.HostIdentity.HostID) {
 		return
 	}
-	if s.visibilityMode() == devices.VisibilityHidden {
+	mode := s.visibilityMode()
+	if mode == devices.VisibilityHidden {
 		return
 	}
-	if ann.Port == 0 || ann.HostID == "" || ann.PublicKey == "" || ann.Sig == "" {
+	if mode == devices.VisibilityTrustedOnly && !s.isTrustedPublicKey(ann.PublicKey) {
+		// Suppress unverified stranger announcements while in Trusted Devices Only mode.
+		return
+	}
+	if ann.Port == 0 || ann.HostID == "" || ann.PublicKey == "" || ann.Sig == "" || srcIP == nil {
 		return
 	}
 	now := s.now().UTC()
@@ -711,26 +866,30 @@ func (s *Service) handleAnnouncement(ann mdnsAnnouncement, srcIP net.IP) {
 	if time.Duration(diff)*time.Second > maxAnnouncementAge {
 		return
 	}
-	cleanName := devices.SanitizeDeviceName(ann.DeviceName)
-	osName := sanitizeToken(ann.OS, "unknown")
-	ver := sanitizeToken(ann.Version, "dev")
-	payload := signAnnouncementPayload(ann.HostID, ann.PublicKey, cleanName, osName, ver, int(ann.Port), ann.Timestamp)
-	if !verifyKeyAndSignature(ann.HostID, ann.PublicKey, ann.Sig, payload) {
+
+	signedIPs := ipStringsFromNet(ann.IPs)
+	if len(signedIPs) == 0 {
+		return
+	}
+	// Source IP MUST match one of the Ed25519-signed IPs inside the announcement.
+	primaryIP := srcIP.String()
+	srcMatchedSigned := false
+	for _, sIP := range signedIPs {
+		if sIP == primaryIP {
+			srcMatchedSigned = true
+			break
+		}
+	}
+	if !srcMatchedSigned {
 		return
 	}
 
-	addrList := make([]string, 0, len(ann.IPs)+1)
-	seenAddr := make(map[string]struct{})
-	primaryIP := srcIP.String()
-	for _, candidate := range append([]net.IP{srcIP}, ann.IPs...) {
-		if candidate == nil {
-			continue
-		}
-		str := candidate.String()
-		if _, dup := seenAddr[str]; !dup {
-			seenAddr[str] = struct{}{}
-			addrList = append(addrList, str)
-		}
+	cleanName := devices.SanitizeDeviceName(ann.DeviceName)
+	osName := sanitizeToken(ann.OS, "unknown")
+	ver := sanitizeToken(ann.Version, "dev")
+	payload := signAnnouncementPayload(ann.HostID, ann.PublicKey, cleanName, osName, ver, int(ann.Port), signedIPs, ann.Timestamp)
+	if !verifyKeyAndSignature(ann.HostID, ann.PublicKey, ann.Sig, payload) {
+		return
 	}
 
 	s.upsertPeer(Peer{
@@ -741,20 +900,29 @@ func (s *Service) handleAnnouncement(ann mdnsAnnouncement, srcIP net.IP) {
 		Version:       ver,
 		Address:       primaryIP,
 		Port:          int(ann.Port),
-		Addresses:     addrList,
+		Addresses:     []string{primaryIP},
 		InterfaceName: s.localEndpoint().InterfaceName,
 		LastSeen:      s.now(),
-	})
+	}, ann.Timestamp)
 }
 
-func (s *Service) upsertPeer(p Peer) {
+func (s *Service) upsertPeer(p Peer, msgTS int64) {
+	now := s.now()
 	s.mu.Lock()
 	if existingKey, known := s.keyByHostID[p.HostID]; known && !strings.EqualFold(existingKey, p.PublicKey) {
 		// Reject public-key spoofing attempts against a seen HostID.
 		s.mu.Unlock()
 		return
 	}
+	if prev, active := s.peers[p.HostID]; active && now.Sub(prev.LastSeen) <= s.cfg.PeerTTL {
+		if prevTS, hasTS := s.lastAnnounceTS[p.HostID]; hasTS && msgTS < prevTS {
+			// Reject stale replay / timestamp rollback for an already-active peer.
+			s.mu.Unlock()
+			return
+		}
+	}
 	s.keyByHostID[p.HostID] = p.PublicKey
+	s.lastAnnounceTS[p.HostID] = msgTS
 
 	if _, exists := s.peers[p.HostID]; !exists && len(s.peers) >= MaxDiscoveredPeers {
 		var oldestID string

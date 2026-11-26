@@ -284,6 +284,7 @@ export namespace discovery {
 	    addresses?: string[];
 	    trusted: boolean;
 	    autoApprove: boolean;
+	    nameConflictWarning?: boolean;
 	    interfaceName?: string;
 	    // Go type: time
 	    lastSeen?: any;
@@ -304,6 +305,7 @@ export namespace discovery {
 	        this.addresses = source["addresses"];
 	        this.trusted = source["trusted"];
 	        this.autoApprove = source["autoApprove"];
+	        this.nameConflictWarning = source["nameConflictWarning"];
 	        this.interfaceName = source["interfaceName"];
 	        this.lastSeen = source["lastSeen"];
 	    }

@@ -49,7 +49,7 @@ func NewHostIdentityCertificate(id *devices.HostIdentity) (tls.Certificate, erro
 		},
 		NotBefore:             now.Add(-5 * time.Minute),
 		NotAfter:              now.Add(10 * 365 * 24 * time.Hour),
-		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		KeyUsage:              x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
 		DNSNames:              []string{id.HostID + ".flitnix.local", "localhost"},
@@ -93,7 +93,10 @@ type peekedConn struct {
 }
 
 func (c *peekedConn) Read(p []byte) (int, error) {
-	if !c.read && len(p) > 0 {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if !c.read {
 		p[0] = c.buf[0]
 		c.read = true
 		if len(p) == 1 {

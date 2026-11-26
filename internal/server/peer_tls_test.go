@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"testing"
 	"time"
@@ -83,4 +84,40 @@ func TestSinglePortHTTPAndTLS13Multiplexing(t *testing.T) {
 	if _, err := badClient.Get("https://" + addr + "/healthz"); err == nil {
 		t.Fatal("expected pinned TLS handshake to fail closed on hostId mismatch")
 	}
+
+	// 4. Simultaneous TLS 1.3 batch transfer & HTTP mobile endpoint check on the SAME port.
+	tlsClient := client.NewPeerHTTPClient(hostID.HostID, hostID.PublicKey, nil)
+	remoteID, _ := devices.LoadOrCreateHostIdentity(dir + "/sender.json")
+	target, err := client.ConnectAsVisiblePeer(ctx, tlsClient, "https://"+addr, addr, "Sender Desktop", remoteID)
+	if err != nil {
+		t.Fatalf("ConnectAsVisiblePeer over TLS 1.3: %v", err)
+	}
+	qrSess, err := sessMgr.Create()
+	if err != nil {
+		t.Fatalf("sessMgr.Create: %v", err)
+	}
+	httpReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/api/files", nil)
+	httpReq.Header.Set("Authorization", "Bearer "+qrSess.Token())
+	mobileResp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		t.Fatalf("mobile HTTP /api/files alongside TLS peer session failed: %v", err)
+	}
+	_, _ = io.ReadAll(mobileResp.Body)
+	mobileResp.Body.Close()
+	if mobileResp.StatusCode != http.StatusOK {
+		t.Fatalf("mobile HTTP /api/files status = %d, want 200", mobileResp.StatusCode)
+	}
+
+	c := client.NewClientWithHTTPClient(target, tlsClient)
+	batch, err := c.DeclareBatch(ctx, transfer.BatchManifest{
+		Direction: transfer.DirectionPhoneToDesktop,
+		Kind:      transfer.BatchKindFiles,
+		Items: []transfer.ManifestItem{
+			{DisplayName: "hello-tls.txt", Size: 11},
+		},
+	})
+	if err != nil {
+		t.Fatalf("DeclareBatch over TLS 1.3: %v", err)
+	}
+	_ = c.CancelBatch(ctx, batch.ID, batch.Items)
 }

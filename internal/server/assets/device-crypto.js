@@ -83,6 +83,32 @@
     return new Uint8Array(getSha256().hmac.array(keyBytes, msgBytes));
   }
 
+  function validateIdentityRecord(rec) {
+    if (!rec || typeof rec.publicKeyHex !== "string" || typeof rec.secretKeyHex !== "string") {
+      return false;
+    }
+    try {
+      var pub = hexToBytes(rec.publicKeyHex);
+      var sec = hexToBytes(rec.secretKeyHex);
+      if (pub.length !== 32 || sec.length !== 64) {
+        return false;
+      }
+      var derived = getNacl().sign.keyPair.fromSecretKey(sec);
+      return constantTimeEqual(derived.publicKey, pub);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function computePublicIdentityView(rec) {
+    var pub = hexToBytes(rec.publicKeyHex);
+    return {
+      publicKeyHex: bytesToHex(pub),
+      deviceId: bytesToHex(sha256Bytes(pub)),
+      createdAt: rec.createdAt || ""
+    };
+  }
+
   function generateDeviceIdentity() {
     var lib = getNacl();
     var seed = lib.randomBytes(32);
@@ -141,8 +167,20 @@
     var clientSecret = hexToBytes(opts.clientSecretKeyHex);
     var tokenBytes = utf8ToBytes(opts.token);
 
+    if (hostPub.length !== 32 || clientPub.length !== 32 || clientSecret.length !== 64) {
+      throw new Error("invalid key dimensions");
+    }
     if (hostEphemeral.length !== 32 || hostSalt.length !== 16 || hostCommit.length !== 32) {
       throw new Error("invalid host reveal dimensions");
+    }
+
+    var hostIDDigest = sha256Bytes(hostPub);
+    var hostIdHex = bytesToHex(hostIDDigest);
+    if (opts.expectedHostIdHex) {
+      var expectedHostBytes = hexToBytes(opts.expectedHostIdHex);
+      if (!constantTimeEqual(hostIDDigest, expectedHostBytes)) {
+        throw new Error("hostId does not match host public key");
+      }
     }
 
     var expectedHostCommit = sha256Bytes(concatBytes(hostEphemeral, hostSalt));
@@ -150,7 +188,6 @@
       throw new Error("host commitment opening verification failed");
     }
 
-    var hostIDDigest = sha256Bytes(hostPub);
     var clientIDDigest = sha256Bytes(clientPub);
     var sessionKeyHash = sha256Bytes(tokenBytes);
 
@@ -184,7 +221,7 @@
     return {
       sas: sas,
       clientProofHex: bytesToHex(clientProof),
-      hostIdHex: bytesToHex(hostIDDigest)
+      hostIdHex: hostIdHex
     };
   }
 
@@ -195,17 +232,31 @@
     return bytesToHex(sig);
   }
 
-  // IndexedDB persistence for plain-HTTP browser pairing identity & paired hosts
+  // IndexedDB persistence for plain-HTTP browser pairing identity & paired hosts.
+  // Fail-closed: NEVER fall back to localStorage, sessionStorage, cookies, or memory-only keys.
   var DB_NAME = "flitnix-device-store";
   var DB_VERSION = 1;
 
+  function getIDBFactory() {
+    if (typeof indexedDB !== "undefined") return indexedDB;
+    if (root && root.indexedDB) return root.indexedDB;
+    return null;
+  }
+
   function openDeviceDB() {
     return new Promise(function (resolve, reject) {
-      if (typeof indexedDB === "undefined") {
+      var idb = getIDBFactory();
+      if (!idb) {
         reject(new Error("IndexedDB unavailable in this browser"));
         return;
       }
-      var req = indexedDB.open(DB_NAME, DB_VERSION);
+      var req;
+      try {
+        req = idb.open(DB_NAME, DB_VERSION);
+      } catch (e) {
+        reject(e || new Error("IndexedDB blocked by browser policy"));
+        return;
+      }
       req.onupgradeneeded = function (ev) {
         var db = ev.target.result;
         if (!db.objectStoreNames.contains("identity")) {
@@ -217,7 +268,62 @@
         }
       };
       req.onsuccess = function () { resolve(req.result); };
+      req.onblocked = function () { reject(new Error("IndexedDB access blocked by another tab")); };
       req.onerror = function () { reject(req.error || new Error("failed to open device store")); };
+    });
+  }
+
+  function withStoreTx(storeName, mode, fn) {
+    return openDeviceDB().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var settled = false;
+        var tx;
+        function safeClose() {
+          try { db.close(); } catch (_) {}
+        }
+        try {
+          tx = db.transaction(storeName, mode);
+        } catch (err) {
+          safeClose();
+          reject(err || new Error("IndexedDB transaction failed"));
+          return;
+        }
+        var resultVal;
+        tx.oncomplete = function () {
+          safeClose();
+          if (!settled) {
+            settled = true;
+            resolve(resultVal);
+          }
+        };
+        tx.onerror = function () {
+          safeClose();
+          if (!settled) {
+            settled = true;
+            reject(tx.error || new Error("IndexedDB transaction error"));
+          }
+        };
+        tx.onabort = function () {
+          safeClose();
+          if (!settled) {
+            settled = true;
+            reject(tx.error || new Error("IndexedDB transaction aborted"));
+          }
+        };
+
+        Promise.resolve().then(function () {
+          return fn(tx.objectStore(storeName));
+        }).then(function (val) {
+          resultVal = val;
+        }).catch(function (err) {
+          if (!settled) {
+            settled = true;
+            try { tx.abort(); } catch (_) {}
+            safeClose();
+            reject(err);
+          }
+        });
+      });
     });
   }
 
@@ -228,61 +334,110 @@
     });
   }
 
-  function loadIdentity() {
-    return openDeviceDB().then(function (db) {
-      var tx = db.transaction("identity", "readonly");
-      return idbRequest(tx.objectStore("identity").get("default")).then(function (rec) {
-        db.close();
-        return rec || null;
+  // Proactively test IndexedDB read+write capability (catches private browsing where
+  // global indexedDB is defined yet readwrite transactions throw InvalidStateError/SecurityError).
+  function probeStorage() {
+    return withStoreTx("identity", "readwrite", function (store) {
+      var probeRec = { id: "__storage_probe__", ts: Date.now() };
+      return idbRequest(store.put(probeRec)).then(function () {
+        return idbRequest(store.delete("__storage_probe__"));
+      }).then(function () {
+        return true;
       });
     });
   }
 
-  function getOrCreateIdentity() {
-    return openDeviceDB().then(function (db) {
-      var tx = db.transaction("identity", "readwrite");
-      var store = tx.objectStore("identity");
+  function loadValidatedSecretIdentityInternal() {
+    return withStoreTx("identity", "readonly", function (store) {
+      return idbRequest(store.get("default")).then(function (rec) {
+        if (!rec) return null;
+        if (!validateIdentityRecord(rec)) {
+          throw new Error("Stored browser device key is corrupt; trusted pairing failed closed");
+        }
+        return rec;
+      });
+    });
+  }
+
+  function hasValidIdentity() {
+    return loadValidatedSecretIdentityInternal().then(function (rec) {
+      return !!rec;
+    }).catch(function () {
+      return false;
+    });
+  }
+
+  function getPublicIdentity() {
+    return loadValidatedSecretIdentityInternal().then(function (rec) {
+      return rec ? computePublicIdentityView(rec) : null;
+    });
+  }
+
+  function ensurePublicIdentity() {
+    return withStoreTx("identity", "readwrite", function (store) {
       return idbRequest(store.get("default")).then(function (existing) {
-        if (existing && existing.publicKeyHex && existing.secretKeyHex) {
-          db.close();
-          return existing;
+        if (existing) {
+          if (!validateIdentityRecord(existing)) {
+            throw new Error("Stored browser device key is corrupt; cannot reuse identity");
+          }
+          return computePublicIdentityView(existing);
         }
         var created = generateDeviceIdentity();
         created.id = "default";
         created.createdAt = new Date().toISOString();
+        if (!validateIdentityRecord(created)) {
+          throw new Error("Generated device identity failed self-validation");
+        }
         return idbRequest(store.put(created)).then(function () {
-          db.close();
-          return created;
+          return computePublicIdentityView(created);
         });
       });
     });
   }
 
+  function completeHostRevealWithStoredIdentity(opts) {
+    return loadValidatedSecretIdentityInternal().then(function (idRec) {
+      if (!idRec) {
+        throw new Error("Browser device identity missing in persistent IndexedDB storage");
+      }
+      var merged = {};
+      for (var k in opts) {
+        if (Object.prototype.hasOwnProperty.call(opts, k)) merged[k] = opts[k];
+      }
+      merged.clientPublicKeyHex = idRec.publicKeyHex;
+      merged.clientSecretKeyHex = idRec.secretKeyHex;
+      return completeHostReveal(merged);
+    });
+  }
+
   function savePairedHost(record) {
-    var key = String(record.origin || "") + "|" + String(record.deviceId || "");
+    if (!record || !record.origin || !record.hostId || !record.deviceId || !record.hostPublicKey) {
+      return Promise.reject(new Error("incomplete paired host record"));
+    }
+    var derivedHostId = bytesToHex(sha256Bytes(hexToBytes(record.hostPublicKey)));
+    if (derivedHostId.toLowerCase() !== String(record.hostId).toLowerCase()) {
+      return Promise.reject(new Error("paired hostId/publicKey mismatch"));
+    }
+    var key = String(record.origin) + "|" + String(record.deviceId);
     var toStore = {
       key: key,
-      origin: record.origin || "",
-      hostId: record.hostId || "",
-      deviceId: record.deviceId || "",
+      origin: String(record.origin),
+      hostId: String(record.hostId).toLowerCase(),
+      deviceId: String(record.deviceId).toLowerCase(),
       deviceName: record.deviceName || "",
-      hostPublicKey: record.hostPublicKey || "",
+      hostPublicKey: String(record.hostPublicKey).toLowerCase(),
       pairedAt: record.pairedAt || new Date().toISOString()
     };
-    return openDeviceDB().then(function (db) {
-      var tx = db.transaction("hosts", "readwrite");
-      return idbRequest(tx.objectStore("hosts").put(toStore)).then(function () {
-        db.close();
+    return withStoreTx("hosts", "readwrite", function (store) {
+      return idbRequest(store.put(toStore)).then(function () {
         return toStore;
       });
     });
   }
 
   function listPairedHostsForOrigin(origin) {
-    return openDeviceDB().then(function (db) {
-      var tx = db.transaction("hosts", "readonly");
-      return idbRequest(tx.objectStore("hosts").getAll()).then(function (all) {
-        db.close();
+    return withStoreTx("hosts", "readonly", function (store) {
+      return idbRequest(store.getAll()).then(function (all) {
         return (all || []).filter(function (rec) {
           return !origin || rec.origin === origin;
         });
@@ -291,27 +446,62 @@
   }
 
   function getPairedHostByDeviceId(deviceId) {
-    return openDeviceDB().then(function (db) {
-      var tx = db.transaction("hosts", "readonly");
-      var idx = tx.objectStore("hosts").index("byDeviceId");
+    return withStoreTx("hosts", "readonly", function (store) {
+      var idx = store.index("byDeviceId");
       return idbRequest(idx.get(deviceId)).then(function (rec) {
-        db.close();
         return rec || null;
       });
     });
   }
 
+  function signDeviceSessionChallengeWithStoredIdentity(opts) {
+    if (!opts || !opts.hostId || !opts.deviceId || !opts.nonce) {
+      return Promise.reject(new Error("missing challenge parameters"));
+    }
+    return getPairedHostByDeviceId(opts.deviceId).then(function (pinned) {
+      if (!pinned) {
+        throw new Error("Device pairing record not found in IndexedDB");
+      }
+      if (opts.expectedOrigin && pinned.origin !== opts.expectedOrigin) {
+        throw new Error("Paired host origin mismatch");
+      }
+      if (String(pinned.hostId).toLowerCase() !== String(opts.hostId).toLowerCase()) {
+        throw new Error("Refused to sign challenge for mismatched or unpinned hostId");
+      }
+      if (pinned.hostPublicKey) {
+        var expectedHostId = bytesToHex(sha256Bytes(hexToBytes(pinned.hostPublicKey)));
+        if (expectedHostId !== String(pinned.hostId).toLowerCase()) {
+          throw new Error("Pinned host public key integrity check failed");
+        }
+      }
+      return loadValidatedSecretIdentityInternal().then(function (idRec) {
+        if (!idRec) {
+          throw new Error("Device signing key not found in browser storage. Pair this browser again.");
+        }
+        var expectedDeviceId = bytesToHex(sha256Bytes(hexToBytes(idRec.publicKeyHex)));
+        if (expectedDeviceId !== String(opts.deviceId).toLowerCase()) {
+          throw new Error("Challenge deviceId does not match this browser's key");
+        }
+        return signDeviceSessionChallenge({
+          hostId: opts.hostId,
+          deviceId: opts.deviceId,
+          nonce: opts.nonce,
+          timestamp: opts.timestamp,
+          secretKeyHex: idRec.secretKeyHex
+        });
+      });
+    });
+  }
+
   function removePairedHost(keyOrDeviceId) {
-    return openDeviceDB().then(function (db) {
-      var tx = db.transaction("hosts", "readwrite");
-      var store = tx.objectStore("hosts");
+    return withStoreTx("hosts", "readwrite", function (store) {
       return idbRequest(store.getAll()).then(function (all) {
         var removals = (all || [])
           .filter(function (rec) {
             return rec.key === keyOrDeviceId || rec.deviceId === keyOrDeviceId;
           })
           .map(function (rec) { return idbRequest(store.delete(rec.key)); });
-        return Promise.all(removals).then(function () { db.close(); });
+        return Promise.all(removals);
       });
     });
   }
@@ -320,17 +510,22 @@
     utf8ToBytes: utf8ToBytes,
     bytesToHex: bytesToHex,
     hexToBytes: hexToBytes,
-    generateDeviceIdentity: generateDeviceIdentity,
+    probeStorage: probeStorage,
+    hasValidIdentity: hasValidIdentity,
+    getPublicIdentity: getPublicIdentity,
+    ensurePublicIdentity: ensurePublicIdentity,
     createEphemeralPairingData: createEphemeralPairingData,
     deriveSASFromTranscript: deriveSASFromTranscript,
     completeHostReveal: completeHostReveal,
+    completeHostRevealWithStoredIdentity: completeHostRevealWithStoredIdentity,
     signDeviceSessionChallenge: signDeviceSessionChallenge,
-    loadIdentity: loadIdentity,
-    getOrCreateIdentity: getOrCreateIdentity,
+    signDeviceSessionChallengeWithStoredIdentity: signDeviceSessionChallengeWithStoredIdentity,
     savePairedHost: savePairedHost,
     listPairedHostsForOrigin: listPairedHostsForOrigin,
     getPairedHostByDeviceId: getPairedHostByDeviceId,
-    removePairedHost: removePairedHost
+    removePairedHost: removePairedHost,
+    // Test helper for Node interoperability (never stores keys in IndexedDB or localStorage):
+    generateDeviceIdentity: generateDeviceIdentity
   };
 
   if (typeof module !== "undefined" && module.exports) {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -22,6 +23,7 @@ import (
 	"github.com/itsyamin/flitnix/internal/devices"
 	"github.com/itsyamin/flitnix/internal/netenv"
 	"github.com/itsyamin/flitnix/internal/server"
+	"github.com/itsyamin/flitnix/internal/session"
 	"github.com/itsyamin/flitnix/internal/transfer"
 	"github.com/itsyamin/flitnix/internal/version"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -323,6 +325,30 @@ func (a *App) EnsurePeerServer() (string, error) {
 	return a.ServerAddress(), nil
 }
 
+// EnsurePeerSessionShortCode creates or returns an active session's 6-digit connection code
+// strictly upon explicit user action in the Computer Sharing UI.
+func (a *App) EnsurePeerSessionShortCode() (session.ShortCodeView, error) {
+	if _, err := a.EnsurePeerServer(); err != nil {
+		return session.ShortCodeView{}, err
+	}
+	actives := a.sessions.ActiveSessions()
+	var sessKey string
+	for _, s := range actives {
+		if s.Kind() != session.KindDevice {
+			sessKey = s.Key()
+			break
+		}
+	}
+	if sessKey == "" {
+		created, err := a.sessions.Create()
+		if err != nil {
+			return session.ShortCodeView{}, err
+		}
+		sessKey = created.Key()
+	}
+	return a.GetSessionShortCode(sessKey), nil
+}
+
 // InspectPeerTarget connects over TLS 1.3 to retrieve the remote desktop's verified Ed25519 HostID/PublicKey.
 func (a *App) InspectPeerTarget(address string, port int) (client.PeerProbeInfo, error) {
 	authority, err := formatAuthority(address, port)
@@ -413,6 +439,18 @@ func (a *App) ResolvePeerPairingSAS(requestID string, approved bool) {
 	}
 }
 
+func verifyHexEd25519(pubHex string, payload []byte, sigHex string) bool {
+	pubBytes, err := hex.DecodeString(pubHex)
+	if err != nil || len(pubBytes) != ed25519.PublicKeySize {
+		return false
+	}
+	sigBytes, err := hex.DecodeString(sigHex)
+	if err != nil || len(sigBytes) != ed25519.SignatureSize {
+		return false
+	}
+	return ed25519.Verify(ed25519.PublicKey(pubBytes), payload, sigBytes)
+}
+
 func (a *App) clientIdentityFromHost() (*client.ClientIdentity, error) {
 	if a.hostIdentity == nil {
 		return nil, errors.New("host identity unavailable")
@@ -431,14 +469,17 @@ func (a *App) peerAuthClientAndTarget(ctx context.Context, authority, expectedHo
 		}
 	}
 
-	var peerHostID, peerPubHex string
+	var idMu sync.Mutex
+	var cbHostID, cbPubHex string
 	hc := client.NewPeerHTTPClient(expectedHostID, expectedPubKey, func(hid, pk string) {
-		peerHostID = hid
-		peerPubHex = pk
+		idMu.Lock()
+		cbHostID = hid
+		cbPubHex = pk
+		idMu.Unlock()
 	})
 	baseURL := "https://" + authority
 
-	// Probe TLS + verify host identity against known_hosts BEFORE sending credentials.
+	// Probe TLS + verify host identity from the live TLS 1.3 leaf certificate BEFORE sending credentials.
 	probeReq, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/healthz", nil)
 	if err != nil {
 		return nil, nil, "", false, err
@@ -450,8 +491,38 @@ func (a *App) peerAuthClientAndTarget(ctx context.Context, authority, expectedHo
 	}
 	_ = probeResp.Body.Close()
 
+	var peerHostID, peerPubHex string
+	if probeResp.TLS != nil && len(probeResp.TLS.PeerCertificates) > 0 {
+		if pub, ok := probeResp.TLS.PeerCertificates[0].PublicKey.(ed25519.PublicKey); ok && len(pub) == ed25519.PublicKeySize {
+			sum := sha256.Sum256(pub)
+			peerHostID = hex.EncodeToString(sum[:])
+			peerPubHex = hex.EncodeToString(pub)
+		}
+	}
+	if peerHostID == "" {
+		idMu.Lock()
+		peerHostID = cbHostID
+		peerPubHex = cbPubHex
+		idMu.Unlock()
+	}
+	if peerHostID == "" || peerPubHex == "" {
+		return nil, nil, "", false, errors.New("TLS peer presented no verified Ed25519 certificate")
+	}
+
+	// Enforce TOFU pinning against known_hosts.json and detect IP-address swap when caller
+	// previously linked this address to a different host identity.
 	if err := kh.VerifyHost(peerHostID, peerPubHex); err != nil {
 		return nil, nil, "", false, err
+	}
+	if a.peerMgr != nil && expectedHostID == "" && strings.TrimSpace(shortCode) == "" && strings.TrimSpace(pairingToken) == "" {
+		a.peerMgr.linksMu.Lock()
+		for linkedID, rec := range a.peerMgr.links {
+			if rec.LastAddress == authority && !strings.EqualFold(linkedID, peerHostID) {
+				a.peerMgr.linksMu.Unlock()
+				return nil, nil, "", false, fmt.Errorf("%w: %s previously paired to host %s, now presenting %s (verify identity or use 6-digit code)", client.ErrHostMismatch, authority, linkedID, peerHostID)
+			}
+		}
+		a.peerMgr.linksMu.Unlock()
 	}
 
 	if pairingToken != "" {
@@ -468,8 +539,14 @@ func (a *App) peerAuthClientAndTarget(ctx context.Context, authority, expectedHo
 		if link, ok := a.peerMgr.getLink(peerHostID); ok && link.DeviceID != "" && a.hostIdentity != nil {
 			privBytes, decErr := hex.DecodeString(a.hostIdentity.PrivateKey)
 			if decErr == nil && len(privBytes) == ed25519.PrivateKeySize {
-				if t, err := client.ConnectAsTrustedPeer(ctx, hc, baseURL, authority, link.DeviceID, ed25519.PrivateKey(privBytes)); err == nil {
+				t, trustedErr := client.ConnectAsTrustedPeer(ctx, hc, baseURL, authority, link.DeviceID, ed25519.PrivateKey(privBytes))
+				if trustedErr == nil {
 					return hc, t, peerHostID, true, nil
+				}
+				// Surface explicit revocation or hidden errors instead of masking them with fallback.
+				if strings.Contains(strings.ToLower(trustedErr.Error()), "no longer trusted") ||
+					strings.Contains(strings.ToLower(trustedErr.Error()), "hidden") {
+					return nil, nil, "", false, trustedErr
 				}
 			}
 		}
@@ -492,7 +569,7 @@ func (a *App) PairWithPeer(req PeerPairRequest) (*client.PairResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	hc, target, _, _, err := a.peerAuthClientAndTarget(ctx, authority, req.ExpectedHostID, req.ExpectedPubKey, req.ShortCode, req.PairingToken)
+	hc, target, resolvedHostID, _, err := a.peerAuthClientAndTarget(ctx, authority, req.ExpectedHostID, req.ExpectedPubKey, req.ShortCode, req.PairingToken)
 	if err != nil {
 		return nil, err
 	}
@@ -522,7 +599,7 @@ func (a *App) PairWithPeer(req PeerPairRequest) (*client.PairResult, error) {
 		runtime.EventsEmit(uiCtx, "peer-pair:sas", PeerPairSASPrompt{
 			RequestID:  reqID,
 			PeerName:   req.PeerName,
-			PeerHostID: req.ExpectedHostID,
+			PeerHostID: resolvedHostID,
 			SAS:        sas,
 			IsPinned:   isPinned,
 		})
@@ -650,16 +727,20 @@ func (a *App) runPeerTransferJob(ctx context.Context, jobID string, req PeerSend
 	if trustedPeer && a.hostIdentity != nil {
 		if link, ok := a.peerMgr.getLink(resolvedHostID); ok && link.DeviceID != "" {
 			if chalResp, chalErr := c.RequestAuthChallenge(ctx, link.DeviceID); chalErr == nil {
-				if cManifest, cErr := transfer.CanonicalManifestFromBatch(lm.Manifest, nil); cErr == nil {
-					if _, mHash, hErr := transfer.ComputeManifestSHA256(cManifest); hErr == nil {
-						if privBytes, decErr := hex.DecodeString(a.hostIdentity.PrivateKey); decErr == nil {
-							payload := devices.BuildAuthV2Payload(chalResp.HostID, link.DeviceID, chalResp.Timestamp, chalResp.TransferNonce, mHash)
-							sig := devices.SignMessage(ed25519.PrivateKey(privBytes), payload)
-							authHdrs = &client.AuthHeaders{
-								DeviceID:  link.DeviceID,
-								Nonce:     chalResp.TransferNonce,
-								Timestamp: chalResp.Timestamp,
-								Signature: sig,
+				// Verify host signature on the transfer challenge against the TLS-pinned public key.
+				chalPayload := devices.BuildSrvChalPayload(chalResp.HostID, chalResp.DeviceID, chalResp.TransferNonce, chalResp.Timestamp)
+				if verifyHexEd25519(link.HostPublicKey, chalPayload, chalResp.HostSignature) {
+					if cManifest, cErr := transfer.CanonicalManifestFromBatch(lm.Manifest, nil); cErr == nil {
+						if _, mHash, hErr := transfer.ComputeManifestSHA256(cManifest); hErr == nil {
+							if privBytes, decErr := hex.DecodeString(a.hostIdentity.PrivateKey); decErr == nil {
+								payload := devices.BuildAuthV2Payload(chalResp.HostID, link.DeviceID, chalResp.Timestamp, chalResp.TransferNonce, mHash)
+								sig := devices.SignMessage(ed25519.PrivateKey(privBytes), payload)
+								authHdrs = &client.AuthHeaders{
+									DeviceID:  link.DeviceID,
+									Nonce:     chalResp.TransferNonce,
+									Timestamp: chalResp.Timestamp,
+									Signature: sig,
+								}
 							}
 						}
 					}

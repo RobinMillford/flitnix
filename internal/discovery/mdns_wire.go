@@ -192,12 +192,19 @@ func buildMDNSResponse(a mdnsAnnouncement, ttlSeconds uint32) ([]byte, error) {
 	}
 
 	// 3. TXT: strictly sanitized metadata
+	ipStrs := make([]string, 0, len(a.IPs))
+	for _, ip := range a.IPs {
+		if ip != nil {
+			ipStrs = append(ipStrs, ip.String())
+		}
+	}
 	txtPairs := []string{
 		"hid=" + a.HostID,
 		"pk=" + a.PublicKey,
 		"name=" + a.DeviceName,
 		"os=" + a.OS,
 		"ver=" + a.Version,
+		"ips=" + strings.Join(ipStrs, ","),
 		"ts=" + strconv.FormatInt(a.Timestamp, 10),
 		"sig=" + a.Sig,
 	}
@@ -297,6 +304,7 @@ func parseMDNSResponse(pkt []byte) (mdnsAnnouncement, bool) {
 	}
 
 	var out mdnsAnnouncement
+	var signedIPs []net.IP
 	hasFlitnix := false
 
 	for i := 0; i < totalRR; i++ {
@@ -350,6 +358,12 @@ func parseMDNSResponse(pkt []byte) (mdnsAnnouncement, bool) {
 							out.OS = v
 						case "ver":
 							out.Version = v
+						case "ips":
+							for _, rawIP := range strings.Split(v, ",") {
+								if parsed := net.ParseIP(strings.TrimSpace(rawIP)); parsed != nil {
+									signedIPs = append(signedIPs, parsed)
+								}
+							}
 						case "ts":
 							if parsed, err := strconv.ParseInt(v, 10, 64); err == nil {
 								out.Timestamp = parsed
@@ -378,6 +392,9 @@ func parseMDNSResponse(pkt []byte) (mdnsAnnouncement, bool) {
 
 	if !hasFlitnix || out.HostID == "" || out.PublicKey == "" || out.Port == 0 {
 		return mdnsAnnouncement{}, false
+	}
+	if len(signedIPs) > 0 {
+		out.IPs = signedIPs
 	}
 	return out, true
 }

@@ -2418,25 +2418,47 @@
     if (pairedInfoBox) pairedInfoBox.hidden = true;
   }
 
+  function setPairingStorageUnavailableUI(reason) {
+    if (trustBadge) {
+      trustBadge.className = "badge badge--waiting";
+      trustBadge.textContent = "Unavailable";
+    }
+    if (trustDesc) {
+      trustDesc.textContent = reason || "Trusted device pairing requires persistent IndexedDB storage and is disabled in private/blocked browser modes. QR and 6-digit codes continue working normally.";
+    }
+    if (pairControls) pairControls.hidden = true;
+    if (pairSasBox) pairSasBox.hidden = true;
+    if (pairedInfoBox) pairedInfoBox.hidden = true;
+    if (reconnectPanel) reconnectPanel.hidden = true;
+  }
+
   var trustedPairingBound = false;
   function initTrustedPairingUI() {
     if (!trustPanel) return;
     var cryptoApi = window.FlitnixDeviceCrypto;
     if (!cryptoApi || typeof indexedDB === "undefined") {
-      if (trustDesc) {
-        trustDesc.textContent = "Device pairing is unavailable in private browsing modes without IndexedDB. QR and 6-digit codes continue working normally.";
-      }
-      if (pairControls) pairControls.hidden = true;
+      setPairingStorageUnavailableUI();
       return;
     }
     if (pairDeviceNameInput && !pairDeviceNameInput.value) {
       pairDeviceNameInput.value = defaultBrowserDeviceName();
     }
-    cryptoApi.listPairedHostsForOrigin(window.location.origin).then(function (hosts) {
+    cryptoApi.probeStorage().then(function () {
+      return Promise.all([
+        cryptoApi.listPairedHostsForOrigin(window.location.origin),
+        cryptoApi.hasValidIdentity()
+      ]);
+    }).then(function (res) {
+      var hosts = res[0];
+      var hasIdentity = res[1];
       var match = (hosts && hosts.length > 0) ? hosts[0] : null;
       if (!match) {
         setPairedUI(null);
         return;
+      }
+      if (!hasIdentity) {
+        // Key missing or corrupt -> purge orphaned host record and fail closed.
+        return cryptoApi.removePairedHost(match.deviceId).then(function () { setPairedUI(null); });
       }
       return api("/api/devices").then(function (list) {
         var enrolled = Array.isArray(list) && list.some(function (d) { return d && d.id === match.deviceId; });
@@ -2448,7 +2470,7 @@
         setPairedUI(match);
       });
     }).catch(function () {
-      setPairedUI(null);
+      setPairingStorageUnavailableUI();
     });
 
     if (trustedPairingBound || !pairStartBtn) return;
@@ -2457,17 +2479,19 @@
       var deviceName = (pairDeviceNameInput && pairDeviceNameInput.value.trim()) || defaultBrowserDeviceName();
       showPairError("");
       pairStartBtn.disabled = true;
-      var identity;
+      var pubIdentity;
       var eph;
       var challengeResp;
-      cryptoApi.getOrCreateIdentity().then(function (idRec) {
-        identity = idRec;
+      cryptoApi.probeStorage().then(function () {
+        return cryptoApi.ensurePublicIdentity();
+      }).then(function (idView) {
+        pubIdentity = idView;
         eph = cryptoApi.createEphemeralPairingData();
         return api("/api/pair/challenge", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            clientPublicKey: identity.publicKeyHex,
+            clientPublicKey: pubIdentity.publicKeyHex,
             clientCommitment: eph.commitmentHex
           })
         });
@@ -2483,20 +2507,20 @@
           })
         });
       }).then(function (rev) {
-        var verified = cryptoApi.completeHostReveal({
+        return cryptoApi.completeHostRevealWithStoredIdentity({
           token: token,
+          expectedHostIdHex: challengeResp.hostId,
           hostPublicKeyHex: challengeResp.hostPublicKey,
           hostCommitmentHex: challengeResp.hostCommitment,
           hostEphemeralHex: rev.hostEphemeralKey,
           hostSaltHex: rev.hostSalt,
           hostProofHex: rev.hostProof,
           pairingNonceHex: challengeResp.pairingNonce,
-          clientPublicKeyHex: identity.publicKeyHex,
           clientCommitmentHex: eph.commitmentHex,
           clientEphemeralPublicKey: eph.ephemeralPublicKey,
-          clientEphemeralSecretKey: eph.ephemeralSecretKey,
-          clientSecretKeyHex: identity.secretKeyHex
+          clientEphemeralSecretKey: eph.ephemeralSecretKey
         });
+      }).then(function (verified) {
         if (pairSasCode) pairSasCode.textContent = verified.sas;
         if (pairStatusText) pairStatusText.textContent = "Confirm this code on the Flitnix desktop prompt to approve…";
         if (pairSasBox) pairSasBox.hidden = false;
@@ -2506,7 +2530,7 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             deviceName: deviceName,
-            clientPublicKey: identity.publicKeyHex,
+            clientPublicKey: pubIdentity.publicKeyHex,
             pairingNonce: challengeResp.pairingNonce,
             clientProof: verified.clientProofHex
           })
@@ -2521,6 +2545,11 @@
           deviceId: enrolled.deviceId,
           deviceName: deviceName,
           hostPublicKey: challengeResp.hostPublicKey
+        }).catch(function (saveErr) {
+          // Roll back desktop enrollment if persistent IndexedDB save fails so we never leave half-paired state.
+          return api("/api/devices/" + encodeURIComponent(enrolled.deviceId), { method: "DELETE" })
+            .catch(function () {})
+            .then(function () { throw saveErr; });
         }).then(function (saved) {
           try {
             if (window.history && window.history.replaceState) {
@@ -2540,16 +2569,16 @@
 
   function performOneTapReconnect(rec) {
     var cryptoApi = window.FlitnixDeviceCrypto;
-    if (!cryptoApi || !rec || !rec.deviceId) return Promise.reject(new Error("Missing paired device"));
+    if (!cryptoApi || !rec || !rec.deviceId || !rec.hostId) return Promise.reject(new Error("Missing paired device"));
     showReconnectError("");
     if (reconnectBtn) reconnectBtn.disabled = true;
-    var identity;
     var challengeData;
-    return cryptoApi.loadIdentity().then(function (idRec) {
-      if (!idRec || !idRec.secretKeyHex) {
+    return cryptoApi.probeStorage().then(function () {
+      return cryptoApi.hasValidIdentity();
+    }).then(function (hasIdentity) {
+      if (!hasIdentity) {
         throw new Error("Device signing key not found in browser storage. Pair this browser again.");
       }
-      identity = idRec;
       return fetch("/api/device-sessions/challenge", {
         method: "POST",
         headers: { "Content-Type": "application/json", "Accept": "application/json" },
@@ -2565,22 +2594,27 @@
         throw err;
       });
     }).then(function (chal) {
+      if (!chal || String(chal.hostId || "").toLowerCase() !== String(rec.hostId).toLowerCase() ||
+          String(chal.deviceId || "").toLowerCase() !== String(rec.deviceId).toLowerCase()) {
+        throw new Error("Host identity mismatch during reconnect challenge; refused to sign.");
+      }
       challengeData = chal;
-      var signature = cryptoApi.signDeviceSessionChallenge({
+      return cryptoApi.signDeviceSessionChallengeWithStoredIdentity({
+        expectedOrigin: window.location.origin,
         hostId: chal.hostId,
         deviceId: chal.deviceId,
         nonce: chal.nonce,
-        timestamp: chal.timestamp,
-        secretKeyHex: identity.secretKeyHex
+        timestamp: chal.timestamp
       });
+    }).then(function (signature) {
       return fetch("/api/device-sessions/verify", {
         method: "POST",
         headers: { "Content-Type": "application/json", "Accept": "application/json" },
         body: JSON.stringify({
-          deviceId: chal.deviceId,
-          hostId: chal.hostId,
-          nonce: chal.nonce,
-          timestamp: chal.timestamp,
+          deviceId: challengeData.deviceId,
+          hostId: challengeData.hostId,
+          nonce: challengeData.nonce,
+          timestamp: challengeData.timestamp,
           signature: signature
         }),
         cache: "no-store"
@@ -2616,14 +2650,21 @@
 
   function initOneTapReconnect() {
     var cryptoApi = window.FlitnixDeviceCrypto;
-    if (!cryptoApi || typeof indexedDB === "undefined" || !reconnectPanel) return;
-    var lookup = requestedDeviceId
-      ? cryptoApi.getPairedHostByDeviceId(requestedDeviceId)
-      : cryptoApi.listPairedHostsForOrigin(window.location.origin).then(function (list) {
-          return (list && list.length > 0) ? list[0] : null;
-        });
-    lookup.then(function (rec) {
-      if (!rec || !rec.deviceId) {
+    if (!cryptoApi || typeof indexedDB === "undefined" || !reconnectPanel) {
+      if (reconnectPanel) reconnectPanel.hidden = true;
+      return;
+    }
+    cryptoApi.probeStorage().then(function () {
+      var lookup = requestedDeviceId
+        ? cryptoApi.getPairedHostByDeviceId(requestedDeviceId)
+        : cryptoApi.listPairedHostsForOrigin(window.location.origin).then(function (list) {
+            return (list && list.length > 0) ? list[0] : null;
+          });
+      return Promise.all([lookup, cryptoApi.hasValidIdentity()]);
+    }).then(function (res) {
+      var rec = res[0];
+      var hasIdentity = res[1];
+      if (!rec || !rec.deviceId || !hasIdentity || rec.origin !== window.location.origin) {
         reconnectPanel.hidden = true;
         return;
       }
@@ -2643,6 +2684,8 @@
                 window.history.replaceState(null, "", window.location.pathname + window.location.search);
               }
             } catch (_) {}
+          }).catch(function () {
+            reconnectPanel.hidden = true;
           });
         };
       }
