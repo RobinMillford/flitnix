@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -1448,7 +1449,12 @@ func TestDownloadRange_G2_DirectFileEndpoint(t *testing.T) {
 	if _, err := io.ReadFull(liveResp.Body, first); err != nil {
 		t.Fatalf("read first chunk: %v", err)
 	}
-	// Replace the file atomically on disk while streaming
+	// Replace the file atomically on disk while streaming.
+	// On Windows an open file cannot be renamed over; the server holds the
+	// source open for streaming, so atomic rename-over is impossible there.
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows cannot rename over an open file; mid-stream replacement is verified on Unix")
+	}
 	tmpSwap := bigPath + ".swap"
 	if err := os.WriteFile(tmpSwap, []byte("mutated-short"), 0o600); err != nil {
 		t.Fatal(err)
