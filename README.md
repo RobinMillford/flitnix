@@ -34,11 +34,33 @@ Flitnix combines the performance and concurrency safety of Go with a modern Svel
 
 ---
 
-## Key Features & What's New in v0.2.9.0
+## Key Features & What's New in v0.3.0
 
-Flitnix provides high-speed, private local file transfers between desktop computers and phones. Version **v0.2.9.0** builds on the v0.2.8 unbreakable transfer engine and adds trusted device-to-device sharing, automatic LAN discovery, and a polished approval experience.
+Flitnix provides high-speed, private local file transfers between desktop computers and phones. Version **v0.3.0** completes Phase 3 with real-time events, background receiving through the system tray, native OS notifications, and persistent transfer history with configurable retention — on top of trusted device-to-device sharing and the unbreakable transfer engine.
 
-### What's New in v0.2.9.0
+### What's New in v0.3.0
+
+- **Real-Time Events**:
+  - Authenticated server-sent events (`GET /api/events` and `GET /guest-api/events`) backed by an in-process pub/sub hub stream transfer, session, device, and discovery updates to both the desktop and the mobile browser.
+  - Desktop Wails event coalescing (`flitnix:event`) plus backpressure-aware SSE delivery with TTL/revocation enforcement and seamless polling fallback.
+
+- **System Tray, Background Receiving & Autostart**:
+  - Close or minimize to the tray while active sessions and transfers continue; live visibility/DND controls, `Open Flitnix`, and explicit `Quit Flitnix`.
+  - Login autostart through a Linux desktop entry, Windows HKCU Run key, and macOS LaunchAgent, with a safe headless fallback.
+
+- **Native OS Notifications & Interactive Approval**:
+  - Platform-native notifications on Linux (D-Bus), Windows, and macOS for incoming requests, completed transfers, pairing prompts, and quota warnings.
+  - BIDI-safe sanitized text, single-use 128-bit action tokens, state/visibility/quota revalidation, pairing focus protection, privacy filename masking, quiet mode, and per-category settings.
+
+- **Persistent Transfer History & Configurable Retention**:
+  - Durable personal history surviving restarts for incoming, batch, phone download, and computer-sharing transfers; searchable and filterable with summary metrics and safe `Open` / `Reveal` / `Reshare` actions confined to the receive directory.
+  - Configurable age/count limits (90 days / 5000 records by default) with non-blocking pruning that removes metadata only — never the transferred files.
+
+- **Reliability & Security Hardening**:
+  - Lifecycle-safe PATCH-to-PUT fallback with independent section readers and synchronized progress/callback retirement.
+  - Per-test receive-directory isolation, cross-platform test lifecycle fixes, and deterministic CI behavior across Linux, macOS, and Windows.
+
+### v0.2.9.0 — Trusted Device-to-Device Sharing
 
 - **Computer-to-Computer Sharing (Desktop ↔ Desktop)**:
   - Send files and whole folders directly between two Flitnix desktops from a dedicated GUI, over TLS 1.3 peer sessions with TOFU/host-identity enforcement and explicit approval on the receiving desktop.
@@ -50,10 +72,10 @@ Flitnix provides high-speed, private local file transfers between desktop comput
   - Six-digit connection codes for phone/browser sessions, with rotation, expiry, and rate limiting.
   - Mobile trusted-device pairing with persistent device policies: visibility mode, auto-approve limits, and executable/script restrictions.
   - Desktop visibility modes (Hidden, Everyone, Trusted Only, Temporary Everyone) govern who may see and send to a device.
-  - Cross-platform firewall diagnostics in Connection Doctor (G27) help resolve blocked peer connections.
+  - Cross-platform firewall diagnostics in Connection Doctor help resolve blocked peer connections.
 
 - **Reliability, Security & UI Polish**:
-  - Hardened G4 key encapsulation, G3 LAN anti-spoofing, and G9 TLS/TOFU enforcement; iOS Safari download fallback improvements.
+  - Hardened device-pairing key encapsulation, LAN anti-spoofing, and TLS/TOFU enforcement; iOS Safari download fallback improvements.
   - Transfer performance improvements from eliminating fsync/JSON bottlenecks, with an accurate speed display.
   - Approval Inbox redesign: compact device identity and status (`QR Session · Unpaired` or trusted status), clear file/batch details and storage warnings, and accessible Approve/Reject actions — replacing an oversized empty QR placeholder.
   - Test isolation: automated tests use per-test temporary receive directories and fail loudly if they would fall back to the real Downloads folder; macOS and non-macOS test helpers live in separate platform-specific files.
@@ -152,7 +174,7 @@ Every release includes a verified `SHA256SUMS.txt` manifest.
 
 ## Platform Compatibility & Project Status
 
-### Flitnix v0.2.9.0 Project & Release Status
+### Flitnix v0.3.0 Project & Release Status
 
 | Platform / Target | Minimum Version | Status | Verification & Readiness Notes |
 | :--- | :--- | :--- | :--- |
@@ -160,7 +182,7 @@ Every release includes a verified `SHA256SUMS.txt` manifest.
 | **Windows (Desktop)** | Windows 10 (1809+) / Windows 11 (64-bit) | **CI Pending** | Single-pass streaming and atomic collision-safe publication verified; local repeated tests pass (50/50); remote Windows GitHub Actions CI confirmation pending. Authenticode code signing pending. |
 | **macOS (Desktop)** | macOS 11.0 Big Sur or later | **Native Validation Pending** | Universal binary configuration present (`.dmg` / `.zip`); direct streaming upload engine cross-compiled; native hardware execution, code signing, and notarization pending. |
 | **Mobile Browsers** | iOS 14+ (Safari), Android 8+ (Chrome, Firefox, etc.) | **Automated Tests Passed** | Direct single-pass HTTP streaming with native progress reporting and wake-lock test suites pass; physical mobile device validation across diverse hardware pending. |
-| **Physical RF Wi-Fi & Power Loss** | All Platforms | **Deferred** | Physical multi-room RF Wi-Fi roaming, AP handoff, and hardware sudden power-loss testing are explicitly deferred to post-v0.2.9.0 evaluation tracks. |
+| **Physical RF Wi-Fi & Power Loss** | All Platforms | **Deferred** | Physical multi-room RF Wi-Fi roaming, AP handoff, and hardware sudden power-loss testing are explicitly deferred to post-v0.3.0 evaluation tracks. |
 
 ---
 
