@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/itsyamin/flitnix/internal/events"
 	"github.com/itsyamin/flitnix/internal/transfer"
 )
 
@@ -116,7 +117,9 @@ func handleUploadPatch(svcs *Services, stall time.Duration) http.HandlerFunc {
 			rc:         http.NewResponseController(w),
 			stall:      stall,
 		}
-		res, serr := svcs.Transfers.SubmitChunk(r.Context(), id, sess.Key(), offset, r.ContentLength, body, nil, func() error {
+		res, serr := svcs.Transfers.SubmitChunk(r.Context(), id, sess.Key(), offset, r.ContentLength, body, func(up transfer.Upload) {
+			svcs.EmitPersonalProgress(sess.Key(), "up:"+id, events.TypeUploadProgress, toUploadJSON(up))
+		}, func() error {
 			if devID != "" && svcs.Devices != nil {
 				if _, exists := svcs.Devices.Get(devID); !exists {
 					return errors.New("device revoked mid-transfer")
@@ -124,6 +127,9 @@ func handleUploadPatch(svcs *Services, stall time.Duration) http.HandlerFunc {
 			}
 			return nil
 		})
+		if upAfter, ok := svcs.Transfers.Get(id); ok {
+			svcs.EmitPersonal(sess.Key(), events.TypeUploadUpdated, toUploadJSON(upAfter))
+		}
 		if serr != nil {
 			writeChunkStreamError(w, r, serr, res.CommittedOffset)
 			return
@@ -279,6 +285,13 @@ func handleBatchPatch(svcs *Services, stall time.Duration) http.HandlerFunc {
 			body,
 			func(up transfer.Upload) {
 				_ = svcs.Coordinator.UpdateItemProgress(sess.Key(), lease, up.Uploaded)
+				svcs.EmitPersonalProgress(sess.Key(), "batch:"+batchID+":"+itemID, events.TypeBatchProgress, map[string]any{
+					"batchId":      batchID,
+					"itemId":       itemID,
+					"transferred":  up.Uploaded,
+					"declaredSize": lease.DeclaredSize,
+					"speed":        up.Speed,
+				})
 			},
 			func() error {
 				if devID != "" && svcs.Devices != nil {
@@ -305,6 +318,9 @@ func handleBatchPatch(svcs *Services, stall time.Duration) http.HandlerFunc {
 			}
 			if errors.Is(chunkErr, transfer.ErrCanceled) {
 				_ = svcs.Coordinator.CancelItem(sess.Key(), batchID, itemID)
+				if v, vErr := svcs.Coordinator.GetBatch(sess.Key(), batchID); vErr == nil {
+					svcs.EmitPersonal(sess.Key(), events.TypeBatchUpdated, v)
+				}
 				writeChunkStreamError(w, r, chunkErr, res.CommittedOffset)
 				return
 			}
@@ -318,6 +334,9 @@ func handleBatchPatch(svcs *Services, stall time.Duration) http.HandlerFunc {
 			}
 			if errors.Is(chunkErr, transfer.ErrSizeExceeded) || errors.Is(chunkErr, transfer.ErrDigestMismatch) || errors.Is(chunkErr, transfer.ErrStagingQuarantined) {
 				failBatch(svcs, sess.Key(), lease, chunkErr)
+				if v, vErr := svcs.Coordinator.GetBatch(sess.Key(), batchID); vErr == nil {
+					svcs.EmitPersonal(sess.Key(), events.TypeBatchUpdated, v)
+				}
 				writeChunkStreamError(w, r, chunkErr, 0)
 				return
 			}
@@ -327,7 +346,9 @@ func handleBatchPatch(svcs *Services, stall time.Duration) http.HandlerFunc {
 			if herr == nil {
 				committed = head.CommittedOffset
 			}
-			_, _ = svcs.Coordinator.InterruptItem(sess.Key(), lease, committed, chunkErr)
+			if v, iErr := svcs.Coordinator.InterruptItem(sess.Key(), lease, committed, chunkErr); iErr == nil {
+				svcs.EmitPersonal(sess.Key(), events.TypeBatchUpdated, v)
+			}
 			diagnose(svcs, "batch chunk interrupted session=%s item=%s committed=%d reason=%s",
 				shortKey(sess.Key()), shortID(itemID), committed, classifyStreamFailure(r, chunkErr))
 			writeChunkStreamError(w, r, chunkErr, committed)
@@ -336,6 +357,15 @@ func handleBatchPatch(svcs *Services, stall time.Duration) http.HandlerFunc {
 
 		if !res.Completed {
 			_ = svcs.Coordinator.ReleaseChunkLease(sess.Key(), lease, res.CommittedOffset)
+			if v, vErr := svcs.Coordinator.GetBatch(sess.Key(), batchID); vErr == nil {
+				svcs.EmitPersonalProgress(sess.Key(), "batch:"+batchID+":"+itemID, events.TypeBatchProgress, map[string]any{
+					"batchId":      batchID,
+					"itemId":       itemID,
+					"transferred":  res.CommittedOffset,
+					"declaredSize": lease.DeclaredSize,
+				})
+				_ = v
+			}
 			setResumableHeaders(w, res.CommittedOffset, lease.DeclaredSize, transfer.DefaultChunkSize, string(transfer.ItemStateTransferring))
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -355,6 +385,11 @@ func handleBatchPatch(svcs *Services, stall time.Duration) http.HandlerFunc {
 		if completeErr != nil {
 			writeBatchError(w, completeErr)
 			return
+		}
+		if fullView, vErr := svcs.Coordinator.GetBatch(sess.Key(), batchID); vErr == nil {
+			svcs.EmitPersonal(sess.Key(), events.TypeBatchUpdated, fullView)
+		} else {
+			svcs.EmitPersonal(sess.Key(), events.TypeBatchUpdated, view)
 		}
 		setResumableHeaders(w, res.CommittedOffset, lease.DeclaredSize, transfer.DefaultChunkSize, string(transfer.ItemStateCompleted))
 		writeJSON(w, http.StatusOK, struct {

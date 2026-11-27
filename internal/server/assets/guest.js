@@ -2,6 +2,18 @@
   "use strict";
 
   var POLL_MS = 1500;
+  var SSE_BACKUP_POLL_MS = 15000;
+  var guestSSE = {
+    active: false,
+    connecting: false,
+    wasEverConnected: false,
+    controller: null,
+    reconnectTimer: null,
+    failures: 0,
+    lastEventId: 0
+  };
+  var guestApprovalChecks = {};
+  var guestEnded = false;
   var inviteSecret = null;
   // Guest authentication rides on the HttpOnly flitnix_guest_token cookie,
   // which the browser attaches automatically to same-origin requests. The
@@ -250,6 +262,9 @@
         showAwarenessBanner("Flitnix was moved to the background. Transfer status has been refreshed.");
         reconcileActiveTransfers();
       }
+      if (!guestEnded && guestInfo && !guestSSE.active && !guestSSE.connecting) {
+        connectGuestEvents();
+      }
       syncWakeLock();
     }
     updateAwarenessUI();
@@ -485,24 +500,212 @@
     });
   }
 
+  function disconnectGuestEvents() {
+    if (guestSSE.reconnectTimer) {
+      clearTimeout(guestSSE.reconnectTimer);
+      guestSSE.reconnectTimer = null;
+    }
+    if (guestSSE.controller) {
+      try { guestSSE.controller.abort(); } catch (e) {}
+      guestSSE.controller = null;
+    }
+    guestSSE.active = false;
+    guestSSE.connecting = false;
+  }
+
+  function scheduleGuestEventReconnect(immediate) {
+    if (guestEnded || !guestInfo || guestSSE.reconnectTimer) return;
+    var delay = immediate ? 150 : Math.min(15000, 1000 * Math.pow(2, Math.max(0, guestSSE.failures - 1)));
+    guestSSE.reconnectTimer = setTimeout(function () {
+      guestSSE.reconnectTimer = null;
+      connectGuestEvents();
+    }, delay);
+  }
+
+  function refreshGuestStatusNow() {
+    if (guestEnded) return;
+    fetch("/guest-api/status", { credentials: "same-origin", cache: "no-store" })
+      .then(function (res) { return res.json(); })
+      .then(function (data) { handleStatusResponse(data); })
+      .catch(function () {});
+  }
+
+  function dispatchGuestSSEBlock(rawBlock) {
+    if (!rawBlock) return;
+    var lines = rawBlock.split(/\r?\n/);
+    var eventType = "message";
+    var eventId = 0;
+    var dataLines = [];
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      if (!line || line.charAt(0) === ":") continue;
+      var colon = line.indexOf(":");
+      var field = colon >= 0 ? line.slice(0, colon) : line;
+      var val = colon >= 0 ? line.slice(colon + 1) : "";
+      if (val.charAt(0) === " ") val = val.slice(1);
+      if (field === "event") eventType = val;
+      else if (field === "id") {
+        var parsedId = parseInt(val, 10);
+        if (!isNaN(parsedId) && parsedId > 0) eventId = parsedId;
+      } else if (field === "data") {
+        dataLines.push(val);
+      }
+    }
+    if (dataLines.length === 0) return;
+    if (eventId > 0) {
+      if (eventId <= guestSSE.lastEventId) return;
+      guestSSE.lastEventId = eventId;
+    }
+    var parsed = null;
+    try { parsed = JSON.parse(dataLines.join("\n")); } catch (e) { return; }
+
+    var envType = (parsed && parsed.type) ? parsed.type : eventType;
+    var payload = (parsed && parsed.payload !== undefined) ? parsed.payload : parsed;
+
+    if (envType === "ready") {
+      var reconnected = guestSSE.wasEverConnected || guestSSE.failures > 0;
+      guestSSE.wasEverConnected = true;
+      guestSSE.active = true;
+      guestSSE.failures = 0;
+      if (reconnected) {
+        refreshGuestStatusNow();
+        reconcileActiveTransfers();
+      }
+      return;
+    }
+    if (envType === "resync") {
+      refreshGuestStatusNow();
+      reconcileActiveTransfers();
+      return;
+    }
+    if (envType === "reconnect") {
+      return;
+    }
+    if (envType === "session.ended") {
+      refreshGuestStatusNow();
+      return;
+    }
+    if (envType === "guest.status" || envType === "guest.room.updated") {
+      if (payload && payload.state) {
+        handleStatusResponse(payload);
+      } else {
+        refreshGuestStatusNow();
+      }
+      return;
+    }
+    if (envType === "guest.upload.updated") {
+      if (payload && payload.uploadId && guestApprovalChecks[payload.uploadId]) {
+        try { guestApprovalChecks[payload.uploadId](); } catch (e) {}
+      } else {
+        reconcileActiveTransfers();
+      }
+    }
+  }
+
+  function connectGuestEvents() {
+    if (guestEnded || !guestInfo || guestSSE.active || guestSSE.connecting) return;
+    if (typeof fetch !== "function" || typeof ReadableStream === "undefined" || typeof TextDecoder === "undefined") {
+      return;
+    }
+    if (guestSSE.reconnectTimer) {
+      clearTimeout(guestSSE.reconnectTimer);
+      guestSSE.reconnectTimer = null;
+    }
+
+    var controller = typeof AbortController === "function" ? new AbortController() : null;
+    guestSSE.controller = controller;
+    guestSSE.connecting = true;
+
+    fetch("/guest-api/events", {
+      method: "GET",
+      credentials: "same-origin",
+      headers: { "Accept": "text/event-stream" },
+      cache: "no-store",
+      signal: controller ? controller.signal : undefined
+    }).then(function (res) {
+      if (res.status === 401) {
+        guestSSE.connecting = false;
+        refreshGuestStatusNow();
+        return;
+      }
+      if (!res.ok || !res.body || typeof res.body.getReader !== "function") {
+        throw new Error("guest event stream status " + res.status);
+      }
+      guestSSE.connecting = false;
+      var reader = res.body.getReader();
+      var decoder = new TextDecoder("utf-8");
+      var buffer = "";
+      var sawReconnect = false;
+
+      function readLoop() {
+        return reader.read().then(function (step) {
+          if (guestEnded || guestSSE.controller !== controller) {
+            try { reader.cancel(); } catch (e) {}
+            return;
+          }
+          if (step.done) {
+            guestSSE.active = false;
+            guestSSE.controller = null;
+            if (!guestEnded) {
+              scheduleGuestEventReconnect(sawReconnect);
+            }
+            return;
+          }
+          buffer += decoder.decode(step.value, { stream: true });
+          var match;
+          while ((match = /\r?\n\r?\n/.exec(buffer)) !== null) {
+            var block = buffer.slice(0, match.index);
+            buffer = buffer.slice(match.index + match[0].length);
+            if (block.indexOf("event: reconnect") >= 0) {
+              sawReconnect = true;
+            }
+            dispatchGuestSSEBlock(block);
+          }
+          return readLoop();
+        });
+      }
+
+      return readLoop();
+    }).catch(function (err) {
+      if (guestSSE.controller === controller) {
+        guestSSE.controller = null;
+      }
+      guestSSE.connecting = false;
+      guestSSE.active = false;
+      if (guestEnded || (err && err.name === "AbortError")) return;
+      guestSSE.failures += 1;
+      scheduleGuestEventReconnect(false);
+    });
+  }
+
   function startStatusPolling() {
     if (isPolling) return;
     isPolling = true;
+    guestEnded = false;
+    connectGuestEvents();
 
     function poll() {
+      if (guestEnded) {
+        isPolling = false;
+        return;
+      }
       fetch("/guest-api/status", {
+        credentials: "same-origin",
+        cache: "no-store"
       })
         .then(function (res) { return res.json(); })
         .then(function (data) {
           handleStatusResponse(data);
           if (data.state === "pending" || data.state === "approved") {
-            setTimeout(poll, POLL_MS);
+            setTimeout(poll, guestSSE.active ? SSE_BACKUP_POLL_MS : POLL_MS);
           } else {
+            guestEnded = true;
             isPolling = false;
+            disconnectGuestEvents();
           }
         })
         .catch(function () {
-          setTimeout(poll, POLL_MS * 2);
+          setTimeout(poll, guestSSE.active ? SSE_BACKUP_POLL_MS : (POLL_MS * 2));
         });
     }
 
@@ -511,6 +714,7 @@
 
   function handleStatusResponse(data) {
     if (data.state === "approved") {
+      guestEnded = false;
       hideAllViews();
       if (uploadView) uploadView.hidden = false;
       updateAwarenessUI();
@@ -518,22 +722,29 @@
       setStatus("ready", "Connected to Guest Drop Box");
       pumpQueue();
     } else if (data.state === "pending") {
+      guestEnded = false;
       hideAllViews();
       if (waitingView) waitingView.hidden = false;
       setStatus("checking", "Waiting for host approval…");
     } else if (data.state === "rejected") {
+      guestEnded = true;
+      disconnectGuestEvents();
       hideAllViews();
       if (rejectedView) rejectedView.hidden = false;
       if (rejectedTitle) rejectedTitle.textContent = "Request Rejected";
       if (rejectedMsg) rejectedMsg.textContent = "The desktop owner rejected your join request.";
       setStatus("ended", "Join request rejected");
     } else if (data.state === "revoked") {
+      guestEnded = true;
+      disconnectGuestEvents();
       hideAllViews();
       if (rejectedView) rejectedView.hidden = false;
       if (rejectedTitle) rejectedTitle.textContent = "Access Revoked";
       if (rejectedMsg) rejectedMsg.textContent = "The desktop owner revoked access for this device.";
       setStatus("ended", "Access revoked");
     } else if (data.state === "ended" || data.state === "expired") {
+      guestEnded = true;
+      disconnectGuestEvents();
       hideAllViews();
       if (rejectedView) rejectedView.hidden = false;
       if (rejectedTitle) rejectedTitle.textContent = "Drop Box Ended";
@@ -838,24 +1049,39 @@
   }
 
   function pollUploadApproval(job) {
+    var timer = null;
+    function wakeCheck() {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      check();
+    }
+    guestApprovalChecks[job.uploadId] = wakeCheck;
+
     function check() {
       fetch("/guest-api/uploads/" + encodeURIComponent(job.uploadId), {
+        credentials: "same-origin",
+        cache: "no-store"
       })
         .then(function (res) { return res.json(); })
         .then(function (data) {
           if (data.state === "approved") {
+            delete guestApprovalChecks[job.uploadId];
             job.state = "approved";
             updateJobUI(job);
             streamJobContent(job);
           } else if (data.state === "rejected") {
+            delete guestApprovalChecks[job.uploadId];
             job.state = "rejected";
             updateJobUI(job);
             isUploading = false;
             syncWakeLock();
             pumpQueue();
           } else if (data.state === "pending") {
-            setTimeout(check, 1000);
+            timer = setTimeout(check, guestSSE.active ? 8000 : 1000);
           } else {
+            delete guestApprovalChecks[job.uploadId];
             job.state = data.state || "failed";
             updateJobUI(job);
             isUploading = false;
@@ -864,7 +1090,7 @@
           }
         })
         .catch(function () {
-          setTimeout(check, 2000);
+          timer = setTimeout(check, 2000);
         });
     }
 

@@ -65,6 +65,7 @@ import (
 
 	"github.com/itsyamin/flitnix/internal/audit"
 	"github.com/itsyamin/flitnix/internal/devices"
+	"github.com/itsyamin/flitnix/internal/events"
 	"github.com/itsyamin/flitnix/internal/guest"
 	"github.com/itsyamin/flitnix/internal/power"
 	"github.com/itsyamin/flitnix/internal/recovery"
@@ -161,6 +162,7 @@ type Services struct {
 	Pairing        *devices.PairingCoordinator
 	Visibility     *devices.VisibilityManager
 	Inhibitor      power.Inhibitor
+	Events         *events.Hub
 	OnPhoneContact func(source string)
 
 	// OnBatchPending, when non-nil, receives notice of a newly declared batch
@@ -194,6 +196,42 @@ func (s *Services) RecordContact(source string) {
 	}
 }
 
+func (s *Services) EmitPersonal(sessionKey, eventType string, payload any) {
+	if s != nil && s.Events != nil {
+		s.Events.PublishPersonal(sessionKey, eventType, payload)
+	}
+}
+
+func (s *Services) EmitPersonalProgress(sessionKey, throttleKey, eventType string, payload any) {
+	if s == nil || s.Events == nil {
+		return
+	}
+	if s.Events.AllowProgress(throttleKey, events.DefaultProgressInterval) {
+		s.Events.PublishPersonal(sessionKey, eventType, payload)
+	}
+}
+
+func (s *Services) EmitGuest(roomID, guestID, eventType string, payload any) {
+	if s != nil && s.Events != nil {
+		s.Events.PublishGuest(roomID, guestID, eventType, payload)
+	}
+}
+
+func (s *Services) EmitGuestProgress(roomID, guestID, throttleKey, eventType string, payload any) {
+	if s == nil || s.Events == nil {
+		return
+	}
+	if s.Events.AllowProgress(throttleKey, events.DefaultProgressInterval) {
+		s.Events.PublishGuest(roomID, guestID, eventType, payload)
+	}
+}
+
+func (s *Services) EmitDesktop(eventType string, payload any) {
+	if s != nil && s.Events != nil {
+		s.Events.PublishDesktop(eventType, payload)
+	}
+}
+
 // normalize fills in zero-value defaults.
 func (c *Config) normalize() {
 	if c.ListenAddr == "" {
@@ -222,11 +260,14 @@ type Server struct {
 	handler http.Handler
 	grants  *DownloadGrantStore
 
-	once       sync.Once
-	ready      chan struct{}
-	recoverOne sync.Once
-	recoverErr error
-	store      *recovery.Store
+	once         sync.Once
+	ready        chan struct{}
+	shutdownCh   chan struct{}
+	shutdownOnce sync.Once
+	ownsEvents   bool
+	recoverOne   sync.Once
+	recoverErr   error
+	store        *recovery.Store
 
 	mu           sync.Mutex
 	listener     net.Listener
@@ -244,11 +285,17 @@ type Server struct {
 func New(cfg Config) *Server {
 	cfg.normalize()
 	var downloads *transfer.DownloadRegistry
+	ownsEvents := false
 	if cfg.Services != nil {
 		downloads = cfg.Services.Downloads
+		if cfg.Services.Events == nil {
+			cfg.Services.Events = events.NewHub()
+			ownsEvents = true
+		}
 	}
+	shutdownCh := make(chan struct{})
 	grants := newGrantStore(downloads)
-	handler := newRouter(cfg.Services, cfg.TransferStall, cfg.DownloadStall, grants)
+	handler := newRouterWithShutdown(cfg.Services, cfg.TransferStall, cfg.DownloadStall, grants, shutdownCh)
 	return &Server{
 		cfg: cfg,
 		http: &http.Server{
@@ -262,9 +309,11 @@ func New(cfg Config) *Server {
 			// no body handling.
 			IdleTimeout: idleTimeout,
 		},
-		handler: handler,
-		grants:  grants,
-		ready:   make(chan struct{}),
+		handler:    handler,
+		grants:     grants,
+		ready:      make(chan struct{}),
+		shutdownCh: shutdownCh,
+		ownsEvents: ownsEvents,
 	}
 }
 
@@ -302,13 +351,24 @@ func (s *Server) Serve(ctx context.Context) error {
 
 	select {
 	case err := <-serveErr:
+		s.signalShutdown()
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
 		return fmt.Errorf("server: serving on %s: %w", s.cfg.ListenAddr, err)
 	case <-ctx.Done():
+		s.signalShutdown()
 		return s.drain(serveErr)
 	}
+}
+
+func (s *Server) signalShutdown() {
+	s.shutdownOnce.Do(func() {
+		close(s.shutdownCh)
+		if s.ownsEvents && s.cfg.Services != nil && s.cfg.Services.Events != nil {
+			s.cfg.Services.Events.Close()
+		}
+	})
 }
 
 // bind opens the listener exactly once. A second call re-uses the stored

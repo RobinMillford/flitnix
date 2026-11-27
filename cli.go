@@ -17,6 +17,7 @@ import (
 
 	"github.com/itsyamin/flitnix/internal/client"
 	"github.com/itsyamin/flitnix/internal/doctor"
+	"github.com/itsyamin/flitnix/internal/events"
 	"github.com/itsyamin/flitnix/internal/netenv"
 	"github.com/itsyamin/flitnix/internal/qr"
 	"github.com/itsyamin/flitnix/internal/server"
@@ -166,6 +167,8 @@ func runServeCLI(args []string, stdout, stderr io.Writer) int {
 	dls := transfer.NewDownloadRegistry()
 
 	pendingBatches := make(chan pendingServeBatch, 16)
+	eventsHub := events.NewHub()
+	defer eventsHub.Close()
 
 	svcs := &server.Services{
 		Sessions:    sessMgr,
@@ -173,6 +176,7 @@ func runServeCLI(args []string, stdout, stderr io.Writer) int {
 		Coordinator: coord,
 		Registry:    reg,
 		Downloads:   dls,
+		Events:      eventsHub,
 		OnBatchPending: func(sessionKey string, batch transfer.BatchView, remoteAddr string) {
 			select {
 			case pendingBatches <- pendingServeBatch{sessionKey: sessionKey, batch: batch, remoteAddr: remoteAddr}:
@@ -223,7 +227,7 @@ func runServeCLI(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "\nPress Ctrl+C to stop.\n")
 
 		// Run headless terminal approval loop in background
-		go runServeApprovalLoop(ctx, pendingBatches, transfers, coord, os.Stdin, stdout)
+		go runServeApprovalLoop(ctx, pendingBatches, transfers, coord, eventsHub, os.Stdin, stdout)
 
 		serveErr := <-serving
 		sessMgr.Close()
@@ -242,7 +246,7 @@ type pendingServeBatch struct {
 	remoteAddr string
 }
 
-func runServeApprovalLoop(ctx context.Context, pending <-chan pendingServeBatch, transfers *transfer.Service, coord *transfer.Coordinator, in io.Reader, out io.Writer) {
+func runServeApprovalLoop(ctx context.Context, pending <-chan pendingServeBatch, transfers *transfer.Service, coord *transfer.Coordinator, eventsHub *events.Hub, in io.Reader, out io.Writer) {
 	scanner := bufio.NewScanner(in)
 	for {
 		select {
@@ -311,7 +315,10 @@ func runServeApprovalLoop(ctx context.Context, pending <-chan pendingServeBatch,
 					}
 				}
 				if !failed {
-					if _, err := coord.ApproveBatch(ev.sessionKey, ev.batch.ID); err == nil {
+					if v, err := coord.ApproveBatch(ev.sessionKey, ev.batch.ID); err == nil {
+						if eventsHub != nil {
+							eventsHub.PublishPersonal(ev.sessionKey, events.TypeBatchUpdated, v)
+						}
 						fmt.Fprintf(out, "--> Batch %s approved.\n", ev.batch.ID)
 						continue
 					}
@@ -320,13 +327,17 @@ func runServeApprovalLoop(ctx context.Context, pending <-chan pendingServeBatch,
 				for _, cid := range contentIDs {
 					_ = transfers.Cancel(cid)
 				}
-				_, _ = coord.CancelBatch(ev.sessionKey, ev.batch.ID)
+				if v, err := coord.CancelBatch(ev.sessionKey, ev.batch.ID); err == nil && eventsHub != nil {
+					eventsHub.PublishPersonal(ev.sessionKey, events.TypeBatchUpdated, v)
+				}
 				fmt.Fprintf(out, "--> Batch %s approval failed.\n", ev.batch.ID)
 			} else {
 				for _, cid := range contentIDs {
 					_, _ = transfers.Decide(cid, false)
 				}
-				_, _ = coord.RejectBatch(ev.sessionKey, ev.batch.ID)
+				if v, err := coord.RejectBatch(ev.sessionKey, ev.batch.ID); err == nil && eventsHub != nil {
+					eventsHub.PublishPersonal(ev.sessionKey, events.TypeBatchUpdated, v)
+				}
 				fmt.Fprintf(out, "--> Batch %s declined.\n", ev.batch.ID)
 			}
 		}

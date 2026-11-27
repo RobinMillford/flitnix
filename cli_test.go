@@ -178,7 +178,7 @@ func TestRunServeApprovalLoopApprove(t *testing.T) {
 	in := strings.NewReader("y\n")
 
 	ctx := context.Background()
-	runServeApprovalLoop(ctx, pendingChan, transfers, coord, in, &stdout)
+	runServeApprovalLoop(ctx, pendingChan, transfers, coord, nil, in, &stdout)
 
 	// Verify batch is approved
 	updated, err := coord.GetBatch(sessionKey, view.ID)
@@ -227,7 +227,7 @@ func TestRunServeApprovalLoopDecline(t *testing.T) {
 	in := strings.NewReader("\n")
 
 	ctx := context.Background()
-	runServeApprovalLoop(ctx, pendingChan, transfers, coord, in, &stdout)
+	runServeApprovalLoop(ctx, pendingChan, transfers, coord, nil, in, &stdout)
 
 	// Verify batch is rejected
 	updated, err := coord.GetBatch(sessionKey, view.ID)
@@ -273,7 +273,7 @@ func TestRunServeApprovalLoopStaleBatch(t *testing.T) {
 
 	var stdout bytes.Buffer
 	in := strings.NewReader("y\n")
-	runServeApprovalLoop(context.Background(), pendingChan, transfers, coord, in, &stdout)
+	runServeApprovalLoop(context.Background(), pendingChan, transfers, coord, nil, in, &stdout)
 
 	if stdout.String() != "" {
 		t.Fatalf("expected already-canceled batch to be skipped without prompt, got stdout:\n%s", stdout.String())
@@ -298,7 +298,7 @@ func TestRunServeApprovalLoopStaleBatch(t *testing.T) {
 	loopDone := make(chan struct{})
 	go func() {
 		defer close(loopDone)
-		runServeApprovalLoop(context.Background(), pendingChan2, transfers, coord, r, &safeStdout)
+		runServeApprovalLoop(context.Background(), pendingChan2, transfers, coord, nil, r, &safeStdout)
 	}()
 
 	// Wait briefly for the prompt to be displayed

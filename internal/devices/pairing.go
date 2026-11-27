@@ -102,6 +102,10 @@ type PairingCoordinator struct {
 
 	// OnPairingPrompt is an optional callback invoked when Bob's approval is requested.
 	OnPairingPrompt func(deviceName, clientID, sasCode string, decisionChan chan<- bool)
+
+	// OnPromptChanged is an optional non-blocking notification callback invoked
+	// whenever pairing prompt state transitions (pending, approved, denied, canceled).
+	OnPromptChanged func(PairingStatusView)
 }
 
 // NewPairingCoordinator constructs a PairingCoordinator.
@@ -422,6 +426,11 @@ func (c *PairingCoordinator) PrepareApproval(sessionKeyHash []byte, deviceName, 
 		ch := p.decisionChan
 		go c.OnPairingPrompt(p.DeviceName, hex.EncodeToString(p.ClientID), p.SASDisplay, ch)
 	}
+	if c.OnPromptChanged != nil {
+		st := c.getPairingStatusLocked(now)
+		cb := c.OnPromptChanged
+		go cb(st)
+	}
 
 	return p.RequestID, p.decisionChan, p.ExpiresAt, nil
 }
@@ -509,6 +518,11 @@ func (c *PairingCoordinator) CompleteEnrollment(requestID string, approved bool)
 			c.recordFailureLocked(now)
 		}
 		c.active = nil
+		if c.OnPromptChanged != nil {
+			st := c.getPairingStatusLocked(now)
+			cb := c.OnPromptChanged
+			go cb(st)
+		}
 		return nil, ErrPairingDenied
 	}
 
@@ -522,6 +536,11 @@ func (c *PairingCoordinator) CompleteEnrollment(requestID string, approved bool)
 
 	p.State = StateConsumed
 	c.active = nil
+	if c.OnPromptChanged != nil {
+		st := c.getPairingStatusLocked(now)
+		cb := c.OnPromptChanged
+		go cb(st)
+	}
 
 	return &EnrollResponse{
 		Status:   "paired",
@@ -536,10 +555,16 @@ func (c *PairingCoordinator) CancelRequest(requestID string) {
 
 	p := c.active
 	if p != nil && p.RequestID == requestID {
+		now := time.Now().UTC()
 		if !p.decisionMade {
-			c.recordFailureLocked(time.Now().UTC())
+			c.recordFailureLocked(now)
 		}
 		c.active = nil
+		if c.OnPromptChanged != nil {
+			st := c.getPairingStatusLocked(now)
+			cb := c.OnPromptChanged
+			go cb(st)
+		}
 	}
 }
 
@@ -637,8 +662,10 @@ type PairingStatusView struct {
 func (c *PairingCoordinator) GetPairingStatus() PairingStatusView {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.getPairingStatusLocked(time.Now().UTC())
+}
 
-	now := time.Now().UTC()
+func (c *PairingCoordinator) getPairingStatusLocked(now time.Time) PairingStatusView {
 	locked := false
 	lockoutDur := 0.0
 	if now.Before(c.lockoutUntil) {
