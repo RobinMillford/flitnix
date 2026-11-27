@@ -62,6 +62,7 @@ type PeerTransferJob struct {
 	Error          string    `json:"error,omitempty"`
 	CreatedAt      time.Time `json:"createdAt"`
 	CompletedAt    time.Time `json:"completedAt,omitempty"`
+	SourcePath     string    `json:"-"`
 }
 
 // PeerSendRequest initiates a desktop-to-desktop transfer.
@@ -665,6 +666,10 @@ func (a *App) ConnectAndSendToPeer(req PeerSendRequest) (PeerTransferJob, error)
 	if peerName == "" {
 		peerName = authority
 	}
+	sourcePath := ""
+	if len(req.Paths) > 0 {
+		sourcePath = filepath.Clean(req.Paths[0])
+	}
 	job := PeerTransferJob{
 		ID:          jobID,
 		PeerHostID:  req.ExpectedHostID,
@@ -676,6 +681,7 @@ func (a *App) ConnectAndSendToPeer(req PeerSendRequest) (PeerTransferJob, error)
 		TotalBytes:  lm.TotalBytes,
 		State:       "connecting",
 		CreatedAt:   time.Now(),
+		SourcePath:  sourcePath,
 	}
 
 	jobCtx, cancelFn := context.WithCancel(context.Background())
