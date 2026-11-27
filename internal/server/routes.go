@@ -79,6 +79,16 @@ func newRouterWithOptions(services *Services, stall, downloadStall time.Duration
 	mux.HandleFunc("/healthz", serveHealth)
 	mux.HandleFunc("/ping", handleDiagnosticsPing(services))
 	mux.HandleFunc("/static/", serveStatic(assetsRoot))
+	if manifestBytes, mErr := pageAssets.ReadFile("assets/manifest.webmanifest"); mErr == nil {
+		mux.HandleFunc("/manifest.webmanifest", serveAssetBytes("application/manifest+json; charset=utf-8", "no-cache", "", manifestBytes))
+	}
+	if swBytes, swErr := pageAssets.ReadFile("assets/sw.js"); swErr == nil {
+		mux.HandleFunc("/sw.js", serveAssetBytes("application/javascript; charset=utf-8", "no-cache, no-store, must-revalidate", "/", swBytes))
+	}
+	if offlineBytes, offErr := pageAssets.ReadFile("assets/offline.html"); offErr == nil {
+		mux.HandleFunc("/offline.html", serveAssetBytes("text/html; charset=utf-8", "no-cache", "", offlineBytes))
+	}
+	mux.HandleFunc("/share-target", handleShareTargetFallback)
 
 	guestIndex, err := pageAssets.ReadFile("assets/guest.html")
 	if err == nil && len(guestIndex) > 0 {
@@ -304,7 +314,7 @@ func securityMiddlewareWithHost(next http.Handler, allowedMDNSHost string) http.
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; worker-src 'self'; manifest-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'")
 
 		if !isAllowedHostWithMDNS(r.Host, allowedMDNSHost) {
 			writeError(w, http.StatusBadRequest, "invalid host header")
@@ -1830,6 +1840,93 @@ func serveHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func serveAssetBytes(contentType, cacheControl, swAllowed string, body []byte) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requireGetHead(w, r) {
+			return
+		}
+		if contentType != "" {
+			w.Header().Set("Content-Type", contentType)
+		}
+		if cacheControl != "" {
+			w.Header().Set("Cache-Control", cacheControl)
+		}
+		if swAllowed != "" {
+			w.Header().Set("Service-Worker-Allowed", swAllowed)
+		}
+		w.WriteHeader(http.StatusOK)
+		if r.Method == http.MethodHead {
+			return
+		}
+		_, _ = w.Write(body)
+	}
+}
+
+const maxShareTargetFallbackBytes = 32 << 20 // 32 MiB cap for unauthenticated fallback POST
+
+// handleShareTargetFallback handles /share-target when the Service Worker did
+// not intercept the POST (e.g. non-SW test clients or unsupported contexts).
+// It enforces strict body size bounds, never persists unauthenticated files,
+// and directs browsers back to the app shell.
+func handleShareTargetFallback(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "GET, HEAD, POST")
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxShareTargetFallbackBytes)
+	ct := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
+	var title, text, sharedURL string
+	var fileCount int
+	if strings.HasPrefix(ct, "multipart/form-data") {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) {
+				writeError(w, http.StatusRequestEntityTooLarge, "shared payload exceeds fallback limit; use HTTPS PWA service worker for large files")
+				return
+			}
+			writeError(w, http.StatusBadRequest, "invalid multipart share payload")
+			return
+		}
+		if r.MultipartForm != nil {
+			defer func() { _ = r.MultipartForm.RemoveAll() }()
+			fileCount = len(r.MultipartForm.File["files"])
+		}
+		title = r.FormValue("title")
+		text = r.FormValue("text")
+		sharedURL = r.FormValue("url")
+	} else {
+		if err := r.ParseForm(); err != nil {
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) {
+				writeError(w, http.StatusRequestEntityTooLarge, "shared payload exceeds limit")
+				return
+			}
+			writeError(w, http.StatusBadRequest, "invalid share form payload")
+			return
+		}
+		title = r.FormValue("title")
+		text = r.FormValue("text")
+		sharedURL = r.FormValue("url")
+	}
+	if strings.Contains(strings.ToLower(r.Header.Get("Accept")), "application/json") {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"received":      true,
+			"serviceWorker": false,
+			"fileCount":     fileCount,
+			"hasText":       strings.TrimSpace(text) != "" || strings.TrimSpace(title) != "",
+			"hasUrl":        strings.TrimSpace(sharedURL) != "",
+			"message":       "Share Target requires the HTTPS PWA Service Worker to stage files locally for confirmation.",
+		})
+		return
+	}
+	http.Redirect(w, r, "/?share_notice=sw_required", http.StatusSeeOther)
 }
 
 // serveStatic serves files embedded under /static/<name>. The directory
