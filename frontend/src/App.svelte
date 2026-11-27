@@ -221,6 +221,7 @@
   let networkRefreshGeneration = 0
   let disposed = false
   let networkState: netenv.NetworkState | null = null
+  let historyRevision = 0
   const SESSION_PORT = '43821'
 
   // Quick Text state
@@ -1319,7 +1320,11 @@
       }
     })
     EventsOn('flitnix:event', (ev: DesktopRealtimeEvent) => {
-      if (!disposed) eventCoalescer.handleEvent(ev)
+      if (disposed) return
+      eventCoalescer.handleEvent(ev)
+      if (ev?.type === 'history.updated') {
+        historyRevision += 1
+      }
     })
     EventsOn('settings:changed', (s: main.SettingsView) => {
       if (!disposed && s) settingsState = s
@@ -1828,11 +1833,10 @@
         {:else if activeTab === 'history'}
           <div id="panel-history" role="tabpanel" aria-labelledby="tab-history" tabindex="0">
             <TransferHistoryView
-              {uploads}
-              {downloads}
-              {batches}
+              {historyRevision}
               {handleOpenDownloadFolder}
               {copyTextToClipboard}
+              onReshared={() => refresh()}
               {showToast}
             />
           </div>

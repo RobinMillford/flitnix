@@ -1448,6 +1448,124 @@ export namespace main {
 		}
 	}
 
+	export class HistoryRecordView {
+	    id: string;
+	    timestamp: any;
+	    direction: string;
+	    kind?: string;
+	    displayName: string;
+	    itemCount: number;
+	    size: number;
+	    transferred: number;
+	    status: string;
+	    deviceId?: string;
+	    deviceName?: string;
+	    sha256?: string;
+	    error?: string;
+	    batchId?: string;
+	    canOpen: boolean;
+	    canReveal: boolean;
+	    canReshare: boolean;
+
+	    static createFrom(source: any = {}) {
+	        return new HistoryRecordView(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"] ?? '';
+	        this.timestamp = source["timestamp"];
+	        this.direction = source["direction"] ?? '';
+	        this.kind = source["kind"];
+	        this.displayName = source["displayName"] ?? '';
+	        this.itemCount = source["itemCount"] ?? 1;
+	        this.size = source["size"] ?? 0;
+	        this.transferred = source["transferred"] ?? 0;
+	        this.status = source["status"] ?? '';
+	        this.deviceId = source["deviceId"];
+	        this.deviceName = source["deviceName"];
+	        this.sha256 = source["sha256"];
+	        this.error = source["error"];
+	        this.batchId = source["batchId"];
+	        this.canOpen = Boolean(source["canOpen"]);
+	        this.canReveal = Boolean(source["canReveal"]);
+	        this.canReshare = Boolean(source["canReshare"]);
+	    }
+	}
+
+	export class HistoryFilterView {
+	    query: string;
+	    direction: string;
+	    status: string;
+	    device: string;
+	    dateRange: string;
+	    limit: number;
+	    offset: number;
+
+	    static createFrom(source: any = {}) {
+	        return new HistoryFilterView(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.query = source["query"] ?? '';
+	        this.direction = source["direction"] ?? '';
+	        this.status = source["status"] ?? '';
+	        this.device = source["device"] ?? '';
+	        this.dateRange = source["dateRange"] ?? '';
+	        this.limit = source["limit"] ?? 25;
+	        this.offset = source["offset"] ?? 0;
+	    }
+	}
+
+	export class HistoryQueryResultView {
+	    records: HistoryRecordView[];
+	    total: number;
+	    stats: history.Stats;
+	    storeSizeBytes: number;
+
+	    static createFrom(source: any = {}) {
+	        return new HistoryQueryResultView(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.records = (source["records"] ?? []).map((r: any) => new HistoryRecordView(r));
+	        this.total = source["total"] ?? 0;
+	        this.stats = new history.Stats(source["stats"] ?? {});
+	        this.storeSizeBytes = source["storeSizeBytes"] ?? 0;
+	    }
+	}
+
+}
+
+export namespace history {
+
+	export class Stats {
+	    totalRecords: number;
+	    completedCount: number;
+	    failedCount: number;
+	    canceledCount: number;
+	    totalBytesTransferred: number;
+	    incomingBytes: number;
+	    outgoingBytes: number;
+
+	    static createFrom(source: any = {}) {
+	        return new Stats(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.totalRecords = source["totalRecords"] ?? 0;
+	        this.completedCount = source["completedCount"] ?? 0;
+	        this.failedCount = source["failedCount"] ?? 0;
+	        this.canceledCount = source["canceledCount"] ?? 0;
+	        this.totalBytesTransferred = source["totalBytesTransferred"] ?? 0;
+	        this.incomingBytes = source["incomingBytes"] ?? 0;
+	        this.outgoingBytes = source["outgoingBytes"] ?? 0;
+	    }
+	}
+
 }
 
 export namespace netenv {

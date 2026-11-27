@@ -42,6 +42,7 @@ import (
 	"github.com/itsyamin/flitnix/internal/doctor"
 	"github.com/itsyamin/flitnix/internal/events"
 	"github.com/itsyamin/flitnix/internal/guest"
+	"github.com/itsyamin/flitnix/internal/history"
 	"github.com/itsyamin/flitnix/internal/netenv"
 	"github.com/itsyamin/flitnix/internal/notify"
 	"github.com/itsyamin/flitnix/internal/power"
@@ -310,6 +311,7 @@ type App struct {
 	guestMgr      *guest.Manager
 	textStore     *textmsg.Store
 	auditStore    *audit.Store
+	historyStore  *history.Store
 	templateStore *guest.TemplateStore
 	devicesStore  *devices.Store
 	hostIdentity  *devices.HostIdentity
@@ -388,6 +390,10 @@ func NewApp() (*App, error) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "flitnix: audit store initialization warning: %v\n", err)
 	}
+	historyStore, err := history.NewStore(filepath.Join(dataDir, "history.jsonl"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "flitnix: history store initialization warning: %v\n", err)
+	}
 	templateStore, err := guest.NewTemplateStore(filepath.Join(dataDir, "templates.json"))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "flitnix: template store initialization warning: %v\n", err)
@@ -443,6 +449,7 @@ func NewApp() (*App, error) {
 		guestMgr:      guestMgr,
 		textStore:     textmsg.NewStore(),
 		auditStore:    auditStore,
+		historyStore:  historyStore,
 		templateStore: templateStore,
 		devicesStore:  devicesStore,
 		hostIdentity:  hostIdentity,
@@ -1051,8 +1058,11 @@ func decodeEventPayload[T any](raw any) (T, bool) {
 }
 
 func (a *App) handleDesktopEvent(ev events.DesktopEvent) {
-	if !strings.HasSuffix(ev.Type, ".progress") && ev.Type != events.TypePeerTransfer {
+	if ev.Type != events.TypeHistoryUpdated && !strings.HasSuffix(ev.Type, ".progress") && ev.Type != events.TypePeerTransfer {
 		a.updateTrayState()
+	}
+	if ev.Type != events.TypeHistoryUpdated {
+		a.recordHistoryFromEvent(ev)
 	}
 	a.startupMu.Lock()
 	n := a.notify
@@ -1303,7 +1313,7 @@ func (a *App) handleNotificationAction(inv notify.ActionInvocation) {
 		a.RestoreWindow()
 		a.emitFrontendEvent("flitnix:navigate", map[string]string{"tab": "devices"})
 	case notify.ActionRevealTransfer:
-		if err := a.OpenDownloadFolder(); err != nil {
+		if err := a.revealTransferByTargetID(inv.TargetID); err != nil {
 			a.RestoreWindow()
 		}
 	case notify.ActionApproveBatch:
@@ -1397,6 +1407,9 @@ func (a *App) shutdown(ctx context.Context) {
 		}
 		if a.auditStore != nil {
 			a.auditStore.Close()
+		}
+		if a.historyStore != nil {
+			_ = a.historyStore.Close()
 		}
 		if a.inhibitor != nil {
 			_ = a.inhibitor.Close()
