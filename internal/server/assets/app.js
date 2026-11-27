@@ -125,6 +125,12 @@
   var textSendBtn = document.getElementById("text-send-btn");
   var textMessagesEl = document.getElementById("text-messages");
   var textCharCount = document.getElementById("text-char-count");
+  var clipboardBadge = document.getElementById("clipboard-sync-badge");
+  var clipboardDesc = document.getElementById("clipboard-sync-desc");
+  var clipboardPushBtn = document.getElementById("clipboard-push-btn");
+  var clipboardCopyLatestBtn = document.getElementById("clipboard-copy-latest-btn");
+  var clipboardLatestPreview = document.getElementById("clipboard-latest-preview");
+  var clipboardLatestItem = null;
   var textMessagesCache = [];
   var textPollTimer = null;
 
@@ -668,6 +674,16 @@
 
     if (envType === "text.message" || envType === "text.cleared") {
       fetchTextMessages();
+      return;
+    }
+
+    if (envType === "clipboard.updated" && payload && payload.content) {
+      applyIncomingClipboardItem(payload);
+      return;
+    }
+
+    if (envType === "clipboard.state") {
+      refreshClipboardSyncStatus();
       return;
     }
 
@@ -2949,6 +2965,95 @@
     });
   }
 
+  function applyIncomingClipboardItem(item) {
+    if (!item || !item.content) return;
+    clipboardLatestItem = item;
+    if (clipboardLatestPreview) {
+      var snippet = item.content.length > 140 ? (item.content.slice(0, 140) + "…") : item.content;
+      clipboardLatestPreview.textContent = "Synced from " + (item.originName || "Desktop") + " (" + item.sizeBytes + " B): " + snippet;
+      clipboardLatestPreview.hidden = false;
+    }
+    if (clipboardCopyLatestBtn) {
+      clipboardCopyLatestBtn.hidden = false;
+    }
+  }
+
+  function refreshClipboardSyncStatus() {
+    if (!clipboardBadge) return;
+    api("/api/clipboard").then(function (st) {
+      if (!st || !st.enabled) {
+        clipboardBadge.textContent = "Off";
+        clipboardBadge.className = "badge badge--waiting";
+        if (clipboardPushBtn) clipboardPushBtn.disabled = true;
+        if (clipboardDesc) clipboardDesc.textContent = "Automatic clipboard sync is disabled on desktop. Turn it on in Settings or desktop Quick Text to sync with trusted devices.";
+        return;
+      }
+      if (st.paused) {
+        clipboardBadge.textContent = "Paused";
+        clipboardBadge.className = "badge badge--waiting";
+        if (clipboardPushBtn) clipboardPushBtn.disabled = true;
+        if (clipboardDesc) clipboardDesc.textContent = "Clipboard sync is currently paused on the desktop.";
+        return;
+      }
+      clipboardBadge.textContent = "Active";
+      clipboardBadge.className = "badge badge--approved";
+      if (clipboardPushBtn) clipboardPushBtn.disabled = false;
+      if (clipboardDesc) {
+        clipboardDesc.textContent = st.unsupportedReason
+          ? st.unsupportedReason + " You can still tap Send Phone Clipboard or Copy Received."
+          : "Enabled for this trusted browser. Tap Send Phone Clipboard to push mobile clipboard text (up to 64 KB); nothing is written to history.";
+      }
+      if (st.latest && st.latest.content) {
+        applyIncomingClipboardItem(st.latest);
+      }
+    }).catch(function (err) {
+      if (err && err.code === "trusted_device_required") {
+        clipboardBadge.textContent = "Trusted Only";
+        clipboardBadge.className = "badge badge--waiting";
+        if (clipboardPushBtn) clipboardPushBtn.disabled = true;
+        if (clipboardDesc) clipboardDesc.textContent = "Pair this browser under Trusted Devices below to opt into clipboard synchronization.";
+      }
+    });
+  }
+
+  if (clipboardCopyLatestBtn) {
+    clipboardCopyLatestBtn.addEventListener("click", function () {
+      if (!clipboardLatestItem || !clipboardLatestItem.content) return;
+      copyToClipboard(clipboardLatestItem.content, function () {
+        showAwarenessBanner("Copied synced clipboard text (" + clipboardLatestItem.sizeBytes + " B) to your device clipboard.");
+      }, function () {
+        showAwarenessBanner("Browser blocked automatic clipboard write — select the text above manually.");
+      });
+    });
+  }
+
+  if (clipboardPushBtn) {
+    clipboardPushBtn.addEventListener("click", function () {
+      if (!navigator.clipboard || typeof navigator.clipboard.readText !== "function") {
+        showAwarenessBanner("Your browser does not expose navigator.clipboard.readText() on this connection (HTTPS/user permission required). Use Quick Text instead.");
+        return;
+      }
+      clipboardPushBtn.disabled = true;
+      navigator.clipboard.readText().then(function (txt) {
+        if (!txt) {
+          showAwarenessBanner("Your clipboard is empty.");
+          return;
+        }
+        return api("/api/clipboard", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: txt })
+        }).then(function () {
+          showAwarenessBanner("Sent phone clipboard to desktop trusted sync.");
+        });
+      }).catch(function (err) {
+        showAwarenessBanner((err && err.message) || "Clipboard access denied by browser permissions.");
+      }).finally(function () {
+        clipboardPushBtn.disabled = false;
+      });
+    });
+  }
+
   function finishPinUnlockFlow() {
     if (pinUnlockCard) pinUnlockCard.hidden = true;
     setStatus("ready", "Connected — pick files to send or download the shared ones");
@@ -2957,6 +3062,7 @@
     initTrustedPairingUI();
     refreshFiles();
     initQuickText();
+    refreshClipboardSyncStatus();
     connectEvents();
     scheduleTextPoll();
     refreshShareTargetButtons();

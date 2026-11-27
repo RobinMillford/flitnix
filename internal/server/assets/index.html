@@ -148,6 +148,18 @@
         </div>
       </form>
       <ul class="text-messages" id="text-messages" aria-live="polite"></ul>
+      <div id="clipboard-sync-box" style="margin-top:0.85rem; padding-top:0.75rem; border-top:1px solid var(--line);">
+        <div class="awareness-card__header" style="margin-bottom:0.35rem;">
+          <strong style="font-size:0.9rem;">Automatic Clipboard Sync (Opt-In · Trusted Devices)</strong>
+          <span class="badge badge--waiting" id="clipboard-sync-badge">Off</span>
+        </div>
+        <p class="muted" id="clipboard-sync-desc" style="font-size:0.8rem; margin:0 0 0.55rem;">Disabled by default. Enable on your desktop and pair this browser to sync UTF-8 text (up to 64 KB) ephemerally without saving to history.</p>
+        <div class="panel__actions" id="clipboard-sync-actions">
+          <button type="button" class="btn btn--small" id="clipboard-push-btn" disabled>Send Phone Clipboard</button>
+          <button type="button" class="btn btn--ghost btn--small" id="clipboard-copy-latest-btn" hidden>Copy Received</button>
+        </div>
+        <p class="muted" id="clipboard-latest-preview" style="font-size:0.8rem; margin:0.45rem 0 0; word-break:break-word;" hidden></p>
+      </div>
     </section>
 
     <section class="panel">

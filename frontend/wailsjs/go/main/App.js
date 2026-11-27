@@ -138,6 +138,10 @@ export function GetBatch(arg1) {
   return window['go']['main']['App']['GetBatch'](arg1);
 }
 
+export function GetClipboardSyncStatus() {
+  return window['go']['main']['App']['GetClipboardSyncStatus']();
+}
+
 export function GetGuestRoomState() {
   return window['go']['main']['App']['GetGuestRoomState']();
 }
@@ -428,6 +432,14 @@ export function SessionHTTPSQR(arg1, arg2) {
 
 export function SessionQR(arg1) {
   return window['go']['main']['App']['SessionQR'](arg1);
+}
+
+export function SetClipboardSyncEnabled(arg1) {
+  return window['go']['main']['App']['SetClipboardSyncEnabled'](arg1);
+}
+
+export function SetClipboardSyncPaused(arg1) {
+  return window['go']['main']['App']['SetClipboardSyncPaused'](arg1);
 }
 
 export function SetDeviceAutoApprove(arg1, arg2) {

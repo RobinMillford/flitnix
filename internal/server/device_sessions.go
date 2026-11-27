@@ -267,6 +267,7 @@ func handleDeviceSessionVerify(svcs *Services, limiter *deviceSessionLimiter) ht
 		}
 		limiter.clear(clientIP)
 		svcs.RecordContact("device-reconnect")
+		refreshClipboardAuthorizedPeers(svcs)
 
 		writeJSON(w, http.StatusOK, map[string]any{
 			"token":       sess.Token(),

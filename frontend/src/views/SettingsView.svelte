@@ -1,9 +1,10 @@
 <script lang="ts">
-  import type { main, netenv, version, power, transfer, client } from '../../wailsjs/go/models'
+  import type { main, netenv, version, power, transfer, client, clipboard } from '../../wailsjs/go/models'
   import {
     ApplyHistoryRetentionNow, QueryTransferHistory,
     GetLocalHTTPSStatus, ExportLocalCACert, RemoveLocalCACert,
-    ListKnownHosts, RemoveKnownHost
+    ListKnownHosts, RemoveKnownHost,
+    GetClipboardSyncStatus, SetClipboardSyncPaused
   } from '../../wailsjs/go/main/App.js'
   import { openExternalURL, formatBytes } from '../utils'
   import logoUrl from '../assets/images/logo-universal.png'
@@ -39,6 +40,24 @@
   let httpsActionMessage: string = ''
   let httpsActionError: string = ''
   let workingHttpsAction: boolean = false
+  let clipboardStatus: clipboard.StatusView | null = null
+
+  async function refreshClipboardStatus(): Promise<void> {
+    try {
+      clipboardStatus = (await GetClipboardSyncStatus()) ?? null
+    } catch {
+      // ignore in non-Wails preview environments
+    }
+  }
+
+  async function handleToggleClipboardPause(): Promise<void> {
+    if (!clipboardStatus) return
+    try {
+      clipboardStatus = await SetClipboardSyncPaused(!clipboardStatus.paused)
+    } catch {
+      // ignore
+    }
+  }
 
   async function refreshNetworkSecurityInfo(): Promise<void> {
     try {
@@ -123,6 +142,9 @@
     }
   }
 
+  $: if (activeSection === 'general') {
+    void refreshClipboardStatus()
+  }
   $: if (activeSection === 'storage') {
     void refreshHistoryStorageInfo()
   }
@@ -216,6 +238,51 @@
             <span>Prepares the local server immediately when Flitnix opens so your phone can scan and connect right away.</span>
           </div>
         </label>
+      </div>
+
+      <div class="card-section-head" style="margin-top: 22px;">
+        <h4>Opt-In Automatic Clipboard Sync (Trusted Devices Only)</h4>
+        <p>Disabled by default. When explicitly enabled, plain UTF-8 clipboard text (up to 64 KiB) syncs ephemerally between active trusted devices without saving to disk history.</p>
+      </div>
+
+      <div class="setting-row">
+        <label class="toggle-control-label">
+          <input
+            type="checkbox"
+            bind:checked={settingsState.autoClipboardSync}
+          />
+          <div class="toggle-text-block">
+            <strong>Enable automatic clipboard synchronization with trusted devices</strong>
+            <span>Never enabled in Guest Drop Box rooms or for untrusted QR sessions. Concealed password-manager items are skipped where OS metadata identifies them. Save Settings to apply.</span>
+          </div>
+        </label>
+        {#if clipboardStatus}
+          <div class="storage-card" style="margin-top: 8px; display:flex; align-items:center; justify-content:space-between; gap:12px;">
+            <div>
+              <span class="status-tag {clipboardStatus.enabled && !clipboardStatus.paused ? 'ready' : 'neutral'}">
+                {#if !clipboardStatus.enabled}
+                  Disabled (Default)
+                {:else if clipboardStatus.paused}
+                  Paused
+                {:else if clipboardStatus.watching}
+                  Watching ({clipboardStatus.backendName})
+                {:else}
+                  Standby (Waiting for Trusted Peer)
+                {/if}
+              </span>
+              {#if clipboardStatus.unsupportedReason}
+                <p class="setting-hint" style="margin-top:4px;">{clipboardStatus.unsupportedReason}</p>
+              {:else if clipboardStatus.lastSkippedReason}
+                <p class="setting-hint" style="margin-top:4px;">Last skip: {clipboardStatus.lastSkippedReason}</p>
+              {/if}
+            </div>
+            {#if clipboardStatus.enabled}
+              <button type="button" class="button secondary small" on:click={handleToggleClipboardPause}>
+                {clipboardStatus.paused ? 'Resume Sync' : 'Pause Sync'}
+              </button>
+            {/if}
+          </div>
+        {/if}
       </div>
 
       <div class="card-section-head" style="margin-top: 22px;">

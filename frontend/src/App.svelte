@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { t, setLocale, tFn } from './i18n'
-  import type { main, netenv, doctor, guest, audit, devices, power, version, update, transfer, session, discovery, client } from '../wailsjs/go/models'
+  import type { main, netenv, doctor, guest, audit, devices, power, version, update, transfer, session, discovery, client, clipboard } from '../wailsjs/go/models'
   import { OnFileDrop, OnFileDropOff, EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
   import logoUrl from './assets/images/logo-universal.png'
   import { createRefreshScheduler } from './refreshScheduler'
@@ -30,6 +30,7 @@
     ListSharedFiles, ListSharedSources, RevokeSharedFile, RevokeSharedSource, ReceiveDirectory,
     ListNetworkInterfaces, SessionQR, SessionHTTPSQR, ServerAddress, GetNetworkState, RefreshNetwork,
     GetLocalHTTPSStatus, GetSessionShortCode, RegenerateSessionShortCode,
+    GetClipboardSyncStatus, SetClipboardSyncEnabled, SetClipboardSyncPaused,
     StartGuestRoomWithConfig, GetGuestRoomState, ApproveGuest, RejectGuest, RevokeGuest,
     ApproveGuestUpload, RejectGuestUpload, EndGuestRoom, PickGuestDestination, OpenGuestFolder,
     PickGuestSharePaths, AddGuestSharedPaths, RemoveGuestSharedSource,
@@ -91,6 +92,7 @@
   let storageStatus: transfer.StorageStatus | null = null
   let visibilityState: devices.VisibilityState | null = null
   let shortCode: session.ShortCodeView | null = null
+  let clipboardStatus: clipboard.StatusView | null = null
 
   // Desktop-to-Desktop (Computer Sharing) state
   let localPeerInfo: main.LocalPeerInfo | null = null
@@ -103,7 +105,7 @@
 
   // Persistent Settings state
   let settingsState: main.SettingsView = {
-    version: 7,
+    version: 8,
     theme: getInitialTheme(),
     locale: 'system',
     downloadDir: '',
@@ -128,7 +130,8 @@
     historyRetentionDays: 90,
     historyMaxRecords: 5000,
     requireEncryptedTransport: false,
-    localHttpsEnabled: false
+    localHttpsEnabled: false,
+    autoClipboardSync: false
   }
   let settingsSavedAlert = ''
   let settingsError = ''
@@ -301,9 +304,9 @@
       ListSharedFiles(), ListSharedSources(), ReceiveDirectory(), ServerAddress(),
       ListPendingBatches(), ListBatches(), GetGuestRoomState(), GetPairingStatus(),
       SleepInhibition(), GetStorageStatus(), GetVisibilityState(),
-      ListNearbyPeers(), ListPeerTransfers(), GetLocalPeerInfo(), GetLocalHTTPSStatus()
+      ListNearbyPeers(), ListPeerTransfers(), GetLocalPeerInfo(), GetLocalHTTPSStatus(), GetClipboardSyncStatus()
     ]),
-    ([s, p, u, d, f, sourceList, dir, addr, b, allBatches, grState, pStatus, sleepStatus, stStatus, visState, peersList, peerJobs, localPeer, httpsSt]) => {
+    ([s, p, u, d, f, sourceList, dir, addr, b, allBatches, grState, pStatus, sleepStatus, stStatus, visState, peersList, peerJobs, localPeer, httpsSt, clipSt]) => {
       sessions = s ?? []; pending = p ?? []; uploads = u ?? []; downloads = d ?? []
       files = f ?? []; sources = sourceList ?? []; pendingBatches = b ?? []
       batches = allBatches ?? []
@@ -317,6 +320,7 @@
       peerTransfers = peerJobs ?? []
       localPeerInfo = localPeer ?? null
       localHttpsStatus = httpsSt ?? null
+      clipboardStatus = clipSt ?? null
       if (!localHttpsStatus?.active && qrUseHttps) {
         qrUseHttps = false
       }
@@ -624,6 +628,29 @@
   }
 
   // Quick Text actions
+  async function toggleClipboardSyncAction(): Promise<void> {
+    try {
+      const next = !(clipboardStatus?.enabled ?? false)
+      clipboardStatus = await SetClipboardSyncEnabled(next)
+      if (settingsState) {
+        settingsState = { ...settingsState, autoClipboardSync: next } as main.SettingsView
+      }
+      showToast(next ? 'Auto-Clipboard Sync enabled for trusted devices' : 'Auto-Clipboard Sync disabled', 'info')
+    } catch (err) {
+      report(err)
+    }
+  }
+
+  async function toggleClipboardPauseAction(): Promise<void> {
+    try {
+      const nextPause = !(clipboardStatus?.paused ?? false)
+      clipboardStatus = await SetClipboardSyncPaused(nextPause)
+      showToast(nextPause ? 'Clipboard Sync paused' : 'Clipboard Sync resumed', 'info')
+    } catch (err) {
+      report(err)
+    }
+  }
+
   async function sendTextAction(): Promise<void> {
     if (!textInput.trim() || sendingText || !sessions.length) return
     sendingText = true
@@ -1809,6 +1836,9 @@
               {handleOpenDownloadFolder}
               {visibilityState}
               {shortCode}
+              {clipboardStatus}
+              {toggleClipboardSyncAction}
+              {toggleClipboardPauseAction}
               {setVisibilityModeAction}
               {setQRSharingPausedAction}
               {revokeAllSessionsAction}
