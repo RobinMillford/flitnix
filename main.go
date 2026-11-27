@@ -22,6 +22,7 @@ var assets embed.FS
 var appIcon []byte
 
 func main() {
+	_, startHidden := stripBackgroundFlag(os.Args)
 	// Process CLI flags and subcommands before GUI initialization.
 	handled, code, initialShares := handleCLI(os.Args, os.Stdout, os.Stderr)
 	if handled {
@@ -37,12 +38,15 @@ func main() {
 		os.Exit(1)
 	}
 	app.initialShares = initialShares
+	app.trayIcon = appIcon
+	app.startHidden = startHidden
 
 	// Create application with options
 	err = wails.Run(&options.App{
-		Title:  "Flitnix",
-		Width:  1024,
-		Height: 768,
+		Title:       "Flitnix",
+		Width:       1024,
+		Height:      768,
+		StartHidden: startHidden,
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
@@ -56,8 +60,9 @@ func main() {
 			UniqueId:               "io.github.robinmillford.flitnix",
 			OnSecondInstanceLaunch: app.onSecondInstanceLaunch,
 		},
-		OnStartup:  app.startup,
-		OnShutdown: app.shutdown,
+		OnStartup:     app.startup,
+		OnBeforeClose: app.beforeClose,
+		OnShutdown:    app.shutdown,
 		Bind: []interface{}{
 			app,
 		},

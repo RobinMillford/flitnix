@@ -25,6 +25,12 @@ func TestDefaultSettings(t *testing.T) {
 	if d.AutoStartSession {
 		t.Fatalf("expected default autoStartSession false")
 	}
+	if !d.MinimizeToTray {
+		t.Fatalf("expected default minimizeToTray true")
+	}
+	if d.LaunchOnLogin {
+		t.Fatalf("expected default launchOnLogin false")
+	}
 }
 
 func TestStore_SaveAndGetRoundTrip(t *testing.T) {

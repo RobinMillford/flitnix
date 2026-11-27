@@ -51,6 +51,21 @@ func TestHandleCLIVersion(t *testing.T) {
 	}
 }
 
+func TestHandleCLIBackgroundFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	stripped, hidden := stripBackgroundFlag([]string{"flitnix", "--background"})
+	if !hidden || len(stripped) != 1 {
+		t.Fatalf("expected hidden=true and only binary name left, got hidden=%v stripped=%v", hidden, stripped)
+	}
+	handled, code, shares := handleCLI([]string{"flitnix", "--background"}, &stdout, &stderr)
+	if handled || code != 0 || len(shares) != 0 {
+		t.Fatalf("expected GUI fallthrough without shares, got handled=%v code=%d shares=%v", handled, code, shares)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected no stderr warnings for --background flag, got %q", stderr.String())
+	}
+}
+
 func TestHandleCLIHelp(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	handled, code, _ := handleCLI([]string{"flitnix", "--help"}, &stdout, &stderr)

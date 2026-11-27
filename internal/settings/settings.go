@@ -13,7 +13,7 @@ import (
 
 const (
 	// CurrentSchemaVersion is the current version of the settings file schema.
-	CurrentSchemaVersion = 3
+	CurrentSchemaVersion = 4
 
 	// Allowed themes
 	ThemeSystem = "system"
@@ -43,6 +43,8 @@ type Settings struct {
 	VisibilityMode         string    `json:"visibilityMode"`
 	VisibilityPreviousMode string    `json:"visibilityPreviousMode"`
 	VisibilityExpiresAt    time.Time `json:"visibilityExpiresAt,omitempty"`
+	MinimizeToTray         bool      `json:"minimizeToTray"`
+	LaunchOnLogin          bool      `json:"launchOnLogin"`
 	UpdatedAt              time.Time `json:"updatedAt"`
 }
 
@@ -58,6 +60,8 @@ func DefaultSettings() Settings {
 		PreferredInterface:     "",
 		VisibilityMode:         VisibilityTrustedOnly,
 		VisibilityPreviousMode: VisibilityTrustedOnly,
+		MinimizeToTray:         true,
+		LaunchOnLogin:          false,
 		UpdatedAt:              time.Now().UTC(),
 	}
 }
@@ -182,6 +186,13 @@ func migrateSettings(old Settings) Settings {
 		}
 		if migrated.VisibilityPreviousMode == "" {
 			migrated.VisibilityPreviousMode = VisibilityTrustedOnly
+		}
+	}
+	if old.Version < 4 {
+		// NewStore seeds loaded from DefaultSettings(), so MinimizeToTray defaults to true
+		// when upgrading from v3 unless explicitly saved false.
+		if old.Version < 3 {
+			migrated.MinimizeToTray = true
 		}
 	}
 	migrated.Version = CurrentSchemaVersion
