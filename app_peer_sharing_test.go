@@ -71,7 +71,7 @@ func TestTwoDesktopInstancesBidirectionalAndTrustedTransfer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ConnectAndSendToPeer kickoff failed: %v", err)
 	}
-	doneHidden := waitForPeerJobDone(t, appA, jobHidden.ID, 5*time.Second)
+	doneHidden := waitForPeerJobDone(t, appA, jobHidden.ID, 15*time.Second)
 	if doneHidden.State != "failed" {
 		t.Fatalf("expected failed job while B is Hidden, got %+v", doneHidden)
 	}
@@ -89,9 +89,11 @@ func TestTwoDesktopInstancesBidirectionalAndTrustedTransfer(t *testing.T) {
 	}
 
 	// Background approver on B approves the incoming folder batch once it arrives in Approval Inbox.
+	// The deadline allows for `go test -race ./...` running the benchmarks package
+	// concurrently with this one.
 	approvedFolder := make(chan struct{})
 	go func() {
-		deadline := time.Now().Add(5 * time.Second)
+		deadline := time.Now().Add(20 * time.Second)
 		for time.Now().Before(deadline) {
 			batches := appB.ListPendingBatches()
 			if len(batches) > 0 {
@@ -113,8 +115,14 @@ func TestTwoDesktopInstancesBidirectionalAndTrustedTransfer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ConnectAndSendToPeer folder: %v", err)
 	}
-	<-approvedFolder
-	doneFolder := waitForPeerJobDone(t, appA, jobFolder.ID, 10*time.Second)
+	select {
+	case <-approvedFolder:
+	case <-time.After(20 * time.Second):
+		t.Fatal("incoming folder batch was never approved")
+	}
+	// A race build shares CPU with other packages (`go test -race ./...`), so
+	// allow enough time for the TLS handshake, approval poll, and 2 MiB stream.
+	doneFolder := waitForPeerJobDone(t, appA, jobFolder.ID, 30*time.Second)
 	if doneFolder.State != "completed" || !doneFolder.Verified {
 		t.Fatalf("folder peer job failed: %+v", doneFolder)
 	}
@@ -166,7 +174,7 @@ func TestTwoDesktopInstancesBidirectionalAndTrustedTransfer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("trusted ConnectAndSendToPeer: %v", err)
 	}
-	doneTrusted := waitForPeerJobDone(t, appA, jobTrusted.ID, 10*time.Second)
+	doneTrusted := waitForPeerJobDone(t, appA, jobTrusted.ID, 30*time.Second)
 	if doneTrusted.State != "completed" || !doneTrusted.TrustedPeer || !doneTrusted.Verified {
 		t.Fatalf("trusted peer job unexpected: %+v", doneTrusted)
 	}
@@ -183,7 +191,7 @@ func TestTwoDesktopInstancesBidirectionalAndTrustedTransfer(t *testing.T) {
 
 	doneRevApprove := make(chan struct{})
 	go func() {
-		deadline := time.Now().Add(5 * time.Second)
+		deadline := time.Now().Add(20 * time.Second)
 		for time.Now().Before(deadline) {
 			batches := appA.ListPendingBatches()
 			if len(batches) > 0 {
@@ -209,7 +217,7 @@ func TestTwoDesktopInstancesBidirectionalAndTrustedTransfer(t *testing.T) {
 		t.Fatalf("reverse ConnectAndSendToPeer: %v", err)
 	}
 	<-doneRevApprove
-	doneRev := waitForPeerJobDone(t, appB, jobRev.ID, 10*time.Second)
+	doneRev := waitForPeerJobDone(t, appB, jobRev.ID, 30*time.Second)
 	if doneRev.State != "completed" || !doneRev.Verified {
 		t.Fatalf("reverse peer job failed: %+v", doneRev)
 	}
@@ -231,7 +239,7 @@ func TestTwoDesktopInstancesBidirectionalAndTrustedTransfer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("jobTofuMismatch kickoff: %v", err)
 	}
-	doneTofu := waitForPeerJobDone(t, appA, jobTofuMismatch.ID, 5*time.Second)
+	doneTofu := waitForPeerJobDone(t, appA, jobTofuMismatch.ID, 15*time.Second)
 	if doneTofu.State != "failed" {
 		t.Fatalf("expected TOFU hostId mismatch to fail closed, got %+v", doneTofu)
 	}
@@ -251,7 +259,7 @@ func TestTwoDesktopInstancesBidirectionalAndTrustedTransfer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("jobRevoked kickoff: %v", err)
 	}
-	doneRevoked := waitForPeerJobDone(t, appA, jobRevoked.ID, 5*time.Second)
+	doneRevoked := waitForPeerJobDone(t, appA, jobRevoked.ID, 15*time.Second)
 	if doneRevoked.State != "failed" {
 		t.Fatalf("expected revoked peer to fail explicitly instead of silently downgrading, got %+v", doneRevoked)
 	}
