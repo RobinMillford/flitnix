@@ -57,10 +57,14 @@ import (
 // Everything below /api/ that is unknown yields 404 within the API router.
 // With a nil Services every /api/ path answers 404 (page-only server).
 func newRouter(services *Services, stall, downloadStall time.Duration, grants *DownloadGrantStore) http.Handler {
-	return newRouterWithShutdown(services, stall, downloadStall, grants, nil)
+	return newRouterWithOptions(services, stall, downloadStall, grants, nil, false)
 }
 
 func newRouterWithShutdown(services *Services, stall, downloadStall time.Duration, grants *DownloadGrantStore, shutdownCh <-chan struct{}) http.Handler {
+	return newRouterWithOptions(services, stall, downloadStall, grants, shutdownCh, false)
+}
+
+func newRouterWithOptions(services *Services, stall, downloadStall time.Duration, grants *DownloadGrantStore, shutdownCh <-chan struct{}, localHTTPSActive bool) http.Handler {
 	index, err := pageAssets.ReadFile("assets/index.html")
 	if err != nil {
 		panic("server: embedded assets missing: " + err.Error())
@@ -91,6 +95,9 @@ func newRouterWithShutdown(services *Services, stall, downloadStall time.Duratio
 		mux.HandleFunc("/api/", serveNotFound)
 		mux.HandleFunc("/guest-api/", serveNotFound)
 	} else {
+		if localHTTPSActive && services.LocalHTTPS != nil {
+			mux.HandleFunc("GET /local-ca.crt", handleLocalCACertDownload(services))
+		}
 		// The whole API router sits behind one session check, so unknown
 		// /api/* paths and method mismatches are answered only after
 		// authentication; a token holder learns nothing about the
@@ -119,7 +126,11 @@ func newRouterWithShutdown(services *Services, stall, downloadStall time.Duratio
 			mux.HandleFunc("/guest-api/", serveNotFound)
 		}
 	}
-	return securityMiddleware(mux)
+	allowedMDNSHost := ""
+	if services != nil && services.HostIdentity != nil {
+		allowedMDNSHost = LocalMDNSHost(services.HostIdentity.HostID)
+	}
+	return securityMiddlewareWithHost(mux, allowedMDNSHost)
 }
 
 // parseHostPort safely parses an HTTP Host authority string into host and port.
@@ -194,6 +205,10 @@ func parseHostPort(raw string) (host string, port string, isBracketed bool, err 
 // address, localhost, or RFC 2606 test domains (for httptest). Any arbitrary
 // DNS hostname is rejected to prevent DNS rebinding attacks.
 func isAllowedHost(hostHeader string) bool {
+	return isAllowedHostWithMDNS(hostHeader, "")
+}
+
+func isAllowedHostWithMDNS(hostHeader, allowedMDNSHost string) bool {
 	host, _, isBracketed, err := parseHostPort(hostHeader)
 	if err != nil || host == "" {
 		return false
@@ -231,6 +246,9 @@ func isAllowedHost(hostHeader string) bool {
 		return true
 	}
 	if lower == "example.com" || strings.HasSuffix(lower, ".example.com") || strings.HasSuffix(lower, ".test") {
+		return true
+	}
+	if allowedMDNSHost != "" && lower == strings.ToLower(allowedMDNSHost) {
 		return true
 	}
 
@@ -278,13 +296,17 @@ func equalHostPort(h1, h2 string) bool {
 // with untrusted Host headers (DNS rebinding), and rejects cross-origin state-changing
 // requests (CSRF via Sec-Fetch-Site, Origin, or Referer).
 func securityMiddleware(next http.Handler) http.Handler {
+	return securityMiddlewareWithHost(next, "")
+}
+
+func securityMiddlewareWithHost(next http.Handler, allowedMDNSHost string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'")
 
-		if !isAllowedHost(r.Host) {
+		if !isAllowedHostWithMDNS(r.Host, allowedMDNSHost) {
 			writeError(w, http.StatusBadRequest, "invalid host header")
 			return
 		}
@@ -359,6 +381,25 @@ func newAPIMux(services *Services, stall time.Duration, grants *DownloadGrantSto
 	mux.HandleFunc("GET /api/visibility", handleVisibilityGet(services))
 
 	return mux
+}
+
+func handleLocalCACertDownload(services *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if services == nil || services.LocalHTTPS == nil || services.HostIdentity == nil {
+			serveNotFound(w, r)
+			return
+		}
+		pemBytes, _, err := services.LocalHTTPS.CACertPEM(services.HostIdentity.HostID)
+		if err != nil || len(pemBytes) == 0 {
+			writeError(w, http.StatusNotFound, "local CA certificate unavailable")
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-x509-ca-cert")
+		w.Header().Set("Content-Disposition", `attachment; filename="flitnix-local-ca.crt"`)
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(pemBytes)
+	}
 }
 
 func handleDiagnosticsPing(services *Services) http.HandlerFunc {

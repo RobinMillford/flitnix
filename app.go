@@ -286,6 +286,22 @@ type SettingsView struct {
 	NotificationsSupported    bool   `json:"notificationsSupported,omitempty"`
 	HistoryRetentionDays      int    `json:"historyRetentionDays"`
 	HistoryMaxRecords         int    `json:"historyMaxRecords"`
+	RequireEncryptedTransport bool   `json:"requireEncryptedTransport"`
+	LocalHTTPSEnabled         bool   `json:"localHttpsEnabled"`
+}
+
+// LocalHTTPSStatus describes the opt-in Local CA HTTPS state for browser & PWA sharing.
+type LocalHTTPSStatus struct {
+	Enabled      bool     `json:"enabled"`
+	Active       bool     `json:"active"`
+	HasCA        bool     `json:"hasCa"`
+	CASHA256     string   `json:"caSha256,omitempty"`
+	CACertPath   string   `json:"caCertPath,omitempty"`
+	CADownload   string   `json:"caDownloadUrl,omitempty"`
+	MDNSHostname string   `json:"mdnsHostname,omitempty"`
+	HTTPSURL     string   `json:"httpsUrl,omitempty"`
+	MDNSHTTPSURL string   `json:"mdnsHttpsUrl,omitempty"`
+	SANs         []string `json:"sans,omitempty"`
 }
 
 // App owns the Flitnix core instances and the desktop lifecycle.
@@ -317,6 +333,7 @@ type App struct {
 	templateStore *guest.TemplateStore
 	devicesStore  *devices.Store
 	hostIdentity  *devices.HostIdentity
+	localHTTPS    *server.LocalHTTPSManager
 	pairing       *devices.PairingCoordinator
 	visibility    *devices.VisibilityManager
 	discovery     *discovery.Service
@@ -455,6 +472,7 @@ func NewApp() (*App, error) {
 		templateStore: templateStore,
 		devicesStore:  devicesStore,
 		hostIdentity:  hostIdentity,
+		localHTTPS:    server.NewLocalHTTPSManager(filepath.Join(dataDir, "local_ca")),
 		pairing:       pairingCoord,
 		visibility:    visMgr,
 		events:        events.NewHub(),
@@ -1500,13 +1518,18 @@ func sameListenAddr(a, b string) bool {
 	return false
 }
 
+func (a *App) isLocalHTTPSEnabled() bool {
+	return a.settingsStore != nil && a.settingsStore.Get().LocalHTTPSEnabled
+}
+
 // startServerLocked constructs and serves a new server on listen and
 // waits (bounded) for the listener to bind, so StartSession never hands
 // out a token before the server is reachable. Callers must hold srvMu.
 func (a *App) startServerLocked(listen string) error {
 	srv := server.New(server.Config{
-		ListenAddr:  listen,
-		RecoveryDir: a.recoveryDir,
+		ListenAddr:        listen,
+		RecoveryDir:       a.recoveryDir,
+		LocalHTTPSEnabled: a.isLocalHTTPSEnabled(),
 		Services: &server.Services{
 			Sessions:       a.sessions,
 			ShortCodes:     a.shortCodes,
@@ -1519,6 +1542,7 @@ func (a *App) startServerLocked(listen string) error {
 			Audit:          a.auditStore,
 			Devices:        a.devicesStore,
 			HostIdentity:   a.hostIdentity,
+			LocalHTTPS:     a.localHTTPS,
 			Pairing:        a.pairing,
 			Visibility:     a.visibility,
 			Inhibitor:      a.inhibitor,
@@ -1919,6 +1943,181 @@ func (a *App) SessionQR(key string) (string, error) {
 		return "", fmt.Errorf("flitnix: rendering the session QR: %w", err)
 	}
 	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(png), nil
+}
+
+// SessionHTTPSQR renders an opt-in Local HTTPS QR code for the active session
+// when Local HTTPS is enabled, using the bound IP HTTPS URL (or .local mDNS URL
+// when preferMDNS is true).
+func (a *App) SessionHTTPSQR(key string, preferMDNS bool) (string, error) {
+	a.srvMu.Lock()
+	srv := a.srv
+	a.srvMu.Unlock()
+	if srv == nil {
+		return "", errors.New("flitnix: no session is running; start one first")
+	}
+	if !srv.LocalHTTPSActive() {
+		return "", errors.New("flitnix: Local HTTPS is not active; enable it in Settings -> Network")
+	}
+	baseURL := srv.HTTPSURL()
+	if preferMDNS {
+		if mURL := srv.MDNSHTTPSURL(); mURL != "" {
+			baseURL = mURL
+		}
+	}
+	var token string
+	for _, s := range a.sessions.ActiveSessions() {
+		if s.Key() == key {
+			token = s.Token()
+			break
+		}
+	}
+	if token == "" {
+		return "", errors.New("flitnix: no active session matches that identifier")
+	}
+	payload, err := qr.Payload(baseURL, token)
+	if err != nil {
+		return "", fmt.Errorf("flitnix: %w", err)
+	}
+	png, err := qr.PNG(payload, qr.DefaultSize)
+	if err != nil {
+		return "", fmt.Errorf("flitnix: rendering the HTTPS session QR: %w", err)
+	}
+	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(png), nil
+}
+
+// GetLocalHTTPSStatus reports the opt-in Local HTTPS and CA certificate status.
+func (a *App) GetLocalHTTPSStatus() LocalHTTPSStatus {
+	st := LocalHTTPSStatus{
+		Enabled: a.isLocalHTTPSEnabled(),
+	}
+	if a.hostIdentity != nil {
+		st.MDNSHostname = server.LocalMDNSHost(a.hostIdentity.HostID)
+	}
+	if a.localHTTPS != nil {
+		st.HasCA = a.localHTTPS.HasCA()
+		st.CACertPath = a.localHTTPS.CACertPath()
+		if st.Enabled || st.HasCA {
+			if a.hostIdentity != nil {
+				_, fp, err := a.localHTTPS.CACertPEM(a.hostIdentity.HostID)
+				if err == nil {
+					st.CASHA256 = fp
+					st.HasCA = true
+				}
+			} else {
+				st.CASHA256 = a.localHTTPS.CASHA256()
+			}
+		}
+	}
+	a.srvMu.Lock()
+	srv := a.srv
+	a.srvMu.Unlock()
+	if srv != nil {
+		st.Active = srv.LocalHTTPSActive()
+		if st.Active {
+			st.HTTPSURL = srv.HTTPSURL()
+			st.MDNSHTTPSURL = srv.MDNSHTTPSURL()
+			st.SANs = srv.LocalHTTPSSANs()
+			if base := srv.URL(); base != "" {
+				st.CADownload = base + "/local-ca.crt"
+			}
+		}
+	}
+	return st
+}
+
+// ExportLocalCACert saves the public Local Root CA certificate (never the private key)
+// so users can optionally trust Local HTTPS on their mobile devices without certificate warnings.
+func (a *App) ExportLocalCACert() (string, error) {
+	if a.localHTTPS == nil || a.hostIdentity == nil {
+		return "", errors.New("flitnix: local HTTPS manager unavailable")
+	}
+	pemBytes, _, err := a.localHTTPS.CACertPEM(a.hostIdentity.HostID)
+	if err != nil {
+		return "", err
+	}
+	dest := ""
+	if a.ctx != nil && a.ctx.Value("frontend") != nil {
+		chosen, dlgErr := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+			Title:           "Export Flitnix Local Root CA Certificate",
+			DefaultFilename: "flitnix-local-ca.crt",
+		})
+		if dlgErr != nil {
+			return "", dlgErr
+		}
+		if strings.TrimSpace(chosen) == "" {
+			return "", nil
+		}
+		dest = chosen
+	} else {
+		dest = filepath.Join(a.ReceiveDirectory(), "flitnix-local-ca.crt")
+		_ = os.MkdirAll(filepath.Dir(dest), 0o755)
+	}
+	if err := os.WriteFile(dest, pemBytes, 0o644); err != nil {
+		return "", err
+	}
+	return dest, nil
+}
+
+// RemoveLocalCACert deletes the Local Root CA key and certificate and disables Local HTTPS.
+func (a *App) RemoveLocalCACert() error {
+	if a.localHTTPS != nil {
+		if err := a.localHTTPS.RemoveCA(); err != nil {
+			return err
+		}
+	}
+	if a.settingsStore != nil {
+		cur := a.settingsStore.Get()
+		if cur.LocalHTTPSEnabled {
+			cur.LocalHTTPSEnabled = false
+			if err := a.settingsStore.Save(cur); err != nil {
+				return err
+			}
+		}
+	}
+	a.restartServerIfRunning()
+	return nil
+}
+
+func (a *App) restartServerIfRunning() {
+	a.srvMu.Lock()
+	defer a.srvMu.Unlock()
+	if a.srv == nil || a.srvListen == "" {
+		return
+	}
+	listen := a.srvListen
+	a.stopServerLocked()
+	_ = a.startServerLocked(listen)
+}
+
+// ListKnownHosts returns all pinned desktop/CLI peer host identities in known_hosts.json.
+func (a *App) ListKnownHosts() ([]client.KnownHostEntry, error) {
+	kh, err := client.LoadOrCreateKnownHosts(filepath.Join(a.dataDir, "known_hosts.json"))
+	if err != nil {
+		return nil, err
+	}
+	return kh.List(), nil
+}
+
+// RemoveKnownHost explicitly removes a pinned peer identity from known_hosts.json
+// (authenticated key-rotation recovery; the next connection requires fresh verification).
+func (a *App) RemoveKnownHost(hostID string) error {
+	hostID = strings.TrimSpace(hostID)
+	if hostID == "" {
+		return errors.New("flitnix: hostId is required")
+	}
+	kh, err := client.LoadOrCreateKnownHosts(filepath.Join(a.dataDir, "known_hosts.json"))
+	if err != nil {
+		return err
+	}
+	if err := kh.Remove(hostID); err != nil {
+		return err
+	}
+	if a.peerMgr != nil {
+		a.peerMgr.linksMu.Lock()
+		delete(a.peerMgr.links, strings.ToLower(hostID))
+		a.peerMgr.linksMu.Unlock()
+	}
+	return nil
 }
 
 // EndSession revokes the session identified by its non-secret key: its
@@ -2705,6 +2904,8 @@ func (a *App) GetSettings() SettingsView {
 		NotificationsSupported:    notifySup,
 		HistoryRetentionDays:      s.HistoryRetentionDays,
 		HistoryMaxRecords:         s.HistoryMaxRecords,
+		RequireEncryptedTransport: s.RequireEncryptedTransport,
+		LocalHTTPSEnabled:         s.LocalHTTPSEnabled,
 	}
 }
 
@@ -2793,9 +2994,18 @@ func (a *App) SaveSettings(view SettingsView) error {
 		NotifyGuestRequests:       view.NotifyGuestRequests,
 		HistoryRetentionDays:      view.HistoryRetentionDays,
 		HistoryMaxRecords:         view.HistoryMaxRecords,
+		RequireEncryptedTransport: view.RequireEncryptedTransport,
+		LocalHTTPSEnabled:         view.LocalHTTPSEnabled,
 	}
+	prevLocalHTTPS := current.LocalHTTPSEnabled
 	if err := a.settingsStore.Save(s); err != nil {
 		return err
+	}
+	if prevLocalHTTPS != view.LocalHTTPSEnabled {
+		if view.LocalHTTPSEnabled && a.localHTTPS != nil && a.hostIdentity != nil {
+			_ = a.localHTTPS.EnsureCA(a.hostIdentity.HostID)
+		}
+		a.restartServerIfRunning()
 	}
 	if a.notify != nil {
 		a.notify.SetPolicy(a.notifyPolicyFromSettings())

@@ -18,6 +18,9 @@
   export let onRefreshNetwork: () => void = () => {}
   export let selectedIp: string = ''
   export let serverAddress: string = ''
+  export let localHttpsStatus: main.LocalHTTPSStatus | null = null
+  export let qrUseHttps: boolean = false
+  export let toggleQrHttpsAction: (useHttps: boolean) => void = () => {}
   export let qrUrl: string = ''
   export let qrError: string = ''
   export let qrKey: string = ''
@@ -137,7 +140,9 @@
 
   function copySessionUrl() {
     if (!serverAddress) return
-    const url = serverAddress.startsWith('http') ? serverAddress : `http://${serverAddress}`
+    const url = (qrUseHttps && localHttpsStatus?.active && localHttpsStatus?.httpsUrl)
+      ? localHttpsStatus.httpsUrl
+      : (serverAddress.startsWith('http') ? serverAddress : `http://${serverAddress}`)
     copyTextToClipboard(url)
     showToast('Copied connection address to clipboard', 'success')
   }
@@ -358,7 +363,16 @@
             {:else}
               <span class="hub-status-chip online">
                 <span class="chip-pulse active"></span>
-                Session Live & Listening
+                Session Live &amp; Listening
+              </span>
+            {/if}
+            {#if qrUseHttps && localHttpsStatus?.active}
+              <span class="hub-status-chip ready" title="TLS 1.3 encrypted local HTTPS origin (Local Root CA)">
+                🔒 Local HTTPS (TLS 1.3)
+              </span>
+            {:else}
+              <span class="hub-network-chip" title="Unencrypted local network HTTP for zero-install QR scanning">
+                LAN HTTP
               </span>
             {/if}
             <span class="muted" style="font-size: 12px;">Port 43821 · Ephemeral Token</span>
@@ -393,12 +407,33 @@
             {#if networkState?.status === 'no_network' || !serverAddress}
               <span class="url-text" style="color: var(--danger-text); font-style: italic;">Waiting for network reconnection…</span>
             {:else}
-              <span class="url-text">http://{serverAddress}</span>
+              <span class="url-text">{qrUseHttps && localHttpsStatus?.active && localHttpsStatus?.httpsUrl ? localHttpsStatus.httpsUrl : `http://${serverAddress}`}</span>
               <button type="button" class="button ghost small copy-btn" on:click={copySessionUrl}>
                 Copy Address
               </button>
             {/if}
           </div>
+
+          {#if localHttpsStatus?.active}
+            <div class="active-controls-row" style="margin-bottom: 6px;">
+              <button
+                type="button"
+                class="button {qrUseHttps ? 'primary' : 'ghost'} small"
+                on:click={() => toggleQrHttpsAction(!qrUseHttps)}
+              >
+                {qrUseHttps ? 'Using Local HTTPS QR (Switch to LAN HTTP)' : 'Use Local HTTPS QR (PWA / TLS 1.3)'}
+              </button>
+              {#if localHttpsStatus.caDownloadUrl}
+                <button
+                  type="button"
+                  class="button ghost small"
+                  on:click={() => { copyTextToClipboard(localHttpsStatus?.caDownloadUrl || ''); showToast('Copied Local CA download link', 'info') }}
+                >
+                  Copy CA Link
+                </button>
+              {/if}
+            </div>
+          {/if}
 
           <div class="active-controls-row">
             <button type="button" class="button ghost small" on:click={() => fetchQR(qrKey)}>

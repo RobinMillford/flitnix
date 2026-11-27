@@ -9,10 +9,12 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
 	"github.com/itsyamin/flitnix/internal/client"
+	"github.com/itsyamin/flitnix/internal/settings"
 	"github.com/mattn/go-isatty"
 )
 
@@ -24,8 +26,10 @@ func runPairCLIWithStdin(args []string, stdin *os.File, stdout, stderr io.Writer
 	fs := flag.NewFlagSet("pair", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
-	toURL := fs.String("to", "", "recipient pairing URL (e.g. http://192.168.1.50:43821/#<token>, or '-' for stdin)")
+	toURL := fs.String("to", "", "recipient pairing URL (e.g. https://192.168.1.50:43821/#<token>, or '-' for stdin)")
 	tokenFlag := fs.String("token", "", "session pairing token (optional if specified in --to fragment, '-' for stdin)")
+	hostIDFlag := fs.String("host-id", "", "expected remote HostID SHA-256 hex for strict TLS 1.3 certificate pinning")
+	requireTLSFlag := fs.Bool("require-tls", false, "require verified TLS 1.3 encrypted transport and refuse plaintext fallback")
 	deviceName := fs.String("name", "", "device name to enroll under on host desktop")
 	yes := fs.Bool("y", false, "skip interactive SAS confirmation prompt")
 	fs.BoolVar(yes, "yes", false, "skip interactive SAS confirmation prompt")
@@ -92,8 +96,42 @@ func runPairCLIWithStdin(args []string, stdin *os.File, stdout, stderr io.Writer
 		return ExitLocalPathError
 	}
 
+	requireTLS := *requireTLSFlag || strings.EqualFold(strings.TrimSpace(os.Getenv("FLITNIX_REQUIRE_TLS")), "1") || strings.EqualFold(strings.TrimSpace(os.Getenv("FLITNIX_REQUIRE_TLS")), "true")
+	if !requireTLS {
+		if stStore, stErr := settings.NewStore(filepath.Join(client.ResolveDataDir(), "settings.json")); stErr == nil {
+			requireTLS = stStore.Get().RequireEncryptedTransport
+		}
+	}
+	tlsRes, tlsErr := client.ResolveCLITargetAndClient(ctx, target, client.CLITLSOptions{
+		KnownHosts:     kh,
+		ExpectedHostID: *hostIDFlag,
+		RequireTLS:     requireTLS,
+	})
+	if tlsErr != nil {
+		if *jsonOutput {
+			errJSON, _ := json.Marshal(map[string]any{
+				"success": false,
+				"error":   "tls_verification_failed",
+				"message": tlsErr.Error(),
+			})
+			fmt.Fprintln(stdout, string(errJSON))
+			return ExitAuthError
+		}
+		if errors.Is(tlsErr, client.ErrHostMismatch) || errors.Is(tlsErr, client.ErrPeerHostKeyMismatch) {
+			fmt.Fprintf(stderr, "\nCRITICAL SECURITY ALERT: %v\n", tlsErr)
+			return ExitAuthError
+		}
+		fmt.Fprintf(stderr, "Error: %v\n", tlsErr)
+		return ExitAuthError
+	}
+	target = tlsRes.Target
+
 	if !*quiet && !*jsonOutput {
-		fmt.Fprintf(stdout, "Initiating cryptographic pairing with host at %s...\n", target.Host)
+		if tlsRes.TLSActive {
+			fmt.Fprintf(stdout, "Initiating cryptographic pairing with host at %s (TLS 1.3 Pinned)...\n", target.Host)
+		} else {
+			fmt.Fprintf(stdout, "Initiating cryptographic pairing with host at %s (LAN HTTP)...\n", target.Host)
+		}
 	}
 
 	confirmSAS := func(sas string, isPinned bool) (bool, error) {
@@ -132,7 +170,7 @@ func runPairCLIWithStdin(args []string, stdin *os.File, stdout, stderr io.Writer
 		return strings.EqualFold(resp, "y") || strings.EqualFold(resp, "yes"), nil
 	}
 
-	res, err := client.Pair(ctx, target, *deviceName, clientID, kh, confirmSAS)
+	res, err := client.PairWithHTTPClient(ctx, tlsRes.HTTPClient, target, *deviceName, clientID, kh, confirmSAS)
 	if err != nil {
 		if *jsonOutput {
 			errCode := "pairing_failed"

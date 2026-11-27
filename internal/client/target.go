@@ -43,6 +43,33 @@ func (t *Target) Token() string {
 	return t.token
 }
 
+// Scheme returns the URL scheme ("http" or "https") of Target.
+func (t *Target) Scheme() string {
+	if t == nil {
+		return ""
+	}
+	if strings.HasPrefix(strings.ToLower(t.BaseURL), "https://") {
+		return "https"
+	}
+	return "http"
+}
+
+// WithScheme returns a shallow copy of Target using scheme ("http" or "https").
+func (t *Target) WithScheme(scheme string) *Target {
+	if t == nil {
+		return nil
+	}
+	s := strings.ToLower(strings.TrimSpace(scheme))
+	if s != "https" {
+		s = "http"
+	}
+	return &Target{
+		BaseURL: s + "://" + t.Host,
+		Host:    t.Host,
+		token:   t.token,
+	}
+}
+
 // String implements fmt.Stringer, returning the BaseURL without any secret token.
 func (t *Target) String() string {
 	if t == nil {

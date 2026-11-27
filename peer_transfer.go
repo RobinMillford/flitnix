@@ -32,14 +32,16 @@ import (
 
 // LocalPeerInfo describes this computer's identity & connectivity for Computer Sharing.
 type LocalPeerInfo struct {
-	HostID      string `json:"hostId"`
-	PublicKey   string `json:"publicKey"`
-	Fingerprint string `json:"fingerprint"`
-	DeviceName  string `json:"deviceName"`
-	OS          string `json:"os"`
-	Version     string `json:"version"`
-	Address     string `json:"address"`
-	Port        int    `json:"port"`
+	HostID           string `json:"hostId"`
+	PublicKey        string `json:"publicKey"`
+	Fingerprint      string `json:"fingerprint"`
+	DeviceName       string `json:"deviceName"`
+	OS               string `json:"os"`
+	Version          string `json:"version"`
+	Address          string `json:"address"`
+	Port             int    `json:"port"`
+	TLSActive        bool   `json:"tlsActive"`
+	RequireEncrypted bool   `json:"requireEncrypted"`
 }
 
 // PeerTransferJob tracks one outbound desktop-to-desktop transfer in real time.
@@ -302,15 +304,18 @@ func (a *App) GetLocalPeerInfo() LocalPeerInfo {
 	if addr == "" && ep.LocalIP != "" {
 		addr = net.JoinHostPort(ep.LocalIP, strconv.Itoa(ep.Port))
 	}
+	reqEnc := a.settingsStore != nil && a.settingsStore.Get().RequireEncryptedTransport
 	return LocalPeerInfo{
-		HostID:      hostID,
-		PublicKey:   pubKey,
-		Fingerprint: fingerprint,
-		DeviceName:  ep.DeviceName,
-		OS:          stdlibRuntime.GOOS,
-		Version:     version.Get().Version,
-		Address:     addr,
-		Port:        ep.Port,
+		HostID:           hostID,
+		PublicKey:        pubKey,
+		Fingerprint:      fingerprint,
+		DeviceName:       ep.DeviceName,
+		OS:               stdlibRuntime.GOOS,
+		Version:          version.Get().Version,
+		Address:          addr,
+		Port:             ep.Port,
+		TLSActive:        a.hostIdentity != nil && addr != "",
+		RequireEncrypted: reqEnc,
 	}
 }
 

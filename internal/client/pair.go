@@ -132,6 +132,9 @@ func PairWithHTTPClient(ctx context.Context, httpClient *http.Client, target *Ta
 	if err := kh.VerifyHost(chalResp.HostID, chalResp.HostPublicKey); err != nil {
 		return nil, err
 	}
+	if err := kh.VerifyAddressBinding(target.Host, chalResp.HostID); err != nil {
+		return nil, err
+	}
 	_, isPinned := kh.Get(chalResp.HostID)
 
 	// 4. Phase 2: POST /api/pair/reveal
@@ -287,7 +290,7 @@ func PairWithHTTPClient(ctx context.Context, httpClient *http.Client, target *Ta
 	}
 
 	// 12. Pin Host in known_hosts.json
-	if err := kh.Pin(chalResp.HostID, target.Host, chalResp.HostPublicKey); err != nil {
+	if err := kh.PinWithAddress(chalResp.HostID, target.Host, chalResp.HostPublicKey, target.Host); err != nil {
 		return nil, fmt.Errorf("client: failed to pin host: %w", err)
 	}
 

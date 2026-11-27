@@ -3005,6 +3005,14 @@
   // Boot
   // ------------------------------------------------------------------
   function boot() {
+    var footnote = document.getElementById("transport-footnote");
+    if (footnote) {
+      if (window.location.protocol === "https:") {
+        footnote.textContent = "Connected via Local HTTPS (TLS 1.3 encrypted transport on your local network).";
+      } else {
+        footnote.textContent = "Connected via LAN HTTP (unencrypted local network transport) — connect only on networks and devices you trust.";
+      }
+    }
     setupConnectCodeForm();
     pickBtn.addEventListener("click", function () { fileInput.click(); });
     if (folderInput && pickFolderBtn &&

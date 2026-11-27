@@ -62,6 +62,14 @@ func verifyLeafCertificateIdentity(rawCerts [][]byte, expectedHostID, expectedPu
 	return hostID, pubHex, nil
 }
 
+func peerTLSServerName(expectedHostID string) string {
+	clean := strings.ToLower(strings.TrimSpace(expectedHostID))
+	if clean != "" {
+		return clean + ".flitnix.peer"
+	}
+	return "flitnix-peer.internal"
+}
+
 // NewPeerHTTPClient builds an HTTP client enforcing TLS 1.3 and pinning expectedHostID/expectedPubHex.
 func NewPeerHTTPClient(expectedHostID, expectedPubHex string, onVerified func(hostID, pubHex string)) *http.Client {
 	transport := &http.Transport{
@@ -77,6 +85,7 @@ func NewPeerHTTPClient(expectedHostID, expectedPubHex string, onVerified func(ho
 		ExpectContinueTimeout: 1 * time.Second,
 		TLSClientConfig: &tls.Config{
 			MinVersion:         tls.VersionTLS13,
+			ServerName:         peerTLSServerName(expectedHostID),
 			InsecureSkipVerify: true, // Pin verification enforced below via VerifyPeerCertificate
 			ClientSessionCache: tls.NewLRUClientSessionCache(64),
 			VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {

@@ -9,12 +9,14 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/itsyamin/flitnix/internal/client"
 	"github.com/itsyamin/flitnix/internal/power"
+	"github.com/itsyamin/flitnix/internal/settings"
 	"github.com/itsyamin/flitnix/internal/transfer"
 	"github.com/mattn/go-isatty"
 )
@@ -41,6 +43,8 @@ func runSendCLIWithStdin(args []string, stdin *os.File, stdout, stderr io.Writer
 
 	toURL := fs.String("to", "", "recipient pairing URL (e.g. http://192.168.1.50:43821/#<token>, or '-' for stdin)")
 	tokenFlag := fs.String("token", "", "session pairing token (optional if specified in --to fragment, '-' for stdin)")
+	hostIDFlag := fs.String("host-id", "", "expected remote HostID SHA-256 hex for strict TLS 1.3 certificate pinning")
+	requireTLSFlag := fs.Bool("require-tls", false, "require verified TLS 1.3 encrypted transport and refuse plaintext fallback")
 	nameOverride := fs.String("name", "", "override top-level folder name when sending a single directory")
 	timeout := fs.Duration("timeout", 5*time.Minute, "maximum duration to wait for recipient approval")
 	yes := fs.Bool("y", false, "skip interactive confirmation prompt")
@@ -158,11 +162,42 @@ func runSendCLIWithStdin(args []string, stdin *os.File, stdout, stderr io.Writer
 		return ExitLocalPathError
 	}
 
-	// 4. Initialize client and verify server reachability
+	// 4. Initialize client with verified TLS 1.3 transport when supported/required and verify reachability
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	cli := client.NewClient(target)
+	requireTLS := *requireTLSFlag || strings.EqualFold(strings.TrimSpace(os.Getenv("FLITNIX_REQUIRE_TLS")), "1") || strings.EqualFold(strings.TrimSpace(os.Getenv("FLITNIX_REQUIRE_TLS")), "true")
+	if !requireTLS {
+		if stStore, stErr := settings.NewStore(filepath.Join(client.ResolveDataDir(), "settings.json")); stErr == nil {
+			requireTLS = stStore.Get().RequireEncryptedTransport
+		}
+	}
+	kh, khErr := client.LoadOrCreateKnownHosts("")
+	if khErr != nil {
+		fmt.Fprintf(stderr, "Error loading known_hosts: %v\n", khErr)
+		return ExitLocalPathError
+	}
+	tlsRes, tlsErr := client.ResolveCLITargetAndClient(ctx, target, client.CLITLSOptions{
+		KnownHosts:     kh,
+		ExpectedHostID: *hostIDFlag,
+		RequireTLS:     requireTLS,
+	})
+	if tlsErr != nil {
+		if errors.Is(tlsErr, client.ErrHostMismatch) || errors.Is(tlsErr, client.ErrPeerHostKeyMismatch) {
+			fmt.Fprintf(stderr, "\nCRITICAL SECURITY ALERT: %v\n", tlsErr)
+			return ExitAuthError
+		}
+		if errors.Is(tlsErr, client.ErrTLSRequired) {
+			fmt.Fprintf(stderr, "Error: %v\n", tlsErr)
+			fmt.Fprintln(stderr, "Hint: Ensure the peer runs Flitnix with TLS 1.3 enabled, or disable 'Require Encrypted Transport' if connecting to an unencrypted legacy HTTP peer.")
+			return ExitAuthError
+		}
+		fmt.Fprintf(stderr, "Error establishing peer transport: %v\n", tlsErr)
+		return ExitConnectionError
+	}
+	target = tlsRes.Target
+
+	cli := client.NewClientWithHTTPClient(target, tlsRes.HTTPClient)
 	if !*quiet && !*jsonOutput {
 		policy := client.DefaultRetryPolicy()
 		policy.OnRetry = func(attempt, maxAttempts int, delay time.Duration, err error) {
@@ -182,6 +217,15 @@ func runSendCLIWithStdin(args []string, stdin *os.File, stdout, stderr io.Writer
 	// 5. Display transfer plan
 	if !*quiet && !*jsonOutput {
 		fmt.Fprintf(stdout, "Recipient: %s\n", target.Host)
+		if tlsRes.TLSActive && tlsRes.Probe != nil {
+			hid := tlsRes.Probe.HostID
+			if len(hid) > 12 {
+				hid = hid[:6] + "·" + hid[len(hid)-6:]
+			}
+			fmt.Fprintf(stdout, "Transport: TLS 1.3 Pinned (Host ID: %s)\n", hid)
+		} else {
+			fmt.Fprintf(stdout, "Transport: LAN HTTP (unencrypted; peer did not advertise TLS 1.3)\n")
+		}
 		if localManifest.Manifest.Kind == "folder" {
 			fmt.Fprintf(stdout, "Folder:    %s (%d files, %s)\n", localManifest.Manifest.RootName, len(localManifest.LocalItems), client.FormatBytes(localManifest.TotalBytes))
 		} else {
@@ -408,10 +452,12 @@ func printSendHelp(out io.Writer) {
 	fmt.Fprintf(out, "Usage:\n")
 	fmt.Fprintf(out, "  flitnix send [flags] <files or directories...>\n\n")
 	fmt.Fprintf(out, "Flags:\n")
-	fmt.Fprintf(out, "  --to <url>          Recipient pairing URL (e.g. http://192.168.1.50:43821/#<token>)\n")
+	fmt.Fprintf(out, "  --to <url>          Recipient pairing URL (e.g. https://192.168.1.50:43821/#<token>)\n")
 	fmt.Fprintf(out, "                      Pass '-' to read URL from standard input.\n")
 	fmt.Fprintf(out, "                      If omitted, prompt interactively for hidden input.\n")
 	fmt.Fprintf(out, "  --token <secret>    Pairing token (optional if specified in --to fragment, '-' for stdin)\n")
+	fmt.Fprintf(out, "  --host-id <hex>     Expected remote HostID SHA-256 hex for strict TLS 1.3 pinning\n")
+	fmt.Fprintf(out, "  --require-tls       Require verified TLS 1.3 transport; refuse plaintext HTTP\n")
 	fmt.Fprintf(out, "  --name <string>     Folder name override when sending a single directory\n")
 	fmt.Fprintf(out, "  --timeout <dur>     Approval timeout waiting for recipient (default: 5m)\n")
 	fmt.Fprintf(out, "  -y, --yes           Skip confirmation prompt and proceed immediately\n")

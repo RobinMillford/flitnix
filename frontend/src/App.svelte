@@ -28,8 +28,8 @@
     PauseBatch, ResumeBatch, DiscardBatch,
     PickFilesForSharing, PickFolderForSharing, AddDroppedSources,
     ListSharedFiles, ListSharedSources, RevokeSharedFile, RevokeSharedSource, ReceiveDirectory,
-    ListNetworkInterfaces, SessionQR, ServerAddress, GetNetworkState, RefreshNetwork,
-    GetSessionShortCode, RegenerateSessionShortCode,
+    ListNetworkInterfaces, SessionQR, SessionHTTPSQR, ServerAddress, GetNetworkState, RefreshNetwork,
+    GetLocalHTTPSStatus, GetSessionShortCode, RegenerateSessionShortCode,
     StartGuestRoomWithConfig, GetGuestRoomState, ApproveGuest, RejectGuest, RevokeGuest,
     ApproveGuestUpload, RejectGuestUpload, EndGuestRoom, PickGuestDestination, OpenGuestFolder,
     PickExportDestination, ExportGuestCollection,
@@ -102,7 +102,7 @@
 
   // Persistent Settings state
   let settingsState: main.SettingsView = {
-    version: 6,
+    version: 7,
     theme: getInitialTheme(),
     locale: 'system',
     downloadDir: '',
@@ -125,7 +125,9 @@
     notifyGuestRequests: true,
     notificationsSupported: false,
     historyRetentionDays: 90,
-    historyMaxRecords: 5000
+    historyMaxRecords: 5000,
+    requireEncryptedTransport: false,
+    localHttpsEnabled: false
   }
   let settingsSavedAlert = ''
   let settingsError = ''
@@ -215,6 +217,8 @@
   let ifaceError = ''
   let selectedIp = ''
   let serverAddress = ''
+  let localHttpsStatus: main.LocalHTTPSStatus | null = null
+  let qrUseHttps = false
   let qrUrl = ''
   let qrError = ''
   let qrKey = ''
@@ -288,9 +292,9 @@
       ListSharedFiles(), ListSharedSources(), ReceiveDirectory(), ServerAddress(),
       ListPendingBatches(), ListBatches(), GetGuestRoomState(), GetPairingStatus(),
       SleepInhibition(), GetStorageStatus(), GetVisibilityState(),
-      ListNearbyPeers(), ListPeerTransfers(), GetLocalPeerInfo()
+      ListNearbyPeers(), ListPeerTransfers(), GetLocalPeerInfo(), GetLocalHTTPSStatus()
     ]),
-    ([s, p, u, d, f, sourceList, dir, addr, b, allBatches, grState, pStatus, sleepStatus, stStatus, visState, peersList, peerJobs, localPeer]) => {
+    ([s, p, u, d, f, sourceList, dir, addr, b, allBatches, grState, pStatus, sleepStatus, stStatus, visState, peersList, peerJobs, localPeer, httpsSt]) => {
       sessions = s ?? []; pending = p ?? []; uploads = u ?? []; downloads = d ?? []
       files = f ?? []; sources = sourceList ?? []; pendingBatches = b ?? []
       batches = allBatches ?? []
@@ -303,6 +307,10 @@
       nearbyPeers = peersList ?? []
       peerTransfers = peerJobs ?? []
       localPeerInfo = localPeer ?? null
+      localHttpsStatus = httpsSt ?? null
+      if (!localHttpsStatus?.active && qrUseHttps) {
+        qrUseHttps = false
+      }
       if (!guestDestDir && dir) guestDestDir = dir
 
       const currentPendingTotal = (pending?.length ?? 0) + (pendingBatches?.length ?? 0) + (guestRoomState?.pendingUploads?.length ?? 0)
@@ -362,10 +370,19 @@
     if (!key) return
     qrKey = key
     try {
-      const data = await SessionQR(key)
+      const data = (qrUseHttps && localHttpsStatus?.active)
+        ? await SessionHTTPSQR(key, false)
+        : await SessionQR(key)
       if (qrKey === key) { qrUrl = data; qrError = '' }
     } catch (err) {
       if (qrKey === key) { qrUrl = ''; qrError = stringOfError(err) }
+    }
+  }
+
+  function toggleQrHttpsAction(useHttps: boolean): void {
+    qrUseHttps = useHttps
+    if (qrKey) {
+      void fetchQR(qrKey)
     }
   }
 
@@ -1697,6 +1714,9 @@
               onRefreshNetwork={refreshNetwork}
               {selectedIp}
               {serverAddress}
+              {localHttpsStatus}
+              {qrUseHttps}
+              {toggleQrHttpsAction}
               {qrUrl}
               {qrError}
               {qrKey}
