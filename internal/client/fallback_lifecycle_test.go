@@ -100,10 +100,20 @@ func TestStreamItemEarlyPatchRejectionFallsBackWithCompleteBody(t *testing.T) {
 	var mu sync.Mutex
 	var putLength, putBytes int64
 	var putSHA string
+	// A rejected PATCH can emit progress before its 405 arrives; the PUT
+	// fallback legitimately starts a new progress sequence from zero.
+	var phase atomic.Int32 // 0 = PATCH attempt, 1 = PUT fallback
+	type progressEvent struct {
+		value int64
+		total int64
+		phase int32
+	}
+	var events []progressEvent
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodPatch:
+			phase.Store(0)
 			// Deliberately reject without reading the request body. The Go
 			// transport may keep consuming it after the response is received.
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -111,6 +121,7 @@ func TestStreamItemEarlyPatchRejectionFallsBackWithCompleteBody(t *testing.T) {
 				flusher.Flush()
 			}
 		case http.MethodPut:
+			phase.Store(1)
 			body, err := io.ReadAll(r.Body)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
@@ -133,9 +144,13 @@ func TestStreamItemEarlyPatchRejectionFallsBackWithCompleteBody(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	rec := &progressRecorder{}
+	record := func(written, total int64) {
+		mu.Lock()
+		events = append(events, progressEvent{value: written, total: total, phase: phase.Load()})
+		mu.Unlock()
+	}
 	res, err := NewClient(fallbackTarget(t, ts)).StreamItemWithHint(
-		context.Background(), "b1", "i1", path, 0, 1<<20, rec.record,
+		context.Background(), "b1", "i1", path, 0, 1<<20, record,
 	)
 	if err != nil {
 		t.Fatalf("fallback transfer: %v", err)
@@ -158,7 +173,31 @@ func TestStreamItemEarlyPatchRejectionFallsBackWithCompleteBody(t *testing.T) {
 	if putSHA != wantSHA {
 		t.Fatalf("PUT body digest = %s, want %s", putSHA, wantSHA)
 	}
-	assertProgress(t, rec, payloadSize, payloadSize)
+	if len(events) == 0 {
+		t.Fatal("no progress callbacks")
+	}
+	finalEvents := 0
+	last := map[int32]int64{}
+	seen := map[int32]bool{}
+	for _, e := range events {
+		if e.total != payloadSize || e.value < 0 || e.value > payloadSize {
+			t.Fatalf("progress (%d, %d) outside [0, %d]", e.value, e.total, payloadSize)
+		}
+		if seen[e.phase] && e.value < last[e.phase] {
+			t.Fatalf("progress went backwards within attempt %d: %d then %d", e.phase, last[e.phase], e.value)
+		}
+		seen[e.phase] = true
+		last[e.phase] = e.value
+		if e.value == payloadSize {
+			finalEvents++
+		}
+	}
+	if !seen[1] {
+		t.Fatal("PUT fallback emitted no progress")
+	}
+	if finalEvents != 1 {
+		t.Fatalf("got %d final progress events, want exactly 1", finalEvents)
+	}
 }
 
 // Scenario A/F: a normal multi-chunk PATCH upload must be exact and progressive.
