@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#07111f">
+<title>Flitnix — Offline</title>
+<link rel="icon" type="image/png" href="/static/favicon.png">
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<main class="app" data-app="phone-offline">
+  <header class="app__header">
+    <div class="brand">
+      <img class="brand__mark" src="/static/logo-mark.png" alt="Flitnix" width="42" height="27">
+      <h1 class="brand__name">Flitnix</h1>
+    </div>
+    <p class="tagline">Fast local file transfer</p>
+  </header>
+
+  <section class="card card--warn" id="offline-card">
+    <h2>Desktop unreachable</h2>
+    <p>Flitnix cannot reach your desktop on the local network right now.</p>
+    <ul>
+      <li>Confirm your phone and desktop are on the same Wi-Fi or mobile hotspot.</li>
+      <li>Ensure Flitnix is open and listening on your desktop.</li>
+      <li>If your desktop IP changed, scan the new QR code or open the updated pairing bookmark.</li>
+    </ul>
+    <div style="margin-top: 1rem;">
+      <a href="/" class="btn" id="offline-retry-btn">Retry Connection</a>
+    </div>
+  </section>
+
+  <footer class="app__footer">
+    <p>Flitnix works entirely on your local network. No cloud. No accounts.</p>
+  </footer>
+</main>
+</body>
+</html>

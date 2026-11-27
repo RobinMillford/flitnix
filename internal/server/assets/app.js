@@ -2947,6 +2947,7 @@
     initQuickText();
     connectEvents();
     scheduleTextPoll();
+    refreshShareTargetButtons();
   }
 
   function showCodeError(msg) {
@@ -3002,6 +3003,269 @@
   }
 
   // ------------------------------------------------------------------
+  // PWA Registration & Web Share Target (G12)
+  // ------------------------------------------------------------------
+  var SHARE_DB_NAME = "flitnix-share-target";
+  var SHARE_STORE_NAME = "pending";
+  var pendingShare = null;
+  var deferredInstallPrompt = null;
+
+  var pwaStatusBadge = document.getElementById("pwa-status-badge");
+  var pwaStatusDesc = document.getElementById("pwa-status-desc");
+  var pwaActions = document.getElementById("pwa-actions");
+  var pwaInstallBtn = document.getElementById("pwa-install-btn");
+  var shareTargetCard = document.getElementById("share-target-card");
+  var shareTargetBadge = document.getElementById("share-target-badge");
+  var shareTargetSummary = document.getElementById("share-target-summary");
+  var shareTargetList = document.getElementById("share-target-list");
+  var shareTargetTextBox = document.getElementById("share-target-text-box");
+  var shareTargetConnectHint = document.getElementById("share-target-connect-hint");
+  var shareTargetConfirmFilesBtn = document.getElementById("share-target-confirm-files");
+  var shareTargetConfirmTextBtn = document.getElementById("share-target-confirm-text");
+  var shareTargetDiscardBtn = document.getElementById("share-target-discard");
+
+  function formatShareBytes(bytes) {
+    if (typeof bytes !== "number" || isNaN(bytes) || bytes < 0) return "0 B";
+    if (bytes < 1024) return bytes + " B";
+    if (bytes < 1048576) return (bytes / 1024).toFixed(1) + " KB";
+    if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + " MB";
+    return (bytes / 1073741824).toFixed(2) + " GB";
+  }
+
+  function isIOSBrowser() {
+    var ua = navigator.userAgent || "";
+    return /iPhone|iPad|iPod/i.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  }
+
+  function isStandalonePWA() {
+    return (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) ||
+      window.navigator.standalone === true;
+  }
+
+  function refreshShareTargetButtons() {
+    if (!shareTargetCard || !pendingShare) return;
+    var connected = !!(token && !appState.ended);
+    var hasFiles = !!(pendingShare.files && pendingShare.files.length > 0);
+    var combinedText = buildSharedText(pendingShare);
+    if (shareTargetConnectHint) shareTargetConnectHint.hidden = connected;
+    if (shareTargetConfirmFilesBtn) {
+      shareTargetConfirmFilesBtn.hidden = !hasFiles;
+      shareTargetConfirmFilesBtn.disabled = !connected;
+    }
+    if (shareTargetConfirmTextBtn) {
+      shareTargetConfirmTextBtn.hidden = !combinedText;
+      shareTargetConfirmTextBtn.disabled = !connected;
+    }
+    if (shareTargetBadge) {
+      shareTargetBadge.textContent = connected ? "Ready to confirm" : "Connect to send";
+    }
+  }
+
+  function buildSharedText(rec) {
+    if (!rec) return "";
+    var parts = [];
+    if (rec.title && rec.title.trim()) parts.push(rec.title.trim());
+    if (rec.text && rec.text.trim()) parts.push(rec.text.trim());
+    if (rec.url && rec.url.trim()) {
+      var u = rec.url.trim();
+      if (parts.indexOf(u) === -1 && (!rec.text || rec.text.indexOf(u) === -1)) {
+        parts.push(u);
+      }
+    }
+    return parts.join("\n").trim();
+  }
+
+  function clearShareTargetUI() {
+    pendingShare = null;
+    if (shareTargetCard) shareTargetCard.hidden = true;
+    if (shareTargetList) shareTargetList.innerHTML = "";
+    if (shareTargetTextBox) shareTargetTextBox.textContent = "";
+  }
+
+  function consumePendingShareFromIDB(shareId) {
+    if (typeof indexedDB === "undefined" || !shareId) return Promise.resolve(null);
+    return new Promise(function (resolve) {
+      var req = indexedDB.open(SHARE_DB_NAME, 1);
+      req.onupgradeneeded = function () {
+        var db = req.result;
+        if (!db.objectStoreNames.contains(SHARE_STORE_NAME)) {
+          db.createObjectStore(SHARE_STORE_NAME, { keyPath: "id" });
+        }
+      };
+      req.onerror = function () { resolve(null); };
+      req.onsuccess = function () {
+        var db = req.result;
+        try {
+          var tx = db.transaction(SHARE_STORE_NAME, "readwrite");
+          var store = tx.objectStore(SHARE_STORE_NAME);
+          var getReq = store.get(shareId);
+          getReq.onsuccess = function () {
+            var rec = getReq.result || null;
+            store.delete(shareId);
+            tx.oncomplete = function () { db.close(); resolve(rec); };
+            tx.onerror = function () { db.close(); resolve(rec); };
+          };
+          getReq.onerror = function () { db.close(); resolve(null); };
+        } catch (_) {
+          db.close();
+          resolve(null);
+        }
+      };
+    });
+  }
+
+  function showPendingShare(rec) {
+    if (!rec || !shareTargetCard) return;
+    var hasFiles = !!(rec.files && rec.files.length > 0);
+    var combinedText = buildSharedText(rec);
+    if (!hasFiles && !combinedText) return;
+
+    pendingShare = rec;
+    var summaryParts = [];
+    if (hasFiles) {
+      summaryParts.push(rec.files.length + (rec.files.length === 1 ? " shared file" : " shared files"));
+    }
+    if (combinedText) {
+      summaryParts.push("shared text/link");
+    }
+    if (shareTargetSummary) {
+      shareTargetSummary.textContent = "Received " + summaryParts.join(" and ") + " from your device Share Sheet. Confirm below before transmitting to desktop.";
+    }
+    if (shareTargetList) {
+      shareTargetList.innerHTML = "";
+      if (hasFiles) {
+        rec.files.forEach(function (f) {
+          var li = document.createElement("li");
+          li.textContent = (f.name || "file") + " (" + formatShareBytes(f.size) + ")";
+          shareTargetList.appendChild(li);
+        });
+        shareTargetList.hidden = false;
+      } else {
+        shareTargetList.hidden = true;
+      }
+    }
+    if (shareTargetTextBox) {
+      if (combinedText) {
+        shareTargetTextBox.textContent = combinedText;
+        shareTargetTextBox.hidden = false;
+      } else {
+        shareTargetTextBox.textContent = "";
+        shareTargetTextBox.hidden = true;
+      }
+    }
+    shareTargetCard.hidden = false;
+    refreshShareTargetButtons();
+  }
+
+  function initPWAAndShareTarget() {
+    var secure = !!window.isSecureContext;
+    var swSupported = secure && ("serviceWorker" in navigator);
+    var ios = isIOSBrowser();
+    var standalone = isStandalonePWA();
+
+    if (pwaStatusBadge && pwaStatusDesc) {
+      if (swSupported) {
+        navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch(function () {});
+        if (standalone) {
+          pwaStatusBadge.textContent = ios ? "Installed (iOS Web App)" : "Installed PWA";
+          pwaStatusBadge.className = "badge badge--ready";
+        } else {
+          pwaStatusBadge.textContent = "PWA & Share Ready";
+          pwaStatusBadge.className = "badge badge--ready";
+        }
+        if (ios) {
+          pwaStatusDesc.textContent = "Installed/secure origin active. On iOS Safari, you can add Flitnix via Share → Add to Home Screen; iOS does not support Web Share Target POST from the system Share Sheet, so pick files inside Flitnix.";
+        } else {
+          pwaStatusDesc.textContent = "Secure origin active. Install Flitnix on Android Chrome/Edge to appear in your phone's OS Share Sheet for photos, files, text, and links.";
+        }
+      } else {
+        pwaStatusBadge.textContent = "HTTP Origin";
+        pwaStatusBadge.className = "badge badge--waiting";
+        pwaStatusDesc.textContent = "Plain LAN HTTP origin: Add to Home Screen bookmark works, but Service Worker offline shell and OS Web Share Target require HTTPS (enable Optional Local HTTPS in Desktop Settings → Network) or localhost.";
+      }
+    }
+
+    window.addEventListener("beforeinstallprompt", function (e) {
+      e.preventDefault();
+      deferredInstallPrompt = e;
+      if (pwaActions && pwaInstallBtn) {
+        pwaActions.hidden = false;
+        pwaInstallBtn.onclick = function () {
+          if (!deferredInstallPrompt) return;
+          deferredInstallPrompt.prompt();
+          deferredInstallPrompt.userChoice.finally(function () {
+            deferredInstallPrompt = null;
+            if (pwaActions) pwaActions.hidden = true;
+          });
+        };
+      }
+    });
+
+    if (shareTargetConfirmFilesBtn) {
+      shareTargetConfirmFilesBtn.addEventListener("click", function () {
+        if (!pendingShare || !pendingShare.files || !pendingShare.files.length || !token || appState.ended) return;
+        var filesToSend = pendingShare.files.slice();
+        var hasText = !!buildSharedText(pendingShare);
+        if (!hasText) {
+          clearShareTargetUI();
+        } else {
+          pendingShare.files = [];
+          shareTargetConfirmFilesBtn.hidden = true;
+          if (shareTargetList) shareTargetList.hidden = true;
+        }
+        addFiles(filesToSend, "");
+      });
+    }
+
+    if (shareTargetConfirmTextBtn) {
+      shareTargetConfirmTextBtn.addEventListener("click", function () {
+        if (!pendingShare || !token || appState.ended || !textInput) return;
+        var sharedTxt = buildSharedText(pendingShare);
+        if (!sharedTxt) return;
+        textInput.value = sharedTxt.slice(0, 65536);
+        textInput.dispatchEvent(new Event("input"));
+        textInput.focus();
+        clearShareTargetUI();
+      });
+    }
+
+    if (shareTargetDiscardBtn) {
+      shareTargetDiscardBtn.addEventListener("click", clearShareTargetUI);
+    }
+
+    window.addEventListener("online", function () {
+      if (token && !appState.ended) {
+        reconcileAfterEventStream();
+      }
+    });
+    window.addEventListener("offline", function () {
+      showAwarenessBanner("Network connection offline. Flitnix will reconnect automatically when local Wi-Fi returns.");
+    });
+
+    try {
+      var params = new URLSearchParams(window.location.search || "");
+      var sharedId = params.get("shared");
+      var shareNotice = params.get("share_notice");
+      var shareError = params.get("share_error");
+      if (sharedId || shareNotice || shareError) {
+        var cleanUrl = window.location.pathname + (window.location.hash || "");
+        if (window.history && window.history.replaceState) {
+          window.history.replaceState(null, "", cleanUrl);
+        }
+      }
+      if (sharedId) {
+        consumePendingShareFromIDB(sharedId).then(function (rec) {
+          if (rec) showPendingShare(rec);
+        });
+      } else if (shareNotice === "sw_required") {
+        showAwarenessBanner("Web Share Target requires the HTTPS PWA Service Worker. Enable Local HTTPS in Desktop Settings and install the Flitnix PWA.");
+      } else if (shareError) {
+        showAwarenessBanner("Could not read shared items from your device. Please pick files directly inside Flitnix.");
+      }
+    } catch (_) {}
+  }
+
+  // ------------------------------------------------------------------
   // Boot
   // ------------------------------------------------------------------
   function boot() {
@@ -3013,6 +3277,7 @@
         footnote.textContent = "Connected via LAN HTTP (unencrypted local network transport) — connect only on networks and devices you trust.";
       }
     }
+    initPWAAndShareTarget();
     setupConnectCodeForm();
     pickBtn.addEventListener("click", function () { fileInput.click(); });
     if (folderInput && pickFolderBtn &&
