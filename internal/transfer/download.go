@@ -126,13 +126,18 @@ func (r *DownloadRegistry) Progress(id string, written int64) {
 		written = d.Size
 	}
 	now := time.Now()
-	if elapsed := now.Sub(d.lastAt).Seconds(); elapsed > 0 {
-		d.Speed = float64(written-d.lastWritten) / elapsed
+	if elapsed := now.Sub(d.lastAt).Seconds(); (elapsed >= 0.05 || (d.Speed <= 0 && elapsed > 0)) && written > d.lastWritten {
+		inst := float64(written-d.lastWritten) / elapsed
+		if d.Speed <= 0 {
+			d.Speed = inst
+		} else {
+			d.Speed = 0.7*d.Speed + 0.3*inst
+		}
+		d.lastWritten = written
+		d.lastAt = now
 	}
 	d.Written = written
 	d.written.Store(written)
-	d.lastWritten = written
-	d.lastAt = now
 }
 
 func (r *DownloadRegistry) Finish(id string, written int64) {
@@ -206,8 +211,10 @@ func (r *DownloadRegistry) finish(id string, state DownloadState, reason string,
 	d.Written = written
 	d.written.Store(written)
 	now := time.Now()
-	if elapsed := now.Sub(d.lastAt).Seconds(); elapsed > 0 {
-		d.Speed = float64(written-d.lastWritten) / elapsed
+	if d.Speed <= 0 && written > d.lastWritten {
+		if elapsed := now.Sub(d.lastAt).Seconds(); elapsed > 0 {
+			d.Speed = float64(written-d.lastWritten) / elapsed
+		}
 	}
 	d.State = state
 	d.Reason = reason

@@ -343,7 +343,15 @@ func handleBatchPatch(svcs *Services, stall time.Duration) http.HandlerFunc {
 
 		diagnose(svcs, "batch item done (resumable) session=%s item=%s bytes=%d",
 			shortKey(sess.Key()), shortID(itemID), res.Written)
-		view, completeErr := svcs.Coordinator.CompleteItem(sess.Key(), lease, res.SHA256)
+		var (
+			view        transfer.BatchView
+			completeErr error
+		)
+		if r.Header.Get("X-Flitnix-Compact-Ack") == "1" {
+			view, completeErr = svcs.Coordinator.CompleteItemCompact(sess.Key(), lease, res.SHA256)
+		} else {
+			view, completeErr = svcs.Coordinator.CompleteItem(sess.Key(), lease, res.SHA256)
+		}
 		if completeErr != nil {
 			writeBatchError(w, completeErr)
 			return

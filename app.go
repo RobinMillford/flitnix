@@ -34,6 +34,7 @@ import (
 
 	"github.com/itsyamin/flitnix/internal/audit"
 	"github.com/itsyamin/flitnix/internal/devices"
+	"github.com/itsyamin/flitnix/internal/discovery"
 	"github.com/itsyamin/flitnix/internal/doctor"
 	"github.com/itsyamin/flitnix/internal/guest"
 	"github.com/itsyamin/flitnix/internal/netenv"
@@ -165,6 +166,10 @@ type UploadView struct {
 	CommittedOffset int64     `json:"committedOffset,omitempty"`
 	StorageFits     bool      `json:"storageFits"`
 	StorageWarning  string    `json:"storageWarning,omitempty"`
+	DeviceID        string    `json:"deviceId,omitempty"`
+	DeviceName      string    `json:"deviceName,omitempty"`
+	TrustedDevice   bool      `json:"trustedDevice,omitempty"`
+	ApprovalReason  string    `json:"approvalReason,omitempty"`
 }
 
 type DownloadView struct {
@@ -237,18 +242,26 @@ type BatchView struct {
 	Error              string          `json:"error,omitempty"`
 	StorageFits        bool            `json:"storageFits"`
 	StorageWarning     string          `json:"storageWarning,omitempty"`
+	DeviceID           string          `json:"deviceId,omitempty"`
+	DeviceName         string          `json:"deviceName,omitempty"`
+	TrustedDevice      bool            `json:"trustedDevice,omitempty"`
+	ApprovalReason     string          `json:"approvalReason,omitempty"`
 }
 
 // SettingsView is the UI projection of persistent user settings.
 type SettingsView struct {
-	Version            int    `json:"version"`
-	Theme              string `json:"theme"`
-	Locale             string `json:"locale"`
-	DownloadDir        string `json:"downloadDir"`
-	EffectiveDir       string `json:"effectiveDir"`
-	AutoStartSession   bool   `json:"autoStartSession"`
-	PreserveModTimes   bool   `json:"preserveModTimes"`
-	PreferredInterface string `json:"preferredInterface"`
+	Version                int    `json:"version"`
+	Theme                  string `json:"theme"`
+	Locale                 string `json:"locale"`
+	DownloadDir            string `json:"downloadDir"`
+	EffectiveDir           string `json:"effectiveDir"`
+	AutoStartSession       bool   `json:"autoStartSession"`
+	PreserveModTimes       bool   `json:"preserveModTimes"`
+	PreferredInterface     string `json:"preferredInterface"`
+	VisibilityMode         string `json:"visibilityMode,omitempty"`
+	VisibilityPreviousMode string `json:"visibilityPreviousMode,omitempty"`
+	VisibilityExpiresAt    string `json:"visibilityExpiresAt,omitempty"`
+	QRSharingPaused        bool   `json:"qrSharingPaused,omitempty"`
 }
 
 // App owns the Flitnix core instances and the desktop lifecycle.
@@ -257,9 +270,11 @@ type App struct {
 
 	store         *transfer.Store
 	quota         *transfer.QuotaManager
+	dataDir       string
 	recoveryDir   string
 	settingsStore *settings.Store
 	sessions      *session.Manager
+	shortCodes    *session.ShortCodeManager
 	transfers     *transfer.Service
 	coordinator   *transfer.Coordinator
 	registry      *transfer.Registry
@@ -271,6 +286,9 @@ type App struct {
 	devicesStore  *devices.Store
 	hostIdentity  *devices.HostIdentity
 	pairing       *devices.PairingCoordinator
+	visibility    *devices.VisibilityManager
+	discovery     *discovery.Service
+	peerMgr       *peerTransferManager
 	inhibitor     power.Inhibitor
 	updater       *update.Service
 	startupMu     sync.Mutex
@@ -365,11 +383,29 @@ func NewApp() (*App, error) {
 	guestMgr := guest.NewManager()
 	guestMgr.SetQuotaManager(quota)
 
+	initialVis := devices.VisibilityState{
+		Mode:                    devices.VisibilityTrustedOnly,
+		PreviousRestrictiveMode: devices.VisibilityTrustedOnly,
+	}
+	if settingsStore != nil {
+		cur := settingsStore.Get()
+		if cur.VisibilityMode != "" {
+			initialVis.Mode = devices.VisibilityMode(cur.VisibilityMode)
+		}
+		if cur.VisibilityPreviousMode != "" {
+			initialVis.PreviousRestrictiveMode = devices.VisibilityMode(cur.VisibilityPreviousMode)
+		}
+		initialVis.TemporaryExpiresAt = cur.VisibilityExpiresAt
+	}
+	visMgr := devices.NewVisibilityManager(initialVis, time.Now)
+
 	a := &App{
 		store:         store,
 		quota:         quota,
+		dataDir:       dataDir,
 		recoveryDir:   filepath.Join(dataDir, "recovery"),
 		settingsStore: settingsStore,
+		shortCodes:    session.NewShortCodeManager(session.ShortCodeConfig{}),
 		transfers:     transfer.NewService(transfer.Config{Store: store, Quota: quota}),
 		coordinator:   transfer.NewCoordinator(transfer.CoordinatorConfig{}),
 		registry:      transfer.NewRegistry(),
@@ -381,10 +417,48 @@ func NewApp() (*App, error) {
 		devicesStore:  devicesStore,
 		hostIdentity:  hostIdentity,
 		pairing:       pairingCoord,
+		visibility:    visMgr,
 		inhibitor:     power.New(),
 		source:        netenv.DefaultSource(),
 		updater:       update.New(update.Config{RepoOwner: "RobinMillford", RepoName: "flitnix"}),
 	}
+	if settingsStore != nil {
+		// If a stale temporary_everyone expired while the app was closed,
+		// normalize and persist the reverted restrictive state right away.
+		normalized := visMgr.Evaluate()
+		cur := settingsStore.Get()
+		if cur.VisibilityMode != string(normalized.Mode) ||
+			cur.VisibilityPreviousMode != string(normalized.PreviousRestrictiveMode) ||
+			!cur.VisibilityExpiresAt.Equal(normalized.TemporaryExpiresAt) {
+			cur.VisibilityMode = string(normalized.Mode)
+			cur.VisibilityPreviousMode = string(normalized.PreviousRestrictiveMode)
+			cur.VisibilityExpiresAt = normalized.TemporaryExpiresAt
+			_ = settingsStore.Save(cur)
+		}
+	}
+	visMgr.SetHooks(
+		func(st devices.VisibilityState) {
+			if a.discovery != nil {
+				a.discovery.NotifyEndpointChanged()
+			}
+			a.startupMu.Lock()
+			ctx := a.ctx
+			a.startupMu.Unlock()
+			if ctx != nil && ctx.Value("frontend") != nil {
+				runtime.EventsEmit(ctx, "visibility:changed", st)
+			}
+		},
+		func(st devices.VisibilityState) error {
+			if a.settingsStore == nil {
+				return nil
+			}
+			cur := a.settingsStore.Get()
+			cur.VisibilityMode = string(st.Mode)
+			cur.VisibilityPreviousMode = string(st.PreviousRestrictiveMode)
+			cur.VisibilityExpiresAt = st.TemporaryExpiresAt
+			return a.settingsStore.Save(cur)
+		},
+	)
 	a.netMonitor = netenv.NewMonitor(appSourceProxy{app: a},
 		netenv.WithPreferredInterface(func() string {
 			if a.settingsStore != nil {
@@ -398,6 +472,25 @@ func NewApp() (*App, error) {
 	)
 	a.netMonitor.OnChange(func(state netenv.NetworkState) {
 		a.handleNetworkChange(state)
+	})
+	a.peerMgr = newPeerTransferManager(a, dataDir)
+	a.discovery = discovery.NewService(discovery.Config{
+		HostIdentity: a.hostIdentity,
+		TrustedDevices: func() []devices.Device {
+			return a.ListTrustedDevices()
+		},
+		VisibilityMode: func() devices.VisibilityMode {
+			return a.GetVisibilityState().Mode
+		},
+		LocalEndpoint: a.discoveryLocalEndpoint,
+		OnPeersChanged: func(peers []discovery.Peer) {
+			a.startupMu.Lock()
+			ctx := a.ctx
+			a.startupMu.Unlock()
+			if ctx != nil && ctx.Value("frontend") != nil {
+				runtime.EventsEmit(ctx, "discovery:peers", peers)
+			}
+		},
 	})
 	a.sessions = session.NewManager(session.Config{OnExpire: a.releaseSession, OnEnd: a.logSessionEnd})
 	return a, nil
@@ -424,6 +517,19 @@ func (a *App) releaseSession(key string) {
 	for _, source := range a.registry.ListSourceSession(key) {
 		a.registry.RemoveSource(source.ID)
 	}
+	if a.shortCodes != nil {
+		for _, childKey := range a.shortCodes.RevokeForSession(key) {
+			for _, cs := range a.sessions.ActiveSessions() {
+				if cs.Key() == childKey {
+					a.transfers.CancelSession(childKey)
+					_ = a.coordinator.CloseSession(childKey)
+					a.discardEmptyRoots(childKey)
+					a.downloads.CancelSession(childKey)
+					a.sessions.RevokeSession(cs)
+				}
+			}
+		}
+	}
 	a.textStore.Clear(key)
 }
 
@@ -442,6 +548,26 @@ func (a *App) startup(ctx context.Context) {
 
 	if a.netMonitor != nil {
 		a.netMonitor.Start(bgCtx)
+	}
+	if a.discovery != nil {
+		a.discovery.Start(bgCtx)
+	}
+
+	if a.visibility != nil {
+		a.bgWg.Add(1)
+		go func() {
+			defer a.bgWg.Done()
+			ticker := time.NewTicker(1 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-bgCtx.Done():
+					return
+				case <-ticker.C:
+					a.visibility.Evaluate()
+				}
+			}
+		}()
 	}
 
 	if len(initial) > 0 {
@@ -612,6 +738,9 @@ func (a *App) shutdown(ctx context.Context) {
 		if a.netMonitor != nil {
 			a.netMonitor.Stop()
 		}
+		if a.discovery != nil {
+			a.discovery.Stop()
+		}
 
 		for _, s := range a.sessions.ActiveSessions() {
 			a.transfers.CancelSession(s.Key())
@@ -699,6 +828,7 @@ func (a *App) startServerLocked(listen string) error {
 		RecoveryDir: a.recoveryDir,
 		Services: &server.Services{
 			Sessions:       a.sessions,
+			ShortCodes:     a.shortCodes,
 			Transfers:      a.transfers,
 			Coordinator:    a.coordinator,
 			Registry:       a.registry,
@@ -709,6 +839,7 @@ func (a *App) startServerLocked(listen string) error {
 			Devices:        a.devicesStore,
 			HostIdentity:   a.hostIdentity,
 			Pairing:        a.pairing,
+			Visibility:     a.visibility,
 			Inhibitor:      a.inhibitor,
 			OnPhoneContact: a.recordPhoneContact,
 			Diagnose:       a.logTransferDiagnostics,
@@ -819,6 +950,9 @@ func (a *App) StartSession(ip string) (SessionView, error) {
 			a.stopServer()
 		}
 		return SessionView{}, err
+	}
+	if a.shortCodes != nil {
+		_, _ = a.shortCodes.GetOrCreate(s.Key())
 	}
 	out := sessionView(s, s.Token())
 	out.InterfaceName = view.Name
@@ -971,9 +1105,54 @@ func (a *App) handleNetworkChange(state netenv.NetworkState) {
 	a.startupMu.Lock()
 	ctx := a.ctx
 	a.startupMu.Unlock()
+	if a.discovery != nil {
+		a.discovery.NotifyEndpointChanged()
+	}
 	if ctx != nil && ctx.Value("frontend") != nil {
 		runtime.EventsEmit(ctx, "network:changed", state)
 	}
+}
+
+func (a *App) discoveryLocalEndpoint() discovery.LocalEndpoint {
+	hostname, _ := os.Hostname()
+	if strings.TrimSpace(hostname) == "" {
+		hostname = "Flitnix Desktop"
+	}
+	port := server.DefaultPort
+	if addr := a.ServerAddress(); addr != "" {
+		if _, pStr, err := net.SplitHostPort(addr); err == nil {
+			if p, pErr := fmt.Sscanf(pStr, "%d", &port); pErr != nil || p != 1 || port <= 0 {
+				port = server.DefaultPort
+			}
+		}
+	}
+	st := a.GetNetworkState()
+	return discovery.LocalEndpoint{
+		DeviceName:    devices.SanitizeDeviceName(hostname),
+		OS:            stdlibRuntime.GOOS,
+		Version:       version.Get().Version,
+		Port:          port,
+		InterfaceName: st.InterfaceName,
+		InterfaceType: st.Type,
+		LocalIP:       st.IP,
+	}
+}
+
+// ListNearbyPeers returns currently visible desktop peers on the local network.
+func (a *App) ListNearbyPeers() []discovery.Peer {
+	if a.discovery == nil {
+		return []discovery.Peer{}
+	}
+	return a.discovery.Peers()
+}
+
+// TriggerNearbyScan initiates an immediate LAN peer scan and returns the current list.
+func (a *App) TriggerNearbyScan() []discovery.Peer {
+	if a.discovery == nil {
+		return []discovery.Peer{}
+	}
+	a.discovery.TriggerScan()
+	return a.discovery.Peers()
 }
 
 // GetNetworkState returns the verified operational network state snapshot.
@@ -1081,6 +1260,19 @@ func (a *App) EndSession(key string) error {
 		a.registry.RemoveSource(source.ID)
 	}
 	a.sessions.RevokeSession(target)
+	if a.shortCodes != nil {
+		for _, childKey := range a.shortCodes.RevokeForSession(key) {
+			for _, cs := range a.sessions.ActiveSessions() {
+				if cs.Key() == childKey {
+					a.transfers.CancelSession(childKey)
+					_ = a.coordinator.CloseSession(childKey)
+					a.discardEmptyRoots(childKey)
+					a.downloads.CancelSession(childKey)
+					a.sessions.RevokeSession(cs)
+				}
+			}
+		}
+	}
 	if a.sessions.Len() == 0 {
 		a.registry.Clear()
 		if !a.isGuestRoomActive() {
@@ -1088,6 +1280,29 @@ func (a *App) EndSession(key string) error {
 		}
 	}
 	return nil
+}
+
+// GetSessionShortCode returns the current single-use 6-digit connection code for sessionKey.
+func (a *App) GetSessionShortCode(sessionKey string) session.ShortCodeView {
+	if a.shortCodes == nil || sessionKey == "" {
+		return session.ShortCodeView{SessionKey: sessionKey}
+	}
+	cur := a.shortCodes.Current(sessionKey)
+	if cur.Code == "" && !cur.Used && !cur.Expired {
+		created, err := a.shortCodes.GetOrCreate(sessionKey)
+		if err == nil {
+			return created
+		}
+	}
+	return cur
+}
+
+// RegenerateSessionShortCode invalidates any prior short code for sessionKey and issues a fresh 6-digit code.
+func (a *App) RegenerateSessionShortCode(sessionKey string) (session.ShortCodeView, error) {
+	if a.shortCodes == nil {
+		return session.ShortCodeView{}, errors.New("flitnix: connection codes unavailable")
+	}
+	return a.shortCodes.Regenerate(sessionKey)
 }
 
 // ListSessions returns the active sessions. The raw token is never part of
@@ -1126,7 +1341,11 @@ func (a *App) RecentUploads() []UploadView {
 			own = append(own, u)
 		}
 	}
-	return uploadViews(own)
+	out := make([]UploadView, 0, len(own))
+	for _, u := range own {
+		out = append(out, a.uploadViewWithStorage(u))
+	}
+	return out
 }
 
 func (a *App) RecentDownloads() []DownloadView {
@@ -1520,7 +1739,7 @@ func (a *App) listBatches(filter func(transfer.BatchView) bool) []BatchView {
 			}
 			seen[item.ID] = struct{}{}
 			if filter(item) {
-				out = append(out, batchView(item))
+				out = append(out, a.enrichPendingBatchStorage(batchView(item)))
 			}
 		}
 	}
@@ -1681,15 +1900,24 @@ func (a *App) GetSettings() SettingsView {
 		}
 	}
 	s := a.settingsStore.Get()
+	vis := a.GetVisibilityState()
+	expStr := ""
+	if !vis.TemporaryExpiresAt.IsZero() {
+		expStr = vis.TemporaryExpiresAt.UTC().Format(time.RFC3339Nano)
+	}
 	return SettingsView{
-		Version:            s.Version,
-		Theme:              s.Theme,
-		Locale:             s.Locale,
-		DownloadDir:        s.DownloadDir,
-		EffectiveDir:       a.store.Dir(),
-		AutoStartSession:   s.AutoStartSession,
-		PreserveModTimes:   s.PreserveModTimes,
-		PreferredInterface: s.PreferredInterface,
+		Version:                s.Version,
+		Theme:                  s.Theme,
+		Locale:                 s.Locale,
+		DownloadDir:            s.DownloadDir,
+		EffectiveDir:           a.store.Dir(),
+		AutoStartSession:       s.AutoStartSession,
+		PreserveModTimes:       s.PreserveModTimes,
+		PreferredInterface:     s.PreferredInterface,
+		VisibilityMode:         string(vis.Mode),
+		VisibilityPreviousMode: string(vis.PreviousRestrictiveMode),
+		VisibilityExpiresAt:    expStr,
+		QRSharingPaused:        vis.QRSharingPaused,
 	}
 }
 
@@ -1748,14 +1976,18 @@ func (a *App) SaveSettings(view SettingsView) error {
 			return errors.New("flitnix: cannot change receive directory while transfers are active")
 		}
 	}
+	current := a.settingsStore.Get()
 	s := settings.Settings{
-		Version:            view.Version,
-		Theme:              view.Theme,
-		Locale:             view.Locale,
-		DownloadDir:        view.DownloadDir,
-		AutoStartSession:   view.AutoStartSession,
-		PreserveModTimes:   view.PreserveModTimes,
-		PreferredInterface: view.PreferredInterface,
+		Version:                view.Version,
+		Theme:                  view.Theme,
+		Locale:                 view.Locale,
+		DownloadDir:            view.DownloadDir,
+		AutoStartSession:       view.AutoStartSession,
+		PreserveModTimes:       view.PreserveModTimes,
+		PreferredInterface:     view.PreferredInterface,
+		VisibilityMode:         current.VisibilityMode,
+		VisibilityPreviousMode: current.VisibilityPreviousMode,
+		VisibilityExpiresAt:    current.VisibilityExpiresAt,
 	}
 	if err := a.settingsStore.Save(s); err != nil {
 		return err
@@ -1850,6 +2082,12 @@ func sessionView(s *session.Session, token string) SessionView {
 func (a *App) uploadViewWithStorage(u transfer.Upload) UploadView {
 	v := uploadView(u)
 	v.StorageFits = true
+	if u.DeviceID != "" && a.devicesStore != nil {
+		if dev, ok := a.devicesStore.Get(u.DeviceID); ok {
+			v.TrustedDevice = true
+			v.DeviceName = dev.Name
+		}
+	}
 	if u.State == transfer.StatePending && a.transfers != nil {
 		fits, st := a.transfers.CheckStorageFit([]string{u.ID}, u.Size)
 		v.StorageFits = fits
@@ -1862,21 +2100,39 @@ func (a *App) uploadViewWithStorage(u transfer.Upload) UploadView {
 
 func (a *App) enrichPendingBatchStorage(v BatchView) BatchView {
 	v.StorageFits = true
-	if v.ApprovalState == string(transfer.ApprovalPending) && a.transfers != nil {
+	if a.transfers != nil {
 		var ids []string
 		if key, err := a.findBatchSession(v.ID); err == nil {
 			for _, item := range v.Items {
-				if item.State == string(transfer.ItemStatePending) {
-					if cid, cidErr := a.coordinator.ItemContentID(key, v.ID, item.ID); cidErr == nil && cid != "" {
+				if cid, cidErr := a.coordinator.ItemContentID(key, v.ID, item.ID); cidErr == nil && cid != "" {
+					if v.DeviceID == "" {
+						if u, ok := a.transfers.Get(cid); ok {
+							if u.DeviceID != "" {
+								v.DeviceID = u.DeviceID
+								if a.devicesStore != nil {
+									if dev, devOK := a.devicesStore.Get(u.DeviceID); devOK {
+										v.TrustedDevice = true
+										v.DeviceName = dev.Name
+									}
+								}
+							}
+							if v.ApprovalReason == "" && u.ApprovalReason != "" {
+								v.ApprovalReason = u.ApprovalReason
+							}
+						}
+					}
+					if v.ApprovalState == string(transfer.ApprovalPending) && item.State == string(transfer.ItemStatePending) {
 						ids = append(ids, cid)
 					}
 				}
 			}
 		}
-		fits, st := a.transfers.CheckStorageFit(ids, v.DeclaredTotalBytes)
-		v.StorageFits = fits
-		if !fits {
-			v.StorageWarning = fmt.Sprintf("Exceeds available disk headroom (%d bytes available)", st.HeadroomBytes)
+		if v.ApprovalState == string(transfer.ApprovalPending) {
+			fits, st := a.transfers.CheckStorageFit(ids, v.DeclaredTotalBytes)
+			v.StorageFits = fits
+			if !fits {
+				v.StorageWarning = fmt.Sprintf("Exceeds available disk headroom (%d bytes available)", st.HeadroomBytes)
+			}
 		}
 	}
 	return v
@@ -1896,6 +2152,8 @@ func uploadView(u transfer.Upload) UploadView {
 		Resumable:       u.Resumable,
 		CommittedOffset: u.CommittedOffset,
 		StorageFits:     true,
+		DeviceID:        u.DeviceID,
+		ApprovalReason:  u.ApprovalReason,
 	}
 }
 
@@ -2667,7 +2925,21 @@ func (a *App) RemoveTrustedDevice(id string) error {
 	if a.devicesStore == nil {
 		return nil
 	}
-	return a.devicesStore.Remove(id)
+	if err := a.devicesStore.Remove(id); err != nil {
+		return err
+	}
+	if a.sessions != nil {
+		for _, key := range a.sessions.RevokeByDeviceID(id) {
+			a.releaseSession(key)
+		}
+		if a.sessions.Len() == 0 {
+			a.registry.Clear()
+			if !a.isGuestRoomActive() {
+				a.stopServer()
+			}
+		}
+	}
+	return nil
 }
 
 func (a *App) SetDeviceAutoApprove(id string, autoApprove bool) error {
@@ -2675,6 +2947,46 @@ func (a *App) SetDeviceAutoApprove(id string, autoApprove bool) error {
 		return nil
 	}
 	return a.devicesStore.SetAutoApprove(id, autoApprove)
+}
+
+func (a *App) SetDevicePolicy(id string, policy devices.DevicePolicy) error {
+	if a.devicesStore == nil {
+		return nil
+	}
+	return a.devicesStore.SetDevicePolicy(id, policy)
+}
+
+func (a *App) GetVisibilityState() devices.VisibilityState {
+	if a.visibility == nil {
+		return devices.VisibilityState{
+			Mode:                    devices.VisibilityTrustedOnly,
+			PreviousRestrictiveMode: devices.VisibilityTrustedOnly,
+		}
+	}
+	return a.visibility.Evaluate()
+}
+
+func (a *App) SetVisibilityMode(mode string) (devices.VisibilityState, error) {
+	if a.visibility == nil {
+		return devices.VisibilityState{}, errors.New("flitnix: visibility manager unavailable")
+	}
+	return a.visibility.SetMode(devices.VisibilityMode(mode), devices.DefaultTemporaryVisibilityDuration)
+}
+
+func (a *App) SetQRSharingPaused(paused bool) (devices.VisibilityState, error) {
+	if a.visibility == nil {
+		return devices.VisibilityState{}, errors.New("flitnix: visibility manager unavailable")
+	}
+	return a.visibility.SetQRSharingPaused(paused)
+}
+
+func (a *App) RevokeAllSessions() error {
+	for _, s := range a.sessions.ActiveSessions() {
+		if err := a.EndSession(s.Key()); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (a *App) ApprovePairing(requestID string) error {

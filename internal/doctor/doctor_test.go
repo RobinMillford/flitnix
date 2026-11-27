@@ -51,10 +51,16 @@ func TestRunDiagnostics7ChecksHealthyPass(t *testing.T) {
 		ServerRunning: false,
 		ActiveIP:      "192.168.1.100",
 		ActiveIface:   "wlo1",
+		GOOS:          "linux",
+		CommandRunner: &mockRunner{
+			responses: map[string]mockCmdResult{
+				"ufw status": {stdout: "Status: inactive\n"},
+			},
+		},
 	})
 
-	if len(report.Items) != 7 {
-		t.Fatalf("expected 7 diagnostic items, got %d", len(report.Items))
+	if len(report.Items) != 8 {
+		t.Fatalf("expected 8 diagnostic items, got %d", len(report.Items))
 	}
 
 	expectedIDs := []string{
@@ -65,6 +71,7 @@ func TestRunDiagnostics7ChecksHealthyPass(t *testing.T) {
 		"connection_medium",
 		"host_reachability",
 		"multihomed_routing",
+		"firewall_status",
 	}
 	for i, expectedID := range expectedIDs {
 		if report.Items[i].ID != expectedID {
@@ -101,10 +108,12 @@ func TestRunDiagnosticsMultiHomedWarning(t *testing.T) {
 		ServerRunning: false,
 		ActiveIP:      "192.168.1.100",
 		ActiveIface:   "wlo1",
+		GOOS:          "linux",
+		CommandRunner: &mockRunner{responses: map[string]mockCmdResult{"ufw status": {stdout: "Status: inactive\n"}}},
 	})
 
-	if len(report.Items) != 7 {
-		t.Fatalf("expected 7 diagnostic items, got %d", len(report.Items))
+	if len(report.Items) != 8 {
+		t.Fatalf("expected 8 diagnostic items, got %d", len(report.Items))
 	}
 
 	if report.OverallStatus != StatusWarn {
@@ -135,14 +144,16 @@ func TestRunDiagnosticsFailWhenNoAdapter(t *testing.T) {
 	report := RunDiagnostics(Params{
 		NetSource:     prov,
 		ServerRunning: false,
+		GOOS:          "linux",
+		CommandRunner: &mockRunner{responses: map[string]mockCmdResult{"ufw status": {stdout: "Status: inactive\n"}}},
 	})
 
 	if report.OverallStatus != StatusFail {
 		t.Fatalf("expected StatusFail when no network adapter exists, got %s", report.OverallStatus)
 	}
 
-	if len(report.Items) != 7 {
-		t.Fatalf("expected 7 diagnostic items, got %d", len(report.Items))
+	if len(report.Items) != 8 {
+		t.Fatalf("expected 8 diagnostic items, got %d", len(report.Items))
 	}
 }
 
@@ -238,10 +249,12 @@ func TestRunDiagnosticsIPv6HealthyPass(t *testing.T) {
 		ServerAddr:    "[2001:db8::10]:43821",
 		ActiveIP:      "2001:db8::10",
 		ActiveIface:   "wlo1",
+		GOOS:          "linux",
+		CommandRunner: &mockRunner{responses: map[string]mockCmdResult{"ufw status": {stdout: "Status: inactive\n"}}},
 	})
 
-	if len(report.Items) != 7 {
-		t.Fatalf("expected 7 diagnostic items, got %d", len(report.Items))
+	if len(report.Items) != 8 {
+		t.Fatalf("expected 8 diagnostic items, got %d", len(report.Items))
 	}
 
 	for _, it := range report.Items {

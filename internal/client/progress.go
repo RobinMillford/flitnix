@@ -54,11 +54,14 @@ func FormatETA(seconds float64) string {
 // HashingReader wraps an io.Reader, computes SHA-256 inline while reading,
 // and invokes a progress callback on each chunk read.
 type HashingReader struct {
-	reader     io.Reader
-	hasher     hash.Hash
-	total      int64
-	written    int64
-	onProgress func(written, total int64)
+	reader        io.Reader
+	hasher        hash.Hash
+	total         int64
+	written       int64
+	lastEmitBytes int64
+	lastEmitAt    time.Time
+	calls         uint32
+	onProgress    func(written, total int64)
 }
 
 // NewHashingReader creates a HashingReader.
@@ -68,15 +71,23 @@ func NewHashingReader(r io.Reader, total int64, onProgress func(written, total i
 		reader:     io.TeeReader(r, h),
 		hasher:     h,
 		total:      total,
+		lastEmitAt: time.Now(),
 		onProgress: onProgress,
 	}
 }
 
 func (hr *HashingReader) Read(p []byte) (int, error) {
 	n, err := hr.reader.Read(p)
-	if n > 0 {
+	if n > 0 && hr.onProgress != nil {
 		hr.written += int64(n)
-		if hr.onProgress != nil {
+		hr.calls++
+		emit := (hr.total > 0 && hr.written >= hr.total) || hr.written-hr.lastEmitBytes >= 256*1024
+		if !emit && (hr.calls&7) == 0 && time.Since(hr.lastEmitAt) >= 100*time.Millisecond {
+			emit = true
+		}
+		if emit {
+			hr.lastEmitBytes = hr.written
+			hr.lastEmitAt = time.Now()
 			hr.onProgress(hr.written, hr.total)
 		}
 	}

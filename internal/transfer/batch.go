@@ -311,6 +311,16 @@ func (b TransferBatch) View() BatchView {
 	for _, item := range b.Items {
 		items = append(items, item.View())
 	}
+	return b.summaryView(items)
+}
+
+// CompactView builds a BatchView without cloning or serializing every ItemView,
+// avoiding O(N^2) allocations when acknowledging individual items in large batches.
+func (b TransferBatch) CompactView() BatchView {
+	return b.summaryView(nil)
+}
+
+func (b TransferBatch) summaryView(items []ItemView) BatchView {
 	return BatchView{
 		ID: b.ID, Direction: b.Direction, Kind: b.Kind, RootName: b.RootName,
 		Items: items, TotalItemCount: b.TotalItemCount,

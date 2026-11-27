@@ -17,7 +17,7 @@
 "use strict";
 
 var active = Object.create(null);
-var DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024;
+var DEFAULT_CHUNK_SIZE = 16 * 1024 * 1024;
 
 function parseRetryAfterMs(value, now) {
   // Mirrors the Go client's ParseRetryAfter: delta seconds or an HTTP date;
@@ -232,6 +232,11 @@ function startResumableUpload(msg) {
         finishDone(200, xhr.responseText || "");
         return;
       }
+      if (xhr.status === 404 || xhr.status === 405) {
+        delete active[id];
+        startUpload(msg);
+        return;
+      }
       if (xhr.status === 409) {
         var parsed = null;
         try { parsed = JSON.parse(xhr.responseText || "{}"); } catch (e) {}
@@ -272,7 +277,11 @@ function startResumableUpload(msg) {
     }
   }
 
-  queryHead();
+  if (msg.skipInitialHead) {
+    sendNextChunk();
+  } else {
+    queryHead();
+  }
 }
 
 function abortUpload(id) {

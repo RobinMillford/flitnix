@@ -148,6 +148,7 @@ type Config struct {
 // receive Store inside the transfer Service) and handed to Config.
 type Services struct {
 	Sessions       *session.Manager
+	ShortCodes     *session.ShortCodeManager
 	Transfers      *transfer.Service
 	Coordinator    *transfer.Coordinator
 	Registry       *transfer.Registry
@@ -158,6 +159,7 @@ type Services struct {
 	Devices        *devices.Store
 	HostIdentity   *devices.HostIdentity
 	Pairing        *devices.PairingCoordinator
+	Visibility     *devices.VisibilityManager
 	Inhibitor      power.Inhibitor
 	OnPhoneContact func(source string)
 
@@ -320,6 +322,11 @@ func (s *Server) bind() (net.Listener, error) {
 		ln, bindErr = net.Listen("tcp", s.cfg.ListenAddr)
 		if bindErr != nil {
 			return
+		}
+		if s.cfg.Services != nil && s.cfg.Services.HostIdentity != nil {
+			if cert, certErr := NewHostIdentityCertificate(s.cfg.Services.HostIdentity); certErr == nil {
+				ln = newTLSPeekListener(ln, cert)
+			}
 		}
 		s.mu.Lock()
 		s.listener = ln

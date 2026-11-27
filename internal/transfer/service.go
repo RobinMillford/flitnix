@@ -209,6 +209,7 @@ type Upload struct {
 	CommittedOffset int64  // last durably fsynced offset on disk
 	ExpectedSHA256  string // Expected SHA-256 digest from signed manifest
 	DeviceID        string // Enrolled device ID if transfer was authenticated
+	ApprovalReason  string // Explanation when conditional auto-approval required manual review
 }
 
 // ContentResult describes a successfully received upload body.
@@ -250,6 +251,7 @@ type upload struct {
 
 	expectedSHA256 string
 	deviceID       string
+	approvalReason string
 
 	mu        sync.Mutex
 	state     State
@@ -320,6 +322,7 @@ func (u *upload) snapshotLocked() Upload {
 		CommittedOffset: u.committedOffset,
 		ExpectedSHA256:  u.expectedSHA256,
 		DeviceID:        u.deviceID,
+		ApprovalReason:  u.approvalReason,
 	}
 }
 
@@ -423,6 +426,18 @@ func (s *Service) SetUploadModTime(id string, modTimeMs int64) error {
 	}
 	u.mu.Lock()
 	u.lastModifiedMs = modTimeMs
+	u.mu.Unlock()
+	return nil
+}
+
+// SetApprovalReason records why an upload requires manual approval.
+func (s *Service) SetApprovalReason(id, reason string) error {
+	u, err := s.lookup(id, "")
+	if err != nil {
+		return err
+	}
+	u.mu.Lock()
+	u.approvalReason = reason
 	u.mu.Unlock()
 	return nil
 }
@@ -750,11 +765,16 @@ func (s *Service) SubmitContentWithPublish(id, sessionKey string, body io.Reader
 		}
 		u.mu.Lock()
 		now := time.Now()
-		if elapsed := now.Sub(u.lastAt).Seconds(); elapsed > 0 {
-			u.speed = float64(written-u.lastBytes) / elapsed
+		if elapsed := now.Sub(u.lastAt).Seconds(); (elapsed >= 0.05 || (u.speed <= 0 && elapsed > 0)) && written > u.lastBytes {
+			inst := float64(written-u.lastBytes) / elapsed
+			if u.speed <= 0 {
+				u.speed = inst
+			} else {
+				u.speed = 0.7*u.speed + 0.3*inst
+			}
+			u.lastAt = now
+			u.lastBytes = written
 		}
-		u.lastAt = now
-		u.lastBytes = written
 		u.mu.Unlock()
 		if onProgress != nil {
 			onProgress(u.snapshot())

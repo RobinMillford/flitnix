@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="color-scheme" content="dark">
+<meta name="color-scheme" content="dark light">
 <meta name="theme-color" content="#07111f">
 <meta name="description" content="Flitnix phone transfer page: send files to the desktop and download shared files over the local network.">
 <title>Flitnix</title>
@@ -44,6 +44,31 @@
   <section class="card card--warn" id="rescan" hidden>
     <h2>Scan the QR code</h2>
     <p id="rescan-text">Open this page by scanning the QR code shown on the Flitnix desktop. Each link works for one session only.</p>
+    <div id="reconnect-panel" class="reconnect-panel" hidden>
+      <p id="reconnect-label" class="reconnect-label"></p>
+      <div class="code-row">
+        <button type="button" class="btn" id="reconnect-btn">One-Tap Reconnect</button>
+        <button type="button" class="btn btn--ghost btn--small" id="reconnect-forget-btn">Forget</button>
+      </div>
+      <p class="code-error" id="reconnect-error" hidden role="alert"></p>
+    </div>
+    <form id="connect-code-form" class="code-form" autocomplete="off">
+      <label for="connect-code-input" class="code-label">Or enter the 6-digit code shown on Flitnix:</label>
+      <div class="code-row">
+        <input id="connect-code-input" class="code-input" type="text" inputmode="numeric" pattern="[0-9\s\-]*" maxlength="7" placeholder="482 915" autocomplete="one-time-code" aria-label="6-digit connection code">
+        <button type="submit" class="btn" id="connect-code-btn">Connect</button>
+      </div>
+      <p class="code-error" id="connect-code-error" hidden role="alert"></p>
+      <p class="muted code-hint">Look under the QR code in Flitnix on your computer. Codes expire quickly and work once.</p>
+    </form>
+    <details class="helper-tips">
+      <summary>Having trouble connecting?</summary>
+      <ul>
+        <li>Confirm your phone and desktop are on the same local Wi-Fi (guest/client-isolated networks block device-to-device traffic).</li>
+        <li>Pause active VPN clients on either device if local LAN traffic is routed away.</li>
+        <li>If pages fail to load, open Connection Doctor on desktop to verify TCP port 43821 in your host firewall.</li>
+      </ul>
+    </details>
   </section>
 
   <section class="flow" id="flow" hidden>
@@ -59,7 +84,7 @@
       <div class="awareness-card__control" id="wake-lock-container"></div>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="send-panel">
       <div class="panel__head">
         <h2>Send to desktop</h2>
         <div class="panel__actions">
@@ -67,7 +92,7 @@
           <button type="button" class="btn btn--ghost" id="pick-folder-btn" hidden>Pick folder</button>
         </div>
       </div>
-      <p class="muted">Each file starts only after you approve it on the desktop. Transfers run one at a time.</p>
+      <p class="muted">Select photos, videos, documents, or folders in original quality. Each transfer starts after desktop approval.</p>
       <input id="file-input" type="file" multiple hidden>
       <input id="folder-input" type="file" webkitdirectory directory multiple hidden>
       <ul class="queue" id="queue" aria-live="polite"></ul>
@@ -103,6 +128,33 @@
       <div class="download-integrity" id="download-integrity" hidden aria-live="polite"></div>
     </section>
 
+    <section class="panel" id="trust-panel">
+      <div class="panel__head">
+        <h2>Trusted Browser Pairing</h2>
+        <span class="badge badge--waiting" id="trust-badge">Not paired</span>
+      </div>
+      <p class="muted" id="trust-desc">Pair this phone browser once using Ed25519 verification so you can reconnect with one tap later without scanning a new QR code.</p>
+      <div id="pair-controls" class="pair-controls">
+        <div class="code-row">
+          <input id="pair-device-name" class="text-input" type="text" maxlength="64" placeholder="Device name (e.g. My Phone)" aria-label="Device name">
+          <button type="button" class="btn btn--small" id="pair-start-btn">Pair This Browser</button>
+        </div>
+      </div>
+      <div id="pair-sas-box" class="sas-box" hidden aria-live="polite">
+        <p class="sas-label">Verify this code matches the prompt on your Flitnix desktop, then click Approve on desktop:</p>
+        <div class="sas-digits" id="pair-sas-code">---</div>
+        <p class="muted" id="pair-status-text">Waiting for desktop confirmation…</p>
+      </div>
+      <div id="paired-info-box" class="paired-info-box" hidden>
+        <p class="paired-meta" id="paired-meta-text"></p>
+        <div class="panel__actions">
+          <button type="button" class="btn btn--small" id="copy-reconnect-btn">Copy One-Tap Bookmark URL</button>
+          <button type="button" class="btn btn--ghost btn--small" id="unpair-local-btn">Unpair Browser</button>
+        </div>
+      </div>
+      <p class="code-error" id="pair-error" hidden role="alert"></p>
+    </section>
+
     <p class="footnote">Transfers run over plain HTTP inside your own hotspot network — connect only devices you trust.</p>
   </section>
 
@@ -112,6 +164,8 @@
 
 </main>
 <script src="/static/sha256.min.js"></script>
+<script src="/static/nacl-fast.min.js"></script>
+<script src="/static/device-crypto.js"></script>
 <script src="/static/upload-client.js"></script>
 <script src="/static/app.js"></script>
 </body>

@@ -46,10 +46,6 @@ var _ contentSink = (*PartFile)(nil)
 // UI a smooth progress indicator even for multi-gigabyte files.
 const progressStep = 1024 * 1024
 
-// streamCopySize is the fixed buffer used for streaming. Bounded memory is a
-// deliberate property: a multi-gigabyte upload must never inflate RAM.
-const streamCopySize = 64 * 1024
-
 // StreamResult describes a fully received upload body. The checksum covers
 // exactly the bytes written to the sink.
 type StreamResult struct {
@@ -82,7 +78,11 @@ func streamBodyWithSpaceCheck(r io.Reader, sink contentSink, declared int64, onP
 	}
 
 	hasher := sha256.New()
-	buf := make([]byte, streamCopySize)
+	bp := GetCopyBuffer()
+	defer PutCopyBuffer(bp)
+	buf := *bp
+	bw := GetBufioWriter(sink)
+	defer PutBufioWriter(bw)
 	var res StreamResult
 	lastReported := int64(-1)
 	lastSpaceCheck := int64(-diskCheckInterval)
@@ -94,6 +94,7 @@ func streamBodyWithSpaceCheck(r io.Reader, sink contentSink, declared int64, onP
 				// More data than approved: reject the whole transfer.
 				// Writing the excess would publish a file the user
 				// never saw a size for.
+				_ = bw.Flush()
 				return res, fmt.Errorf("%w: approved %d, got %d+%d", ErrSizeExceeded, declared, res.Written, n)
 			}
 			if onSpaceCheck != nil && (res.Written == 0 || res.Written-lastSpaceCheck >= diskCheckInterval) {
@@ -102,7 +103,7 @@ func streamBodyWithSpaceCheck(r io.Reader, sink contentSink, declared int64, onP
 				}
 				lastSpaceCheck = res.Written
 			}
-			wn, werr := sink.Write(buf[:n])
+			wn, werr := bw.Write(buf[:n])
 			if werr == nil && wn < n {
 				werr = io.ErrShortWrite
 			}
@@ -123,11 +124,18 @@ func streamBodyWithSpaceCheck(r io.Reader, sink contentSink, declared int64, onP
 			if errors.Is(rerr, io.EOF) && res.Written == declared {
 				break
 			}
+			_ = bw.Flush()
 			if errors.Is(rerr, io.EOF) || errors.Is(rerr, io.ErrUnexpectedEOF) {
 				return res, fmt.Errorf("%w: received %d of %d approved bytes", ErrTruncated, res.Written, declared)
 			}
 			return res, fmt.Errorf("transfer: reading upload body: %w", rerr)
 		}
+	}
+	if ferr := bw.Flush(); ferr != nil {
+		if IsNoSpaceError(ferr) {
+			return res, fmt.Errorf("%w: %v", ErrInsufficientStorage, ferr)
+		}
+		return res, fmt.Errorf("transfer: writing received data: %w", ferr)
 	}
 	if onProgress != nil && lastReported != res.Written {
 		onProgress(res.Written)

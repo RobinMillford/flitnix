@@ -33,10 +33,7 @@ func (m *mockAppNetSource) MetadataFor(iface net.Interface) netenv.Metadata {
 }
 
 func TestAppGuestDropBoxWorkflow(t *testing.T) {
-	app, err := NewApp()
-	if err != nil {
-		t.Fatalf("NewApp: %v", err)
-	}
+	app := newIsolatedApp(t)
 	defer app.shutdown(t.Context())
 
 	// Configure mock network source
@@ -127,10 +124,7 @@ func TestAppGuestDropBoxWorkflow(t *testing.T) {
 }
 
 func TestAppConnectionDoctor(t *testing.T) {
-	app, err := NewApp()
-	if err != nil {
-		t.Fatalf("NewApp: %v", err)
-	}
+	app := newIsolatedApp(t)
 	defer app.shutdown(t.Context())
 
 	report := app.RunConnectionDiagnostics()
@@ -143,10 +137,7 @@ func TestAppConnectionDoctor(t *testing.T) {
 }
 
 func TestAppQuickTextTransfer(t *testing.T) {
-	app, err := NewApp()
-	if err != nil {
-		t.Fatalf("NewApp: %v", err)
-	}
+	app := newIsolatedApp(t)
 	defer app.shutdown(t.Context())
 
 	// Need active session for text messages
@@ -189,10 +180,7 @@ func TestAppQuickTextTransfer(t *testing.T) {
 }
 
 func TestAppEventCollectionPlatform(t *testing.T) {
-	app, err := NewApp()
-	if err != nil {
-		t.Fatalf("NewApp: %v", err)
-	}
+	app := newIsolatedApp(t)
 	defer app.shutdown(t.Context())
 
 	iface := net.Interface{Index: 1, Name: "wlo1", Flags: net.FlagUp | net.FlagBroadcast}
@@ -348,10 +336,7 @@ func TestAppEventCollectionPlatform(t *testing.T) {
 }
 
 func TestAddDroppedSourcesValidation(t *testing.T) {
-	app, err := NewApp()
-	if err != nil {
-		t.Fatalf("NewApp: %v", err)
-	}
+	app := newIsolatedApp(t)
 	defer app.shutdown(t.Context())
 
 	tmpDir := t.TempDir()
@@ -387,10 +372,7 @@ func TestAddDroppedSourcesValidation(t *testing.T) {
 }
 
 func TestExportDuplicateNameDeduplication(t *testing.T) {
-	app, err := NewApp()
-	if err != nil {
-		t.Fatalf("NewApp: %v", err)
-	}
+	app := newIsolatedApp(t)
 	defer app.shutdown(t.Context())
 
 	tmpDir := t.TempDir()
@@ -401,7 +383,7 @@ func TestExportDuplicateNameDeduplication(t *testing.T) {
 		t.Fatalf("ensureServer: %v", err)
 	}
 
-	_, err = app.StartGuestRoomWithConfig(GuestRoomConfigView{
+	_, err := app.StartGuestRoomWithConfig(GuestRoomConfigView{
 		Title:           "Duplicate Test Room",
 		DestinationDir:  roomFolder,
 		DurationMinutes: 30,
