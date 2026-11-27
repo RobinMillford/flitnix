@@ -30,9 +30,11 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/itsyamin/flitnix/internal/audit"
+	"github.com/itsyamin/flitnix/internal/autostart"
 	"github.com/itsyamin/flitnix/internal/devices"
 	"github.com/itsyamin/flitnix/internal/discovery"
 	"github.com/itsyamin/flitnix/internal/doctor"
@@ -46,6 +48,7 @@ import (
 	"github.com/itsyamin/flitnix/internal/settings"
 	"github.com/itsyamin/flitnix/internal/textmsg"
 	"github.com/itsyamin/flitnix/internal/transfer"
+	"github.com/itsyamin/flitnix/internal/tray"
 	"github.com/itsyamin/flitnix/internal/update"
 	"github.com/itsyamin/flitnix/internal/version"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -263,6 +266,10 @@ type SettingsView struct {
 	VisibilityPreviousMode string `json:"visibilityPreviousMode,omitempty"`
 	VisibilityExpiresAt    string `json:"visibilityExpiresAt,omitempty"`
 	QRSharingPaused        bool   `json:"qrSharingPaused,omitempty"`
+	MinimizeToTray         bool   `json:"minimizeToTray"`
+	LaunchOnLogin          bool   `json:"launchOnLogin"`
+	TraySupported          bool   `json:"traySupported,omitempty"`
+	AutostartSupported     bool   `json:"autostartSupported,omitempty"`
 }
 
 // App owns the Flitnix core instances and the desktop lifecycle.
@@ -274,6 +281,12 @@ type App struct {
 	dataDir       string
 	recoveryDir   string
 	settingsStore *settings.Store
+	autostart     *autostart.Manager
+	tray          *tray.Service
+	trayIcon      []byte
+	startHidden   bool
+	windowHidden  atomic.Bool
+	quitRequested atomic.Bool
 	sessions      *session.Manager
 	shortCodes    *session.ShortCodeManager
 	transfers     *transfer.Service
@@ -407,6 +420,7 @@ func NewApp() (*App, error) {
 		dataDir:       dataDir,
 		recoveryDir:   filepath.Join(dataDir, "recovery"),
 		settingsStore: settingsStore,
+		autostart:     autostart.NewManager(autostart.Config{Args: []string{"--background"}}),
 		shortCodes:    session.NewShortCodeManager(session.ShortCodeConfig{}),
 		transfers:     transfer.NewService(transfer.Config{Store: store, Quota: quota}),
 		coordinator:   transfer.NewCoordinator(transfer.CoordinatorConfig{}),
@@ -566,10 +580,14 @@ func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	initial := a.initialShares
 	a.startupDone = true
+	a.windowHidden.Store(a.startHidden)
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	a.bgCancel = bgCancel
 	a.startupMu.Unlock()
 
+	if ctx != nil && ctx.Value("frontend") != nil {
+		a.initTray()
+	}
 	ensureLinuxNautilusScript()
 
 	if a.netMonitor != nil {
@@ -670,7 +688,8 @@ fi
 // relative to the second instance's working directory, queues them into the share
 // registry, and restores/shows the application window.
 func (a *App) onSecondInstanceLaunch(data options.SecondInstanceData) {
-	normPaths := ExtractSharePaths(data.Args, data.WorkingDirectory, func(raw string, err error) {
+	cleanedArgs, _ := stripBackgroundFlag(data.Args)
+	normPaths := ExtractSharePaths(cleanedArgs, data.WorkingDirectory, func(raw string, err error) {
 		fmt.Fprintf(os.Stderr, "flitnix: second-instance invalid path %q: %v\n", raw, err)
 	})
 
@@ -722,6 +741,151 @@ func (a *App) bringToFront() {
 		runtime.WindowUnminimise(ctx)
 		runtime.WindowShow(ctx)
 	}
+}
+
+func (a *App) initTray() {
+	a.startupMu.Lock()
+	if a.tray != nil {
+		a.startupMu.Unlock()
+		return
+	}
+	t := tray.NewService(a.trayIcon, tray.Callbacks{
+		OnOpen:         func() { a.RestoreWindow() },
+		OnHide:         func() { a.HideWindow() },
+		OnToggleWindow: func() { a.ToggleWindow() },
+		OnQuit:         func() { a.QuitApp() },
+	})
+	a.tray = t
+	a.startupMu.Unlock()
+
+	t.Start(a.buildTrayState())
+}
+
+func (a *App) buildTrayState() tray.State {
+	vis := a.GetVisibilityState()
+	sessCount := 0
+	if a.sessions != nil {
+		sessCount = a.sessions.Len()
+	}
+	pendingCount := 0
+	if a.transfers != nil {
+		pendingCount += a.transfers.Counts().Pending
+	}
+	if a.guestMgr != nil {
+		if gr := a.guestMgr.ActiveRoom(); gr != nil {
+			for _, g := range gr.ListGuests() {
+				if g.State == guest.GuestPending {
+					pendingCount++
+				}
+			}
+			for _, u := range gr.ListUploads() {
+				if u.State == guest.UploadPendingApproval {
+					pendingCount++
+				}
+			}
+		}
+	}
+
+	visLabel := "Trusted Devices"
+	switch vis.Mode {
+	case devices.VisibilityHidden:
+		visLabel = "Hidden (Offline)"
+	case devices.VisibilityTemporaryEveryone:
+		visLabel = "Open (10 min)"
+	case devices.VisibilityEveryone:
+		visLabel = "Everyone on LAN"
+	}
+
+	status := "Flitnix Ready · " + visLabel
+	if pendingCount > 0 {
+		status = fmt.Sprintf("Flitnix · %d pending approval", pendingCount)
+	} else if sessCount > 0 {
+		status = fmt.Sprintf("Flitnix Active (%d session) · %s", sessCount, visLabel)
+	}
+
+	return tray.State{
+		Tooltip:          status,
+		StatusLabel:      status,
+		Attention:        pendingCount > 0,
+		WindowVisible:    !a.windowHidden.Load(),
+		VisibilityMode:   string(vis.Mode),
+		HasActiveSession: sessCount > 0,
+		PendingCount:     pendingCount,
+	}
+}
+
+func (a *App) updateTrayState() {
+	a.startupMu.Lock()
+	t := a.tray
+	a.startupMu.Unlock()
+	if t != nil && t.Supported() {
+		t.Update(a.buildTrayState())
+	}
+}
+
+func (a *App) shouldMinimizeToTray() bool {
+	if a.tray == nil || !a.tray.Supported() {
+		return false
+	}
+	if a.settingsStore != nil && !a.settingsStore.Get().MinimizeToTray {
+		return false
+	}
+	return true
+}
+
+// beforeClose hides the window to tray when close-to-tray is active and tray is
+// available, unless an explicit Quit was requested. Returning true prevents exit.
+func (a *App) beforeClose(ctx context.Context) bool {
+	if a.quitRequested.Load() {
+		return false
+	}
+	if a.shouldMinimizeToTray() {
+		a.HideWindow()
+		return true
+	}
+	return false
+}
+
+// RestoreWindow unminimizes, shows, and brings the main Flitnix window to focus.
+func (a *App) RestoreWindow() {
+	a.windowHidden.Store(false)
+	a.bringToFront()
+	a.updateTrayState()
+}
+
+// HideWindow hides the main window to the background tray while keeping the
+// HTTP server, discovery, and active transfers running.
+func (a *App) HideWindow() {
+	a.windowHidden.Store(true)
+	a.startupMu.Lock()
+	ctx := a.ctx
+	a.startupMu.Unlock()
+	if ctx != nil && ctx.Value("frontend") != nil {
+		runtime.WindowHide(ctx)
+	}
+	a.updateTrayState()
+}
+
+// ToggleWindow alternates between showing and hiding the main desktop window.
+func (a *App) ToggleWindow() {
+	if a.windowHidden.Load() {
+		a.RestoreWindow()
+		return
+	}
+	a.HideWindow()
+}
+
+// QuitApp triggers a clean explicit shutdown bypassing close-to-tray interception.
+func (a *App) QuitApp() {
+	a.quitRequested.Store(true)
+	a.startupMu.Lock()
+	ctx := a.ctx
+	a.startupMu.Unlock()
+	if ctx != nil && ctx.Value("frontend") != nil {
+		runtime.Quit(ctx)
+		return
+	}
+	a.shutdown(context.Background())
 }
 
 // shortKey returns a bounded prefix of a session's non-secret key for log
@@ -844,6 +1008,9 @@ func (a *App) shutdown(ctx context.Context) {
 		}
 		if a.inhibitor != nil {
 			_ = a.inhibitor.Close()
+		}
+		if a.tray != nil {
+			a.tray.Stop()
 		}
 		a.stopServer()
 	})
@@ -1036,7 +1203,10 @@ func (a *App) StartSession(ip string) (SessionView, error) {
 		// No session was created: keep the no-session-without-server
 		// invariant unless another session is still active.
 		if a.sessions.Len() == 0 {
-			a.stopServer()
+			if a.tray != nil {
+			a.tray.Stop()
+		}
+		a.stopServer()
 		}
 		return SessionView{}, err
 	}
@@ -1368,7 +1538,10 @@ func (a *App) EndSession(key string) error {
 	if a.sessions.Len() == 0 {
 		a.registry.Clear()
 		if !a.isGuestRoomActive() {
-			a.stopServer()
+			if a.tray != nil {
+			a.tray.Stop()
+		}
+		a.stopServer()
 		}
 	}
 	return nil
@@ -2040,16 +2213,27 @@ func (a *App) ReceiveDirectory() string { return a.store.Dir() }
 
 // GetSettings returns the user settings and current effective download directory.
 func (a *App) GetSettings() SettingsView {
+	traySup := a.tray != nil && a.tray.Supported()
+	autoSup := a.autostart != nil && a.autostart.Supported()
 	if a.settingsStore == nil {
 		return SettingsView{
-			Version:          settings.CurrentSchemaVersion,
-			Theme:            settings.ThemeSystem,
-			Locale:           "system",
-			EffectiveDir:     a.store.Dir(),
-			PreserveModTimes: true,
+			Version:            settings.CurrentSchemaVersion,
+			Theme:              settings.ThemeSystem,
+			Locale:             "system",
+			EffectiveDir:       a.store.Dir(),
+			PreserveModTimes:   true,
+			MinimizeToTray:     true,
+			TraySupported:      traySup,
+			AutostartSupported: autoSup,
 		}
 	}
 	s := a.settingsStore.Get()
+	launchEnabled := s.LaunchOnLogin
+	if a.autostart != nil && a.autostart.Supported() {
+		if osEnabled, err := a.autostart.IsEnabled(); err == nil {
+			launchEnabled = osEnabled
+		}
+	}
 	vis := a.GetVisibilityState()
 	expStr := ""
 	if !vis.TemporaryExpiresAt.IsZero() {
@@ -2068,6 +2252,10 @@ func (a *App) GetSettings() SettingsView {
 		VisibilityPreviousMode: string(vis.PreviousRestrictiveMode),
 		VisibilityExpiresAt:    expStr,
 		QRSharingPaused:        vis.QRSharingPaused,
+		MinimizeToTray:         s.MinimizeToTray,
+		LaunchOnLogin:          launchEnabled,
+		TraySupported:          traySup,
+		AutostartSupported:     autoSup,
 	}
 }
 
@@ -2127,6 +2315,11 @@ func (a *App) SaveSettings(view SettingsView) error {
 		}
 	}
 	current := a.settingsStore.Get()
+	if view.LaunchOnLogin != current.LaunchOnLogin && a.autostart != nil {
+		if err := a.autostart.SetEnabled(view.LaunchOnLogin); err != nil {
+			return err
+		}
+	}
 	s := settings.Settings{
 		Version:                view.Version,
 		Theme:                  view.Theme,
@@ -2138,6 +2331,8 @@ func (a *App) SaveSettings(view SettingsView) error {
 		VisibilityMode:         current.VisibilityMode,
 		VisibilityPreviousMode: current.VisibilityPreviousMode,
 		VisibilityExpiresAt:    current.VisibilityExpiresAt,
+		MinimizeToTray:         view.MinimizeToTray,
+		LaunchOnLogin:          view.LaunchOnLogin,
 	}
 	if err := a.settingsStore.Save(s); err != nil {
 		return err
@@ -2167,8 +2362,12 @@ func (a *App) ResetSettings() (SettingsView, error) {
 			return SettingsView{}, errors.New("flitnix: cannot reset receive directory while transfers are active")
 		}
 	}
+	prevLaunch := a.settingsStore.Get().LaunchOnLogin
 	if _, err := a.settingsStore.Reset(); err != nil {
 		return SettingsView{}, err
+	}
+	if prevLaunch && a.autostart != nil {
+		_ = a.autostart.SetEnabled(false)
 	}
 	if a.store != nil {
 		a.store.SetPreserveModTimes(a.settingsStore.Get().PreserveModTimes)
@@ -2754,6 +2953,9 @@ func (a *App) EndGuestRoom() error {
 		a.events.CloseRoom(roomID, "room_ended")
 	}
 	if a.sessions.Len() == 0 {
+		if a.tray != nil {
+			a.tray.Stop()
+		}
 		a.stopServer()
 	}
 	if a.auditStore != nil && roomID != "" {
@@ -3148,7 +3350,10 @@ func (a *App) RemoveTrustedDevice(id string) error {
 		if a.sessions.Len() == 0 {
 			a.registry.Clear()
 			if !a.isGuestRoomActive() {
-				a.stopServer()
+				if a.tray != nil {
+			a.tray.Stop()
+		}
+		a.stopServer()
 			}
 		}
 	}

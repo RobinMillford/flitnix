@@ -29,11 +29,29 @@ import (
 // AppVersion is the display version string, sourced authoritatively from internal/version.
 var AppVersion = version.String()
 
+func stripBackgroundFlag(args []string) ([]string, bool) {
+	if len(args) == 0 {
+		return nil, false
+	}
+	filtered := make([]string, 0, len(args))
+	filtered = append(filtered, args[0])
+	startHidden := false
+	for _, arg := range args[1:] {
+		if arg == "--background" || arg == "-background" {
+			startHidden = true
+			continue
+		}
+		filtered = append(filtered, arg)
+	}
+	return filtered, startHidden
+}
+
 // handleCLI processes command-line flags and subcommands before GUI initialization.
 // If a CLI action is handled (version, help, doctor, serve), it returns handled=true
 // and the process exit code. If the application should proceed to GUI mode, it returns
 // handled=false and any file/directory paths passed as initial shares.
 func handleCLI(args []string, stdout, stderr io.Writer) (bool, int, []string) {
+	args, _ = stripBackgroundFlag(args)
 	if len(args) <= 1 {
 		return false, 0, nil
 	}
