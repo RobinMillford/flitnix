@@ -164,10 +164,7 @@ func TestResolveInterfaceSourceError(t *testing.T) {
 }
 
 func TestStartSessionRequiresRuntimeContext(t *testing.T) {
-	a, err := NewApp()
-	if err != nil {
-		t.Fatalf("NewApp: %v", err)
-	}
+	a := newIsolatedApp(t)
 	a.source = fakeSource(
 		[]net.Interface{upIf("flitbr0")},
 		map[string][]net.Addr{"flitbr0": {ipnet24(192, 168, 44, 10)}},

@@ -9,13 +9,7 @@ import (
 )
 
 func TestAppShortCodeFlowAndSessionRevocation(t *testing.T) {
-	tempConfig := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", tempConfig)
-
-	app, err := NewApp()
-	if err != nil {
-		t.Fatalf("NewApp: %v", err)
-	}
+	app := newIsolatedApp(t)
 	t.Cleanup(func() { app.shutdown(context.Background()) })
 	ctx := context.Background()
 	app.startup(ctx)

@@ -11,13 +11,7 @@ import (
 )
 
 func TestAppSettings_Lifecycle(t *testing.T) {
-	tempConfig := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", tempConfig)
-
-	app, err := NewApp()
-	if err != nil {
-		t.Fatalf("NewApp: %v", err)
-	}
+	app := newIsolatedApp(t)
 	t.Cleanup(func() { app.shutdown(context.Background()) })
 	app.startup(context.Background())
 
@@ -85,13 +79,7 @@ func TestAppSettings_Lifecycle(t *testing.T) {
 }
 
 func TestAppSettings_Validation(t *testing.T) {
-	tempConfig := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", tempConfig)
-
-	app, err := NewApp()
-	if err != nil {
-		t.Fatalf("NewApp: %v", err)
-	}
+	app := newIsolatedApp(t)
 	t.Cleanup(func() { app.shutdown(context.Background()) })
 	app.startup(context.Background())
 
@@ -115,13 +103,7 @@ func TestAppSettings_Validation(t *testing.T) {
 }
 
 func TestAppSettings_PreferredInterface(t *testing.T) {
-	tempConfig := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", tempConfig)
-
-	app, err := NewApp()
-	if err != nil {
-		t.Fatalf("NewApp: %v", err)
-	}
+	app := newIsolatedApp(t)
 	t.Cleanup(func() { app.shutdown(context.Background()) })
 	app.startup(context.Background())
 
@@ -135,7 +117,7 @@ func TestAppSettings_PreferredInterface(t *testing.T) {
 	)
 
 	// Without preference, resolveInterface should be ambiguous
-	_, err = app.resolveInterface("")
+	_, err := app.resolveInterface("")
 	if err == nil {
 		t.Fatalf("resolveInterface without preference should fail due to ambiguity")
 	}
@@ -190,13 +172,7 @@ func TestAppSettings_PreferredInterface(t *testing.T) {
 }
 
 func TestAppSettings_ActiveTransferGuards(t *testing.T) {
-	tempConfig := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", tempConfig)
-
-	app, err := NewApp()
-	if err != nil {
-		t.Fatalf("NewApp: %v", err)
-	}
+	app := newIsolatedApp(t)
 	t.Cleanup(func() { app.shutdown(context.Background()) })
 	app.startup(context.Background())
 
@@ -273,14 +249,10 @@ func TestAppSettings_ActiveTransferGuards(t *testing.T) {
 }
 
 func TestAppSettings_LocalePersistenceAndRestart(t *testing.T) {
-	tempConfig := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", tempConfig)
+	dir := isolateAppStorage(t)
 
 	// Phase 1: First application run
-	app1, err := NewApp()
-	if err != nil {
-		t.Fatalf("NewApp (instance 1): %v", err)
-	}
+	app1 := newIsolatedAppIn(t, dir)
 	app1.startup(context.Background())
 
 	initial := app1.GetSettings()
@@ -304,10 +276,7 @@ func TestAppSettings_LocalePersistenceAndRestart(t *testing.T) {
 	app1.shutdown(context.Background())
 
 	// Phase 2: Second application run (simulates restart)
-	app2, err := NewApp()
-	if err != nil {
-		t.Fatalf("NewApp (instance 2 / restart): %v", err)
-	}
+	app2 := newIsolatedAppIn(t, dir)
 	t.Cleanup(func() { app2.shutdown(context.Background()) })
 	app2.startup(context.Background())
 

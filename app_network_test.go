@@ -8,10 +8,7 @@ import (
 )
 
 func TestAppNetworkStateAndManualRefresh(t *testing.T) {
-	app, err := NewApp()
-	if err != nil {
-		t.Fatalf("NewApp failed: %v", err)
-	}
+	app := newIsolatedApp(t)
 
 	app.source = fakeSource(
 		[]net.Interface{{Index: 1, Name: "wlo1", Flags: net.FlagUp | net.FlagBroadcast}},

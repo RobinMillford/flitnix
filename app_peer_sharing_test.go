@@ -30,20 +30,12 @@ func waitForPeerJobDone(t *testing.T, app *App, jobID string, timeout time.Durat
 }
 
 func TestTwoDesktopInstancesBidirectionalAndTrustedTransfer(t *testing.T) {
-	cfgA := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", cfgA)
-	appA, err := NewApp()
-	if err != nil {
-		t.Fatalf("NewApp A: %v", err)
-	}
+	cfgA := isolateAppStorage(t)
+	appA := newIsolatedAppIn(t, cfgA)
 	t.Cleanup(func() { appA.shutdown(context.Background()) })
 
-	cfgB := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", cfgB)
-	appB, err := NewApp()
-	if err != nil {
-		t.Fatalf("NewApp B: %v", err)
-	}
+	cfgB := isolateAppStorage(t)
+	appB := newIsolatedAppIn(t, cfgB)
 	t.Cleanup(func() { appB.shutdown(context.Background()) })
 
 	// Bind both desktop servers cleanly on loopback ephemeral ports.
@@ -223,12 +215,8 @@ func TestTwoDesktopInstancesBidirectionalAndTrustedTransfer(t *testing.T) {
 	}
 
 	// 5. TOFU violation: if addrB suddenly serves a rotated/swapped HostID, ConnectAndSendToPeer fails closed!
-	cfgC := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", cfgC)
-	appC, err := NewApp()
-	if err != nil {
-		t.Fatalf("NewApp C: %v", err)
-	}
+	cfgC := isolateAppStorage(t)
+	appC := newIsolatedAppIn(t, cfgC)
 	t.Cleanup(func() { appC.shutdown(context.Background()) })
 	if err := appC.ensureServer("127.0.0.1:0"); err != nil {
 		t.Fatalf("appC.ensureServer: %v", err)

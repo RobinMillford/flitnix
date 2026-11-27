@@ -734,16 +734,18 @@
         <div class="inbox-requests-list">
           {#each pending as u (u.id)}
             <div class="inbox-request-item" class:storage-blocked={u.storageFits === false}>
-              <div class="request-icon">↙</div>
-              <div class="request-info">
-                <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
-                  <strong>{u.name}</strong>
-                  {#if u.trustedDevice}
-                    <span class="sender-trust-pill trusted">{u.deviceName || 'Trusted Device'}</span>
-                  {:else}
-                    <span class="sender-trust-pill qr">QR / Unpaired</span>
-                  {/if}
+              <div class="request-device">
+                <span class="request-device-icon" aria-hidden="true">{u.trustedDevice ? '📱' : '↙'}</span>
+                <div class="request-device-text">
+                  <strong>{u.deviceName || (u.trustedDevice ? 'Trusted Device' : 'QR Session')}</strong>
+                  <span class="request-device-status">
+                    {u.trustedDevice ? 'Paired Device' : 'QR Session'} ·
+                    <span class="sender-trust-pill {u.trustedDevice ? 'trusted' : 'unpaired'}">{u.trustedDevice ? 'Trusted' : 'Unpaired'}</span>
+                  </span>
                 </div>
+              </div>
+              <div class="request-info">
+                <strong title={u.name}>{u.name}</strong>
                 <span class="tabular">
                   {formatBytes(u.size)} · Pending Approval
                   {#if u.storageFits === false}
@@ -782,16 +784,18 @@
 
           {#each pendingBatches as b (b.id)}
             <div class="inbox-request-item batch-item" class:storage-blocked={b.storageFits === false}>
-              <div class="request-icon">↙</div>
-              <div class="request-info">
-                <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
-                  <strong>Batch: {batchName(b)}</strong>
-                  {#if b.trustedDevice}
-                    <span class="sender-trust-pill trusted">{b.deviceName || 'Trusted Device'}</span>
-                  {:else}
-                    <span class="sender-trust-pill qr">QR / Unpaired</span>
-                  {/if}
+              <div class="request-device">
+                <span class="request-device-icon" aria-hidden="true">{b.trustedDevice ? '📱' : '↙'}</span>
+                <div class="request-device-text">
+                  <strong>{b.deviceName || (b.trustedDevice ? 'Trusted Device' : 'QR Session')}</strong>
+                  <span class="request-device-status">
+                    {b.trustedDevice ? 'Paired Device' : 'QR Session'} ·
+                    <span class="sender-trust-pill {b.trustedDevice ? 'trusted' : 'unpaired'}">{b.trustedDevice ? 'Trusted' : 'Unpaired'}</span>
+                  </span>
                 </div>
+              </div>
+              <div class="request-info">
+                <strong title={batchName(b)}>Batch: {batchName(b)}</strong>
                 <span class="tabular">
                   {formatBytes(b.declaredTotalBytes)} · {b.totalItemCount} files
                   {#if b.storageFits === false}
@@ -1684,27 +1688,60 @@
   .inbox-request-item {
     display: flex;
     align-items: center;
-    gap: 12px;
+    flex-wrap: wrap;
+    gap: 10px 12px;
     padding: 10px 14px;
     background: var(--bg-surface-elevated);
     border: 1px solid var(--border-base);
     border-radius: var(--radius-md, 10px);
   }
 
-  .request-icon {
-    width: 32px;
-    height: 32px;
+  .request-device {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1 1 150px;
+    min-width: 0;
+  }
+
+  .request-device-icon {
+    width: 30px;
+    height: 30px;
+    flex: 0 0 30px;
     border-radius: 50%;
-    background: var(--success-subtle);
-    color: var(--success);
+    background: var(--accent-subtle);
+    color: var(--accent);
     display: flex;
     align-items: center;
     justify-content: center;
-    font-weight: 700;
+    font-size: 15px;
+  }
+
+  .request-device-text {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .request-device-text strong {
+    font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .request-device-status {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 5px;
+    font-size: 10.5px;
+    color: var(--text-secondary);
   }
 
   .request-info {
-    flex: 1;
+    flex: 2 1 180px;
     min-width: 0;
     display: flex;
     flex-direction: column;
@@ -1725,6 +1762,7 @@
   .request-actions {
     display: flex;
     gap: 6px;
+    margin-left: auto;
   }
 
   .storage-pill {
@@ -2049,8 +2087,13 @@
   }
 
   .sender-trust-pill {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    white-space: nowrap;
     font-size: 10.5px;
     font-weight: 700;
+    line-height: 1.4;
     padding: 2px 7px;
     border-radius: 999px;
   }
@@ -2060,7 +2103,8 @@
     color: var(--accent);
   }
 
-  .sender-trust-pill.qr {
+  /* Do not use the bare `qr` class: global style.css .qr is a 146px QR image box. */
+  .sender-trust-pill.unpaired {
     background: var(--bg-surface-elevated);
     color: var(--text-secondary);
     border: 1px solid var(--border-base);
