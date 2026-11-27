@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/itsyamin/flitnix/internal/transfer"
@@ -407,11 +408,10 @@ func (c *Client) probeHead(ctx context.Context, reqURL string, declaredSize int6
 
 func computeFilePrefixHash(f *os.File, offset int64) (h io.Writer, sumFunc func() []byte, err error) {
 	hasher := sha256.New()
-	if _, serr := f.Seek(0, io.SeekStart); serr != nil {
-		return nil, nil, serr
-	}
+	// SectionReader reads through ReadAt, so hashing a prefix never moves the
+	// shared *os.File offset that another in-flight request body may be using.
 	if offset > 0 {
-		if _, cerr := io.CopyN(hasher, f, offset); cerr != nil {
+		if _, cerr := io.Copy(hasher, io.NewSectionReader(f, 0, offset)); cerr != nil {
 			return nil, nil, cerr
 		}
 	}
@@ -480,21 +480,23 @@ func (c *Client) streamItemChunks(ctx context.Context, f *os.File, localPath, re
 		if declaredSize-offset < lenChunk {
 			lenChunk = declaredSize - offset
 		}
-		if _, err := f.Seek(offset, io.SeekStart); err != nil {
-			return ItemResult{}, err
-		}
-		// Compute chunk into request without mutating file prefix hasher on failed partial send:
-		// we hash only committed bytes once accepted (or hash prefix cleanly on retry).
-		chunkReader := io.LimitReader(f, lenChunk)
+		// Each attempt owns an independent section of the file. SectionReader
+		// reads through ReadAt and never moves the shared *os.File offset, so
+		// a response that arrives before the transport finishes draining this
+		// body cannot disturb a subsequent PUT (or another retry).
+		chunkReader := io.NewSectionReader(f, offset, lenChunk)
 		pr := io.TeeReader(chunkReader, hasher)
-		req, err := http.NewRequestWithContext(ctx, http.MethodPatch, reqURL, &chunkProgressReader{
+		patchBody := &chunkProgressReader{
 			r:          pr,
 			base:       offset,
 			chunkLen:   lenChunk,
 			total:      declaredSize,
 			lastEmitAt: time.Now(),
 			onProgress: onProgress,
-		})
+		}
+		// Compute chunk into request without mutating file prefix hasher on failed partial send:
+		// we hash only committed bytes once accepted (or hash prefix cleanly on retry).
+		req, err := http.NewRequestWithContext(ctx, http.MethodPatch, reqURL, patchBody)
 		if err != nil {
 			return ItemResult{}, err
 		}
@@ -506,6 +508,10 @@ func (c *Client) streamItemChunks(ctx context.Context, f *os.File, localPath, re
 		req.ContentLength = lenChunk
 
 		resp, err := c.httpClient.Do(req)
+		// A response can arrive before the transport has finished reading the
+		// request body. Stop stale progress callbacks now; the body itself is
+		// owned and closed by net/http.
+		patchBody.stop()
 		if err != nil {
 			cont, rerr := retryWithHead(fmt.Errorf("client: chunk streaming failed for %s at offset %d: %w", filepath.Base(localPath), offset, err))
 			if cont {
@@ -607,32 +613,61 @@ type chunkProgressReader struct {
 	lastEmitBytes int64
 	lastEmitAt    time.Time
 	calls         uint32
+	mu            sync.Mutex
+	wg            sync.WaitGroup
+	stopped       bool
 	onProgress    func(written, total int64)
 }
 
+// stop permanently retires an abandoned request body. It returns only after
+// any in-flight read and progress callback have completed, so a PATCH callback
+// cannot finish after PUT progress has started, and the body cannot read from
+// the transfer file after its handle is closed.
+func (c *chunkProgressReader) stop() {
+	c.mu.Lock()
+	c.stopped = true
+	c.mu.Unlock()
+	c.wg.Wait()
+}
+
 func (c *chunkProgressReader) Read(p []byte) (int, error) {
+	c.mu.Lock()
+	if c.stopped {
+		c.mu.Unlock()
+		return 0, io.EOF
+	}
+	// Register under the same lock that stop uses, so stop's Wait cannot
+	// race past a Read that is about to touch the underlying file.
+	c.wg.Add(1)
+	c.mu.Unlock()
+	defer c.wg.Done()
+
 	n, err := c.r.Read(p)
 	if n > 0 && c.onProgress != nil {
-		c.read += int64(n)
-		c.calls++
-		emit := c.read >= c.chunkLen || c.read-c.lastEmitBytes >= 256*1024
-		if !emit && (c.calls&7) == 0 && time.Since(c.lastEmitAt) >= 100*time.Millisecond {
-			emit = true
+		c.mu.Lock()
+		if !c.stopped {
+			c.read += int64(n)
+			c.calls++
+			emit := c.read >= c.chunkLen || c.read-c.lastEmitBytes >= 256*1024
+			if !emit && (c.calls&7) == 0 && time.Since(c.lastEmitAt) >= 100*time.Millisecond {
+				emit = true
+			}
+			if emit {
+				c.lastEmitBytes = c.read
+				c.lastEmitAt = time.Now()
+				c.onProgress(c.base+c.read, c.total)
+			}
 		}
-		if emit {
-			c.lastEmitBytes = c.read
-			c.lastEmitAt = time.Now()
-			c.onProgress(c.base+c.read, c.total)
-		}
+		c.mu.Unlock()
 	}
 	return n, err
 }
 
 func (c *Client) streamItemPut(ctx context.Context, f *os.File, localPath, reqURL string, declaredSize int64, onProgress func(written, total int64)) (ItemResult, error) {
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return ItemResult{}, err
-	}
-	hashingReader := NewHashingReader(f, declaredSize, onProgress)
+	// As with PATCH, the fallback owns its own section reader. It neither
+	// depends on nor mutates the file offset, even if the rejected PATCH body
+	// is still being drained by the HTTP transport.
+	hashingReader := NewHashingReader(io.NewSectionReader(f, 0, declaredSize), declaredSize, onProgress)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, reqURL, hashingReader)
 	if err != nil {
