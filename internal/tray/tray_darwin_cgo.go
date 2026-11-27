@@ -10,7 +10,9 @@ package tray
 #import <dispatch/dispatch.h>
 #include <stdlib.h>
 
-extern void flitnixDarwinTrayAction(uintptr_t handle, const char *actionID);
+// cgo generates this declaration from the //export below using char *,
+// so the manual declaration must match it exactly.
+extern void flitnixDarwinTrayAction(uintptr_t handle, char *actionID);
 
 @interface FlitnixTrayTarget : NSObject
 @property (nonatomic, assign) uintptr_t handle;
@@ -21,7 +23,7 @@ extern void flitnixDarwinTrayAction(uintptr_t handle, const char *actionID);
 	NSMenuItem *item = (NSMenuItem *)sender;
 	NSString *act = [item representedObject];
 	if (act != nil) {
-		flitnixDarwinTrayAction(self.handle, [act UTF8String]);
+		flitnixDarwinTrayAction(self.handle, (char *)[act UTF8String]);
 	}
 }
 @end
