@@ -9,51 +9,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-27
+
 ### Added
-- **Desktop-to-Desktop GUI Sharing & Single-Port TLS 1.3 Multiplexing (Phase 2 — G9)**:
+- **Persistent Transfer History & Configurable Retention**:
+  - Added durable, privacy-preserving personal transfer history (`internal/history`, `<dataDir>/history.jsonl`) surviving restarts across incoming, batch, phone download, and computer-sharing transfers, upgraded `TransferHistoryView.svelte` with search, direction/status/date/device filters, summary metrics, pagination, `Open`/`Reveal`/`Reshare` (with strict receive-directory symlink confinement), and safe `Clear History`.
+  - Completed configurable history retention (`CurrentSchemaVersion = 6`): configurable age/count limits (`HistoryRetentionDays = 90`, `HistoryMaxRecords = 5000`), non-blocking startup and periodic pruning, and Settings Storage UI controls that prune only metadata without touching transferred files.
+- **Native OS Notifications & Interactive Approval**:
+  - Implemented `internal/notify` supporting D-Bus `org.freedesktop.Notifications` (Linux), `go-toast/v2` (Windows), and argument-safe macOS notifications, backed by sanitized Pango/BIDI-safe text, single-use 128-bit action tokens, state/visibility/quota revalidation, SAS-only pairing focus protection, privacy filename masking, quiet mode, and per-category settings.
+- **System Tray, Background Receiving & Login Autostart**:
+  - Implemented `internal/tray` (Linux D-Bus SNI + DBusMenu, Windows Win32 tray, macOS Cocoa `NSStatusBar`, safe headless fallback) and `internal/autostart` (`flitnix.desktop`, Windows HKCU `Run`, macOS `LaunchAgent` plist) with `--background` startup, close/minimize-to-tray preserving active sessions and transfers, live visibility/DND tray controls, and explicit `Quit Flitnix`.
+- **Real-Time WebSockets/SSE Event Infrastructure**:
+  - Added `internal/events` pub/sub Hub, `docs/ADR-001-realtime-events.md`, authenticated fetch-stream SSE endpoints (`GET /api/events` & `GET /guest-api/events`), desktop `events.Hub` -> Wails `"flitnix:event"` coalescer (`frontend/src/realtimeEvents.ts`), and mobile SSE clients (`app.js`, `guest.js`) with Origin validation, TTL/revocation enforcement, queue backpressure shedding, and seamless polling fallback.
+- **Desktop-to-Desktop GUI Sharing & Single-Port TLS 1.3 Multiplexing**:
   - Added single-port TLS 1.3 + HTTP connection multiplexing (`internal/server/tls_mux.go`) backed by each desktop host's Ed25519 self-signed identity certificate (`NewHostIdentityCertificate`), preserving zero-install HTTP QR browsing alongside TOFU-pinned TLS 1.3 desktop transfers (`internal/client/tls.go`).
   - Added `POST /api/peer/challenge`, `POST /api/peer/connect`, `peer_transfer.go` orchestration, bidirectional file/folder staging, live job progress/cancellation, and the dedicated **Computer Sharing** tab (`frontend/src/views/ComputerSharingView.svelte`) across Windows, macOS, and Linux.
-- **Automatic Nearby LAN Discovery (Phase 2 — G3)**:
+- **Automatic Nearby LAN Discovery**:
   - Implemented `internal/discovery` combining standard `_flitnix._tcp.local.` mDNS announcements (`mdns_wire.go`) and UDP multicast (`239.255.43.82:43822`) bound strictly to `internal/netenv`'s active non-VPN interface.
   - Added Ed25519-signed sanitized discovery frames, unlinkable HMAC trusted probes in `VisibilityTrustedOnly`, strict radio silence in `VisibilityHidden`, stale-peer eviction, and live `"discovery:peers"` desktop updates.
-- **Firewall Diagnostics & Connection Helper (Phase 2 — G27)**:
+- **Firewall Diagnostics & Connection Helper**:
   - Added `firewall_status` as the 8th Connection Doctor check (`internal/doctor/firewall.go`) supporting Windows (`netsh advfirewall`), Linux (`ufw`/`firewall-cmd`/`nft`/`iptables`), and macOS (`socketfilterfw`) with a 1.5s probe timeout, `affectedPort` metadata, copyable OS remediation commands in `ConnectionDoctorModal.svelte`, and mobile reachability tips.
-- **Mobile Browser Trusted-Device Pairing & One-Tap Reconnect (Phase 2 — G4)**:
+- **Mobile Browser Trusted-Device Pairing & One-Tap Reconnect**:
   - Vendored `nacl-fast.min.js` (`tweetnacl@1.0.3`) and implemented `internal/server/assets/device-crypto.js` using Ed25519 + X25519 + 271-byte SAS verification + IndexedDB storage so standard mobile browsers on plain HTTP LAN origins can pair and reconnect without installing an app or PWA.
   - Added `POST /api/device-sessions/challenge` and `POST /api/device-sessions/verify` (`internal/server/device_sessions.go`), `#device=` one-tap reconnect URLs, and a global desktop SAS pairing approval modal in `App.svelte`.
-- **Six-Digit One-Time Connection Code (Phase 2 — G13)**:
+- **Six-Digit One-Time Connection Code**:
   - Added `internal/session/shortcode.go` (`ShortCodeManager`) issuing `crypto/rand` 6-digit single-use codes with a 3-minute TTL, constant-time HMAC validation, per-IP rate limiting, and `POST /api/connect-code`, paired with a `"Connect with 6-Digit Code"` form on the mobile browser landing page.
-- **Device Visibility & Conditional Auto-Approval (Phase 2 — G15)**:
+- **Device Visibility & Conditional Auto-Approval**:
   - Added a persistent 4-mode visibility state machine (`hidden`, `trusted`, `temporary_everyone` with 10-minute auto-revert, `everyone`) in `internal/devices/visibility.go` and `internal/settings` (`CurrentSchemaVersion = 3`), plus independent QR pause/revoke controls (`SetQRPaused`, `RevokeByDeviceID`).
   - Added per-device conditional auto-approval (`internal/devices/policy.go`) with configurable byte size limits and executable/script blocking (`AutoApproveMaxBytes`, `BlockExecutables`, `BlockScripts`), trust/reason badges, and policy controls in `TrustedDevicesView.svelte` and `PersonalTransferView.svelte`.
 - **QR-First Mobile Hardening (Phase 2 — Priority Zero)**:
   - Fixed iOS Safari single-file download fallback, mobile `fmtBytes` reference error, and drag-and-drop styling on `#send-panel`.
-- **Original Modification Timestamp Preservation (Phase 1 — G22)**:
+- **Original Modification Timestamp Preservation**:
   - Propagated validated sender modification timestamps (`lastModifiedMs`) from the mobile browser (`File.lastModified`) and Go CLI (`client.BuildManifest`) through `POST /api/batches` and `POST /api/uploads`, persisting them in recovery journals and resumable `.meta` sidecars across pauses and restarts.
   - Applied `os.Chtimes` atomically to staged `.part` files prior to publication in both single-pass `PUT` and resumable `PATCH` commits so received files retain their original capture/edit dates immediately upon appearing on disk.
   - Added the `"Preserve original file dates"` setting (`PreserveModTimes`, default ON) in `internal/settings`, Wails bindings, and `SettingsView.svelte`.
-- **Browseable Shared-Folder Explorer (Phase 1 — G31)**:
+- **Browseable Shared-Folder Explorer**:
   - Assigned opaque per-item IDs inside shared folders (`transfer.SourceItem.ID`) and added strictly confined hierarchical folder browsing (`GET /api/sources/{id}/items?prefix=&cursor=&limit=`) without exposing host filesystem paths.
-  - Extended `POST /api/download-grants` with selective folder item IDs (`sourceId` + `itemIds`): downloading one file streams directly with full G2 byte-range resumption (`Accept-Ranges: bytes`), while selecting multiple files across subdirectories streams a targeted ZIP archive.
+  - Extended `POST /api/download-grants` with selective folder item IDs (`sourceId` + `itemIds`): downloading one file streams directly with full HTTP byte-range resumption (`Accept-Ranges: bytes`), while selecting multiple files across subdirectories streams a targeted ZIP archive.
   - Built an interactive mobile shared-folder explorer in `index.html`, `styles.css`, and `app.js` with `Browse` buttons, breadcrumb navigation, pagination, and multi-file checkboxes across subdirectories.
-- **Resumable HTTP Byte-Range Downloads (Phase 1 — G2)**:
+- **Resumable HTTP Byte-Range Downloads**:
   - Enabled `Accept-Ranges: bytes`, strong file-metadata validators (`ETag: "flit-<size>-<mtime_ns>-<file_id>"`), `Range` (`206 Partial Content`), `If-Range` verification (with `200 OK` full fallback on mismatch or weak validators), `416 Range Not Satisfiable`, and `HEAD` support across mutable single-file download grants (`/api/downloads/{id}`) and direct file downloads (`/api/files/{id}/download`), while keeping OS-immutable Tier 1 (`"sha256-..."`) and Tier 3 dynamic ZIP (`Accept-Ranges: none`) contracts intact.
   - Added mid-stream file-mutation and atomic-replacement guards (`fileMatchesSnapshot`) so modified or swapped source files cleanly abort live streams instead of serving spliced bytes.
   - Upgraded mobile File System Access (`showSaveFilePicker`) streaming downloads in `app.js` with bounded automatic byte-range resumption (`Range` + `If-Range`) and incremental SHA-256 verification.
-- **Automatic Stream Retry & Wi-Fi Roaming Recovery (Phase 1 — G7)**:
+- **Automatic Stream Retry & Wi-Fi Roaming Recovery**:
   - Implemented `RetryPolicy` and error classification (`internal/client/retry.go`) with jittered exponential backoff (`1s`, `2s`, `4s`, `8s`, `15s` ±20%), `/ping` reachability probing, and automatic `HEAD` + `PATCH` offset recovery in Go CLI (`internal/client`, `send_cli.go`).
   - Added bounded automatic chunk retry and `"Reconnecting — attempt X/Y"` progress UI in the mobile browser (`app.js`) with immediate `online` event wakeup and non-destructive batch sibling preservation.
   - Preserved sessions, coordinator batches, and resumable staging across temporary Wi-Fi drops and IP roaming (`handleNetworkChange` + `AbortActiveUploads` interruption handling).
-- **Resumable Chunked Uploads & Crash-Safe Offset Recovery (Phase 1 — G1)**:
+- **Resumable Chunked Uploads & Crash-Safe Offset Recovery**:
   - Implemented `HEAD` / `PATCH` resumable chunked upload endpoints on `/api/batches/{batchID}/items/{itemID}/content` and `/api/uploads/{id}/content` using `Upload-Offset`, `Upload-Length`, `Upload-Chunk-Size`, and `409 Conflict` offset-mismatch reconciliation while keeping legacy `PUT` streams compatible.
   - Added crash-safe chunk durability (`fsync(.part)` → HMAC-authenticated `.meta.tmp` with incremental SHA-256 hash state → `fsync` → atomic rename → `syncDir`) using an installation-derived `staging-meta-v1` subkey, rolling back uncommitted torn tails automatically.
   - Wired `RecoveryDir` into both desktop (`App`) and `flitnix serve` CLI, completing startup recovery Phases 6–10 (`recovery_startup.go`): per-upload quarantine isolation, quota reservation reconstruction, session/coordinator reconciliation, and Phase 10 TTL/orphan staging cleanup.
   - Added non-destructive `PauseBatch`, `ResumeBatch`, `DiscardBatch`, and `DiscardUpload` lifecycle controls in Coordinator, Transfer Service, Wails adapter, and Desktop Svelte UI (`Uploading`, `Paused`, `Interrupted`, `Resuming`, `Completed`, `Failed`, `Discarded`), plus Web Worker `File.slice()` chunking in mobile `upload-worker.js` / `upload-client.js` / `app.js` and Go CLI `internal/client`.
-- **Storage Quota & Disk-Space Protection (Phase 1 — G26)**:
+- **Storage Quota & Disk-Space Protection**:
   - Cross-platform filesystem free-space probing (`unix.Statfs` / `GetDiskFreeSpaceEx`) with configurable minimum disk reserve buffer (`BufferReserveBytes`, default `1 GiB`) and optional hard receive cap (`MaxReceiveBytes`).
   - Atomic `QuotaManager` headroom reservations at transfer approval (and auto-approve / guest-room admission), plus mid-stream 4 MiB headroom checks and `ENOSPC` / `ERROR_DISK_FULL` mapping to HTTP `507 Insufficient Storage` (`code: "insufficient_storage"`).
   - Desktop Storage Headroom telemetry in Settings and Approval Inbox (fit/exceeds status indicators) and clear mobile error reporting (`507`) when desktop storage is full.
-  - Note: History auto-retention policies are intentionally deferred to Phase 3 (G6).
+  - Note: History auto-retention policies are intentionally deferred to the persistent-history work.
 
 ---
 

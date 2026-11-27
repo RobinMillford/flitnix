@@ -18,6 +18,8 @@ export function AddDroppedSources(arg1:Array<string>):Promise<Array<main.SharedS
 
 export function AddExpectedParticipant(arg1:string,arg2:string,arg3:string):Promise<void>;
 
+export function ApplyHistoryRetentionNow():Promise<number>;
+
 export function ApplyUpdate():Promise<void>;
 
 export function ApproveBatch(arg1:string):Promise<main.BatchView>;
@@ -44,9 +46,13 @@ export function ClearCompletedPeerTransfers():Promise<void>;
 
 export function ClearTextMessages(arg1:string):Promise<void>;
 
+export function ClearTransferHistory():Promise<void>;
+
 export function ConnectAndSendToPeer(arg1:main.PeerSendRequest):Promise<main.PeerTransferJob>;
 
 export function DeleteGuestTemplate(arg1:string):Promise<void>;
+
+export function DeleteHistoryRecord(arg1:string):Promise<void>;
 
 export function DenyPairing(arg1:string):Promise<void>;
 
@@ -88,6 +94,8 @@ export function GetStorageStatus():Promise<transfer.StorageStatus>;
 
 export function GetVisibilityState():Promise<devices.VisibilityState>;
 
+export function HideWindow():Promise<void>;
+
 export function ListAuditEvents(arg1:audit.Filter):Promise<main.AuditListResult>;
 
 export function ListBatches():Promise<Array<main.BatchView>>;
@@ -120,6 +128,8 @@ export function OpenDownloadFolder():Promise<void>;
 
 export function OpenGuestFolder():Promise<void>;
 
+export function OpenHistoryFile(arg1:string):Promise<void>;
+
 export function PauseBatch(arg1:string):Promise<main.BatchView>;
 
 export function PickExportDestination():Promise<string>;
@@ -137,6 +147,10 @@ export function InspectPeerTarget(arg1:string,arg2:number):Promise<client.PeerPr
 export function PickFolderForSharing():Promise<main.SharedSourceView>;
 
 export function PickGuestDestination():Promise<string>;
+
+export function QueryTransferHistory(arg1:main.HistoryFilterView):Promise<main.HistoryQueryResultView>;
+
+export function QuitApp():Promise<void>;
 
 export function ReArmPairing():Promise<void>;
 
@@ -164,9 +178,15 @@ export function RemoveTrustedDevice(arg1:string):Promise<void>;
 
 export function ResetSettings():Promise<main.SettingsView>;
 
+export function ReshareHistoryFile(arg1:string):Promise<void>;
+
 export function ResolvePeerPairingSAS(arg1:string,arg2:boolean):Promise<void>;
 
+export function RestoreWindow():Promise<void>;
+
 export function ResumeBatch(arg1:string):Promise<main.BatchView>;
+
+export function RevealHistoryFile(arg1:string):Promise<void>;
 
 export function RevokeAllSessions():Promise<void>;
 
@@ -209,5 +229,7 @@ export function StartGuestRoomWithConfig(arg1:main.GuestRoomConfigView):Promise<
 export function StartSession(arg1:string):Promise<main.SessionView>;
 
 export function TriggerNearbyScan():Promise<Array<discovery.Peer>>;
+
+export function ToggleQuietMode():Promise<boolean>;
 
 export function UpdateExpectedParticipant(arg1:guest.ExpectedParticipant):Promise<void>;

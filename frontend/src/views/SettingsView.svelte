@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { main, netenv, version, power, transfer } from '../../wailsjs/go/models'
+  import { ApplyHistoryRetentionNow, QueryTransferHistory } from '../../wailsjs/go/main/App.js'
   import { openExternalURL, formatBytes } from '../utils'
   import logoUrl from '../assets/images/logo-universal.png'
 
@@ -25,6 +26,39 @@
   export let openUpdateModal: () => void = () => {}
 
   let activeSection: 'general' | 'storage' | 'network' | 'appearance' | 'about' = 'general'
+  let historyStoreSizeBytes: number = 0
+  let historyTotalRecords: number = 0
+  let pruningHistory: boolean = false
+  let pruneMessage: string = ''
+
+  async function refreshHistoryStorageInfo(): Promise<void> {
+    try {
+      const res = await QueryTransferHistory({ limit: 1, offset: 0 } as main.HistoryFilterView)
+      historyTotalRecords = res?.stats?.totalRecords ?? 0
+      historyStoreSizeBytes = res?.storeSizeBytes ?? 0
+    } catch {
+      // ignore in environments without Wails runtime
+    }
+  }
+
+  async function handlePruneHistoryNow(): Promise<void> {
+    pruningHistory = true
+    pruneMessage = ''
+    try {
+      await handleSaveSettings()
+      const removed = await ApplyHistoryRetentionNow()
+      await refreshHistoryStorageInfo()
+      pruneMessage = removed > 0 ? `Pruned ${removed} expired metadata entries (files on disk kept).` : 'History index is already within retention limits.'
+    } catch (err: any) {
+      pruneMessage = err?.message || String(err)
+    } finally {
+      pruningHistory = false
+    }
+  }
+
+  $: if (activeSection === 'storage') {
+    void refreshHistoryStorageInfo()
+  }
 
   $: uniqueInterfaces = interfaces.filter((item, index, self) =>
     index === self.findIndex((t) => t.name === item.name)
@@ -113,6 +147,117 @@
           </div>
         </label>
       </div>
+
+      <div class="card-section-head" style="margin-top: 22px;">
+        <h4>Always-Ready Tray & Autostart</h4>
+        <p>Keep Flitnix available in the background so your devices can connect without opening the window first.</p>
+      </div>
+
+      <div class="setting-row">
+        <label class="toggle-control-label">
+          <input
+            type="checkbox"
+            bind:checked={settingsState.minimizeToTray}
+            disabled={settingsState.traySupported === false}
+          />
+          <div class="toggle-text-block">
+            <strong>Minimize to system tray / menu bar on close</strong>
+            <span>Hides the window while keeping LAN discovery and incoming transfer approvals running.</span>
+          </div>
+        </label>
+        {#if settingsState.traySupported === false}
+          <span class="setting-hint">System tray indicator is unavailable in this desktop session; closing will quit Flitnix.</span>
+        {/if}
+      </div>
+
+      <div class="setting-row" style="margin-top: 12px;">
+        <label class="toggle-control-label">
+          <input
+            type="checkbox"
+            bind:checked={settingsState.launchOnLogin}
+            disabled={settingsState.autostartSupported === false}
+          />
+          <div class="toggle-text-block">
+            <strong>Launch Flitnix silently when logging in</strong>
+            <span>Starts Flitnix minimized to the tray on desktop login (no background telemetry or cloud login).</span>
+          </div>
+        </label>
+      </div>
+
+      <div class="card-section-head" style="margin-top: 22px;">
+        <h4>Desktop Notifications</h4>
+        <p>Control native OS alerts and interactive transfer approval prompts.</p>
+      </div>
+
+      <div class="setting-row">
+        <label class="toggle-control-label">
+          <input
+            type="checkbox"
+            bind:checked={settingsState.notificationsEnabled}
+          />
+          <div class="toggle-text-block">
+            <strong>Enable native OS notifications</strong>
+            <span>Notify when transfers arrive, finish, or need your decision while Flitnix is in the background.</span>
+          </div>
+        </label>
+      </div>
+
+      <div class="setting-row" style="margin-top: 12px;">
+        <label class="toggle-control-label">
+          <input
+            type="checkbox"
+            bind:checked={settingsState.quietMode}
+            disabled={!settingsState.notificationsEnabled}
+          />
+          <div class="toggle-text-block">
+            <strong>Pause notifications (Do Not Disturb)</strong>
+            <span>Temporarily silence all desktop popups while still recording transfers in History.</span>
+          </div>
+        </label>
+      </div>
+
+      <div class="setting-row" style="margin-top: 12px;">
+        <label class="toggle-control-label">
+          <input
+            type="checkbox"
+            bind:checked={settingsState.hideNotificationFilenames}
+            disabled={!settingsState.notificationsEnabled}
+          />
+          <div class="toggle-text-block">
+            <strong>Hide file and sender names in notifications</strong>
+            <span>Masks sensitive filenames, Quick Text snippets, and device names in OS banners.</span>
+          </div>
+        </label>
+      </div>
+
+      {#if settingsState.notificationsEnabled}
+        <div class="setting-row" style="margin-top: 12px; padding-left: 16px; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px;">
+          <label class="toggle-control-label">
+            <input type="checkbox" bind:checked={settingsState.notifyIncomingTransfers} />
+            <span class="toggle-text-block"><strong>Incoming transfer requests</strong></span>
+          </label>
+          <label class="toggle-control-label">
+            <input type="checkbox" bind:checked={settingsState.notifyCompletedTransfers} />
+            <span class="toggle-text-block"><strong>Completed transfers</strong></span>
+          </label>
+          <label class="toggle-control-label">
+            <input type="checkbox" bind:checked={settingsState.notifyFailedTransfers} />
+            <span class="toggle-text-block"><strong>Transfer failures</strong></span>
+          </label>
+          <label class="toggle-control-label">
+            <input type="checkbox" bind:checked={settingsState.notifyPairingRequests} />
+            <span class="toggle-text-block"><strong>Device pairing alerts</strong></span>
+          </label>
+          <label class="toggle-control-label">
+            <input type="checkbox" bind:checked={settingsState.notifyGuestRequests} />
+            <span class="toggle-text-block"><strong>Guest Drop Box alerts</strong></span>
+          </label>
+          <label class="toggle-control-label">
+            <input type="checkbox" bind:checked={settingsState.notifyQuickText} />
+            <span class="toggle-text-block"><strong>Quick Text while hidden</strong></span>
+          </label>
+        </div>
+      {/if}
 
       {#if sleepInhibition}
         <div class="card-section-head" style="margin-top: 20px;">
@@ -253,6 +398,48 @@
         {:else}
           <span class="setting-hint">Checking disk headroom…</span>
         {/if}
+      </div>
+
+      <div class="card-section-head" style="margin-top: 22px;">
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+          <div>
+            <h4>Transfer History Retention</h4>
+            <p>Automatically prune old transfer history metadata to keep storage bounded. Your actual received and shared files are never deleted.</p>
+          </div>
+          <button type="button" class="button secondary small" disabled={pruningHistory} on:click={handlePruneHistoryNow}>
+            {pruningHistory ? 'Pruning…' : 'Prune Now'}
+          </button>
+        </div>
+      </div>
+
+      <div class="setting-row" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px;">
+        <div>
+          <label for="retention-days" class="info-label" style="display: block; margin-bottom: 6px;">Keep history records for</label>
+          <select id="retention-days" class="text-input" bind:value={settingsState.historyRetentionDays}>
+            <option value={30}>30 days</option>
+            <option value={90}>90 days (Default)</option>
+            <option value={180}>180 days</option>
+            <option value={365}>1 year</option>
+            <option value={0}>Forever (unlimited age)</option>
+          </select>
+        </div>
+
+        <div>
+          <label for="retention-max" class="info-label" style="display: block; margin-bottom: 6px;">Maximum stored records</label>
+          <select id="retention-max" class="text-input" bind:value={settingsState.historyMaxRecords}>
+            <option value={1000}>1,000 records</option>
+            <option value={5000}>5,000 records (Default)</option>
+            <option value={10000}>10,000 records</option>
+            <option value={25000}>25,000 records</option>
+            <option value={0}>Unlimited</option>
+          </select>
+        </div>
+      </div>
+      <div class="setting-row" style="margin-top: 8px;">
+        <span class="setting-hint">
+          Currently tracking {historyTotalRecords} record(s) ({formatBytes(historyStoreSizeBytes)}).
+          {#if pruneMessage} · <strong>{pruneMessage}</strong>{/if}
+        </span>
       </div>
     </div>
 

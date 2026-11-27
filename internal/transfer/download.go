@@ -50,12 +50,30 @@ type DownloadRegistry struct {
 	mu      sync.Mutex
 	records map[string]*downloadRecord
 	order   []string
+	onEvent func(d Download, isProgress bool)
 }
 
 const downloadHistoryLimit = 64
 
 func NewDownloadRegistry() *DownloadRegistry {
 	return &DownloadRegistry{records: make(map[string]*downloadRecord)}
+}
+
+// SetEventHook registers an optional callback invoked after download state or
+// progress updates (never under registry or record locks).
+func (r *DownloadRegistry) SetEventHook(fn func(d Download, isProgress bool)) {
+	r.mu.Lock()
+	r.onEvent = fn
+	r.mu.Unlock()
+}
+
+func (r *DownloadRegistry) emit(d Download, isProgress bool) {
+	r.mu.Lock()
+	fn := r.onEvent
+	r.mu.Unlock()
+	if fn != nil {
+		fn(d, isProgress)
+	}
 }
 
 func (r *DownloadRegistry) Start(fileID, name, session string, size int64) (Download, error) {
@@ -79,7 +97,9 @@ func (r *DownloadRegistry) StartKind(fileID, name, session string, size int64, k
 	r.order = append(r.order, id)
 	r.pruneLocked()
 	r.mu.Unlock()
-	return d.snapshot(), nil
+	snap := d.snapshot()
+	r.emit(snap, false)
+	return snap, nil
 }
 
 func (r *DownloadRegistry) pruneLocked() {
@@ -109,8 +129,8 @@ func (r *DownloadRegistry) Progress(id string, written int64) {
 		return
 	}
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	if d.State != DownloadStarting && d.State != DownloadTransferring && d.State != DownloadFinalizing {
+		d.mu.Unlock()
 		return
 	}
 	if written < 0 {
@@ -138,6 +158,9 @@ func (r *DownloadRegistry) Progress(id string, written int64) {
 	}
 	d.Written = written
 	d.written.Store(written)
+	snap := d.snapshotLocked()
+	d.mu.Unlock()
+	r.emit(snap, true)
 }
 
 func (r *DownloadRegistry) Finish(id string, written int64) {
@@ -169,14 +192,19 @@ func (r *DownloadRegistry) CancelSession(session string) {
 		}
 	}
 	r.mu.Unlock()
+	var canceled []Download
 	for _, d := range records {
 		d.mu.Lock()
 		if d.State != DownloadSent && d.State != DownloadFailed && d.State != DownloadCanceled {
 			d.State = DownloadCanceled
 			d.Finished = time.Now()
 			d.Reason = "session ended"
+			canceled = append(canceled, d.snapshotLocked())
 		}
 		d.mu.Unlock()
+	}
+	for _, snap := range canceled {
+		r.emit(snap, false)
 	}
 }
 
@@ -200,8 +228,8 @@ func (r *DownloadRegistry) finish(id string, state DownloadState, reason string,
 		return
 	}
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	if d.State != DownloadStarting && d.State != DownloadTransferring && d.State != DownloadFinalizing {
+		d.mu.Unlock()
 		return
 	}
 
@@ -222,6 +250,9 @@ func (r *DownloadRegistry) finish(id string, state DownloadState, reason string,
 		d.SHA256 = sha256
 	}
 	d.Finished = now
+	snap := d.snapshotLocked()
+	d.mu.Unlock()
+	r.emit(snap, false)
 }
 
 func (r *DownloadRegistry) setState(id string, state DownloadState, reason string) {
@@ -232,14 +263,15 @@ func (r *DownloadRegistry) setState(id string, state DownloadState, reason strin
 		return
 	}
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	if d.State == DownloadSent || d.State == DownloadCanceled {
+		d.mu.Unlock()
 		return
 	}
 	if d.State == DownloadFailed {
 		// Terminal failure, but a phone-side pause + continuation re-activates
 		// the same download (Begin -> transferring); nothing else does.
 		if state != DownloadTransferring {
+			d.mu.Unlock()
 			return
 		}
 	}
@@ -247,11 +279,18 @@ func (r *DownloadRegistry) setState(id string, state DownloadState, reason strin
 		d.Started = time.Now()
 	}
 	d.State, d.Reason = state, reason
+	snap := d.snapshotLocked()
+	d.mu.Unlock()
+	r.emit(snap, false)
 }
 
 func (d *downloadRecord) snapshot() Download {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return d.snapshotLocked()
+}
+
+func (d *downloadRecord) snapshotLocked() Download {
 	out := d.Download
 	out.Written = d.written.Load()
 	return out

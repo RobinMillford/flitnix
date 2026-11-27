@@ -1214,6 +1214,22 @@ export namespace main {
 	    visibilityPreviousMode?: string;
 	    visibilityExpiresAt?: string;
 	    qrSharingPaused?: boolean;
+	    minimizeToTray: boolean;
+	    launchOnLogin: boolean;
+	    traySupported?: boolean;
+	    autostartSupported?: boolean;
+	    notificationsEnabled: boolean;
+	    quietMode: boolean;
+	    hideNotificationFilenames: boolean;
+	    notifyIncomingTransfers: boolean;
+	    notifyCompletedTransfers: boolean;
+	    notifyFailedTransfers: boolean;
+	    notifyQuickText: boolean;
+	    notifyPairingRequests: boolean;
+	    notifyGuestRequests: boolean;
+	    notificationsSupported?: boolean;
+	    historyRetentionDays: number;
+	    historyMaxRecords: number;
 
 	    static createFrom(source: any = {}) {
 	        return new SettingsView(source);
@@ -1233,6 +1249,22 @@ export namespace main {
 	        this.visibilityPreviousMode = source["visibilityPreviousMode"];
 	        this.visibilityExpiresAt = source["visibilityExpiresAt"];
 	        this.qrSharingPaused = source["qrSharingPaused"];
+	        this.minimizeToTray = source["minimizeToTray"] !== undefined ? source["minimizeToTray"] : true;
+	        this.launchOnLogin = Boolean(source["launchOnLogin"]);
+	        this.traySupported = Boolean(source["traySupported"]);
+	        this.autostartSupported = Boolean(source["autostartSupported"]);
+	        this.notificationsEnabled = source["notificationsEnabled"] !== undefined ? source["notificationsEnabled"] : true;
+	        this.quietMode = Boolean(source["quietMode"]);
+	        this.hideNotificationFilenames = Boolean(source["hideNotificationFilenames"]);
+	        this.notifyIncomingTransfers = source["notifyIncomingTransfers"] !== undefined ? source["notifyIncomingTransfers"] : true;
+	        this.notifyCompletedTransfers = source["notifyCompletedTransfers"] !== undefined ? source["notifyCompletedTransfers"] : true;
+	        this.notifyFailedTransfers = source["notifyFailedTransfers"] !== undefined ? source["notifyFailedTransfers"] : true;
+	        this.notifyQuickText = source["notifyQuickText"] !== undefined ? source["notifyQuickText"] : true;
+	        this.notifyPairingRequests = source["notifyPairingRequests"] !== undefined ? source["notifyPairingRequests"] : true;
+	        this.notifyGuestRequests = source["notifyGuestRequests"] !== undefined ? source["notifyGuestRequests"] : true;
+	        this.notificationsSupported = Boolean(source["notificationsSupported"]);
+	        this.historyRetentionDays = source["historyRetentionDays"] ?? 90;
+	        this.historyMaxRecords = source["historyMaxRecords"] ?? 5000;
 	    }
 	}
 	export class SharedFileView {
@@ -1418,6 +1450,124 @@ export namespace main {
 		    }
 		    return a;
 		}
+	}
+
+	export class HistoryRecordView {
+	    id: string;
+	    timestamp: any;
+	    direction: string;
+	    kind?: string;
+	    displayName: string;
+	    itemCount: number;
+	    size: number;
+	    transferred: number;
+	    status: string;
+	    deviceId?: string;
+	    deviceName?: string;
+	    sha256?: string;
+	    error?: string;
+	    batchId?: string;
+	    canOpen: boolean;
+	    canReveal: boolean;
+	    canReshare: boolean;
+
+	    static createFrom(source: any = {}) {
+	        return new HistoryRecordView(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"] ?? '';
+	        this.timestamp = source["timestamp"];
+	        this.direction = source["direction"] ?? '';
+	        this.kind = source["kind"];
+	        this.displayName = source["displayName"] ?? '';
+	        this.itemCount = source["itemCount"] ?? 1;
+	        this.size = source["size"] ?? 0;
+	        this.transferred = source["transferred"] ?? 0;
+	        this.status = source["status"] ?? '';
+	        this.deviceId = source["deviceId"];
+	        this.deviceName = source["deviceName"];
+	        this.sha256 = source["sha256"];
+	        this.error = source["error"];
+	        this.batchId = source["batchId"];
+	        this.canOpen = Boolean(source["canOpen"]);
+	        this.canReveal = Boolean(source["canReveal"]);
+	        this.canReshare = Boolean(source["canReshare"]);
+	    }
+	}
+
+	export class HistoryFilterView {
+	    query: string;
+	    direction: string;
+	    status: string;
+	    device: string;
+	    dateRange: string;
+	    limit: number;
+	    offset: number;
+
+	    static createFrom(source: any = {}) {
+	        return new HistoryFilterView(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.query = source["query"] ?? '';
+	        this.direction = source["direction"] ?? '';
+	        this.status = source["status"] ?? '';
+	        this.device = source["device"] ?? '';
+	        this.dateRange = source["dateRange"] ?? '';
+	        this.limit = source["limit"] ?? 25;
+	        this.offset = source["offset"] ?? 0;
+	    }
+	}
+
+	export class HistoryQueryResultView {
+	    records: HistoryRecordView[];
+	    total: number;
+	    stats: history.Stats;
+	    storeSizeBytes: number;
+
+	    static createFrom(source: any = {}) {
+	        return new HistoryQueryResultView(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.records = (source["records"] ?? []).map((r: any) => new HistoryRecordView(r));
+	        this.total = source["total"] ?? 0;
+	        this.stats = new history.Stats(source["stats"] ?? {});
+	        this.storeSizeBytes = source["storeSizeBytes"] ?? 0;
+	    }
+	}
+
+}
+
+export namespace history {
+
+	export class Stats {
+	    totalRecords: number;
+	    completedCount: number;
+	    failedCount: number;
+	    canceledCount: number;
+	    totalBytesTransferred: number;
+	    incomingBytes: number;
+	    outgoingBytes: number;
+
+	    static createFrom(source: any = {}) {
+	        return new Stats(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.totalRecords = source["totalRecords"] ?? 0;
+	        this.completedCount = source["completedCount"] ?? 0;
+	        this.failedCount = source["failedCount"] ?? 0;
+	        this.canceledCount = source["canceledCount"] ?? 0;
+	        this.totalBytesTransferred = source["totalBytesTransferred"] ?? 0;
+	        this.incomingBytes = source["incomingBytes"] ?? 0;
+	        this.outgoingBytes = source["outgoingBytes"] ?? 0;
+	    }
 	}
 
 }

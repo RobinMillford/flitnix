@@ -10,9 +10,11 @@
   "use strict";
 
   var TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
-  var POLL_MS = 1200;           // approval polling cadence
+  var POLL_MS = 1200;           // approval polling cadence (fallback when SSE unavailable)
   var POLL_BACKOFF_MAX_MS = 5000; // ceiling for retry delay after a failed poll
+  var SSE_BACKUP_POLL_MS = 10000; // slow safety-net poll when SSE is connected
   var PROGRESS_POLL_MS = 500;   // download progress cadence while it is live
+  var SSE_PROGRESS_BACKUP_MS = 5000; // slow safety-net poll for downloads when SSE is connected
   var MAX_PROGRESS_FAILURES = 20; // consecutive failed progress polls before giving up
   var PAINT_MIN_MS = 200;       // upload progress repaint throttle
   var CANCEL_RETRIES = 3;       // DELETE attempts before showing the real state
@@ -319,6 +321,9 @@
         showAwarenessBanner("Flitnix was moved to the background. Transfer status has been refreshed.");
         reconcileActiveTransfers();
       }
+      if (!appState.ended && token && !sseState.active && !sseState.connecting) {
+        connectEvents();
+      }
       syncWakeLock();
     }
     updateAwarenessUI();
@@ -462,11 +467,18 @@
     return Math.min(POLL_BACKOFF_MAX_MS, POLL_MS * Math.pow(1.6, Math.max(0, failures - 1)));
   }
 
-  // Wake any waiting poll as soon as the network returns.
+  // Wake any waiting poll or dormant SSE stream as soon as the network returns.
   var wakeups = [];
   window.addEventListener("online", function () {
     var fns = wakeups; wakeups = [];
     fns.forEach(function (fn) { fn(); });
+    if (!appState.ended && token && !sseState.active && !sseState.connecting) {
+      if (sseState.reconnectTimer) {
+        clearTimeout(sseState.reconnectTimer);
+        sseState.reconnectTimer = null;
+      }
+      connectEvents();
+    }
   });
   function waitThen(holder, ms, fn) {
     var done = false;
@@ -523,6 +535,229 @@
         err.silent = res.status === 401; // session UI already switching over
         throw err;
       });
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // Real-time Server-Sent Events (Bearer-authenticated via fetch stream)
+  // ------------------------------------------------------------------
+  var sseState = {
+    active: false,
+    connecting: false,
+    wasEverConnected: false,
+    controller: null,
+    reconnectTimer: null,
+    failures: 0,
+    lastEventId: 0
+  };
+
+  function disconnectEvents() {
+    if (sseState.reconnectTimer) {
+      clearTimeout(sseState.reconnectTimer);
+      sseState.reconnectTimer = null;
+    }
+    if (sseState.controller) {
+      try { sseState.controller.abort(); } catch (e) { /* gone */ }
+      sseState.controller = null;
+    }
+    sseState.active = false;
+    sseState.connecting = false;
+  }
+
+  function scheduleEventReconnect(immediate) {
+    if (appState.ended || !token) return;
+    if (sseState.reconnectTimer) return;
+    var delay = immediate ? 120 : retryBackoffMs(Math.max(1, sseState.failures));
+    sseState.reconnectTimer = setTimeout(function () {
+      sseState.reconnectTimer = null;
+      connectEvents();
+    }, delay);
+  }
+
+  function reconcileAfterEventStream() {
+    if (appState.ended || !token) return;
+    reconcileActiveTransfers();
+    fetchTextMessages();
+  }
+
+  function dispatchSSEBlock(rawBlock) {
+    if (!rawBlock) return;
+    var lines = rawBlock.split(/\r?\n/);
+    var eventType = "message";
+    var eventId = 0;
+    var dataLines = [];
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      if (!line || line.charAt(0) === ":") continue;
+      var colon = line.indexOf(":");
+      var field = colon >= 0 ? line.slice(0, colon) : line;
+      var val = colon >= 0 ? line.slice(colon + 1) : "";
+      if (val.charAt(0) === " ") val = val.slice(1);
+      if (field === "event") eventType = val;
+      else if (field === "id") {
+        var parsedId = parseInt(val, 10);
+        if (!isNaN(parsedId) && parsedId > 0) eventId = parsedId;
+      } else if (field === "data") {
+        dataLines.push(val);
+      }
+    }
+    if (dataLines.length === 0) return;
+
+    if (eventId > 0) {
+      if (eventId <= sseState.lastEventId) return;
+      sseState.lastEventId = eventId;
+    }
+
+    var parsed = null;
+    try {
+      parsed = JSON.parse(dataLines.join("\n"));
+    } catch (e) {
+      return;
+    }
+
+    var envType = (parsed && parsed.type) ? parsed.type : eventType;
+    var payload = (parsed && parsed.payload !== undefined) ? parsed.payload : parsed;
+
+    if (envType === "ready") {
+      var reconnected = sseState.wasEverConnected || sseState.failures > 0;
+      sseState.wasEverConnected = true;
+      sseState.active = true;
+      sseState.failures = 0;
+      setReconnecting(false, "events");
+      if (textPollTimer) {
+        clearInterval(textPollTimer);
+        textPollTimer = null;
+      }
+      if (reconnected) {
+        reconcileAfterEventStream();
+      }
+      return;
+    }
+
+    if (envType === "resync") {
+      reconcileAfterEventStream();
+      return;
+    }
+
+    if (envType === "reconnect") {
+      return;
+    }
+
+    if (envType === "session.ended") {
+      endUnauthorized((payload && payload.code) || "session_ended");
+      return;
+    }
+
+    if (envType === "files.updated") {
+      refreshFiles();
+      return;
+    }
+
+    if (envType === "text.message" || envType === "text.cleared") {
+      fetchTextMessages();
+      return;
+    }
+
+    if (envType === "batch.pending" || envType === "batch.updated") {
+      if (activeBatch && !appState.ended && (!payload || !payload.id || payload.id === activeBatch.id)) {
+        if (activeBatch.timer) {
+          clearTimeout(activeBatch.timer);
+          activeBatch.timer = null;
+        }
+        pollBatch();
+      }
+      return;
+    }
+
+    if (envType === "download.updated" || envType === "download.progress") {
+      if (payload && payload.id && activeDownloadPolls[payload.id]) {
+        try { activeDownloadPolls[payload.id](); } catch (e) {}
+      }
+    }
+  }
+
+  function connectEvents() {
+    if (appState.ended || !token || sseState.active || sseState.connecting) return;
+    if (typeof fetch !== "function" || typeof ReadableStream === "undefined" || typeof TextDecoder === "undefined") {
+      return;
+    }
+    if (sseState.reconnectTimer) {
+      clearTimeout(sseState.reconnectTimer);
+      sseState.reconnectTimer = null;
+    }
+
+    var controller = typeof AbortController === "function" ? new AbortController() : null;
+    sseState.controller = controller;
+    sseState.connecting = true;
+
+    fetch("/api/events", {
+      method: "GET",
+      headers: {
+        "Authorization": "Bearer " + token,
+        "Accept": "text/event-stream"
+      },
+      cache: "no-store",
+      signal: controller ? controller.signal : undefined
+    }).then(function (res) {
+      if (res.status === 401) {
+        return readBody(res).then(function (body) {
+          sseState.connecting = false;
+          endUnauthorized(body && body.code);
+        });
+      }
+      if (!res.ok || !res.body || typeof res.body.getReader !== "function") {
+        throw new Error("event stream status " + res.status);
+      }
+
+      sseState.connecting = false;
+      var reader = res.body.getReader();
+      var decoder = new TextDecoder("utf-8");
+      var buffer = "";
+      var sawReconnectDirective = false;
+
+      function readLoop() {
+        return reader.read().then(function (step) {
+          if (appState.ended || sseState.controller !== controller) {
+            try { reader.cancel(); } catch (e) {}
+            return;
+          }
+          if (step.done) {
+            sseState.active = false;
+            sseState.controller = null;
+            if (!appState.ended) {
+              scheduleTextPoll();
+              scheduleEventReconnect(sawReconnectDirective);
+            }
+            return;
+          }
+          buffer += decoder.decode(step.value, { stream: true });
+          var match;
+          while ((match = /\r?\n\r?\n/.exec(buffer)) !== null) {
+            var block = buffer.slice(0, match.index);
+            buffer = buffer.slice(match.index + match[0].length);
+            if (block.indexOf("event: reconnect") >= 0) {
+              sawReconnectDirective = true;
+            }
+            dispatchSSEBlock(block);
+          }
+          return readLoop();
+        });
+      }
+
+      return readLoop();
+    }).catch(function (err) {
+      if (sseState.controller === controller) {
+        sseState.controller = null;
+      }
+      sseState.connecting = false;
+      sseState.active = false;
+      if (appState.ended || (err && err.name === "AbortError")) return;
+      sseState.failures += 1;
+      if (sseState.failures >= 2) {
+        setReconnecting(true, "events");
+      }
+      scheduleTextPoll();
+      scheduleEventReconnect(false);
     });
   }
 
@@ -685,6 +920,7 @@
   }
 
   function teardownJobs() {
+    disconnectEvents();
     if (textPollTimer) { clearInterval(textPollTimer); textPollTimer = null; }
     releaseWakeLock();
     queue.forEach(function (job) {
@@ -970,7 +1206,7 @@
 
   function watchBatch() {
     if (!activeBatch || appState.ended) return;
-    activeBatch.timer = setTimeout(pollBatch, POLL_MS);
+    activeBatch.timer = setTimeout(pollBatch, sseState.active ? SSE_BACKUP_POLL_MS : POLL_MS);
   }
 
   // applyBatchSnapshot folds one authoritative BatchView into the local job
@@ -2162,7 +2398,7 @@
           }
           return;
         }
-        setTimeout(tick, PROGRESS_POLL_MS);
+        setTimeout(tick, sseState.active ? SSE_PROGRESS_BACKUP_MS : PROGRESS_POLL_MS);
       }).catch(function (err) {
         if (appState.ended || (err && err.silent)) return;
         if (err && err.status === 404) {
@@ -2182,7 +2418,7 @@
         setTimeout(tick, backoffMs(failures));
       });
     }
-    setTimeout(tick, PROGRESS_POLL_MS);
+    setTimeout(tick, sseState.active ? SSE_PROGRESS_BACKUP_MS : PROGRESS_POLL_MS);
   }
 
   function showDownloadError(f, msg) {
@@ -2302,8 +2538,9 @@
       textPollTimer = null;
     }
     fetchTextMessages();
+    if (sseState.active) return;
     textPollTimer = setInterval(function () {
-      if (appState.ended) {
+      if (appState.ended || sseState.active) {
         if (textPollTimer) { clearInterval(textPollTimer); textPollTimer = null; }
         return;
       }
@@ -2708,6 +2945,7 @@
     initTrustedPairingUI();
     refreshFiles();
     initQuickText();
+    connectEvents();
     scheduleTextPoll();
   }
 

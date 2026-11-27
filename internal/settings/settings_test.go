@@ -25,6 +25,20 @@ func TestDefaultSettings(t *testing.T) {
 	if d.AutoStartSession {
 		t.Fatalf("expected default autoStartSession false")
 	}
+	if !d.MinimizeToTray {
+		t.Fatalf("expected default minimizeToTray true")
+	}
+	if d.LaunchOnLogin {
+		t.Fatalf("expected default launchOnLogin false")
+	}
+	if !d.NotificationsEnabled || d.QuietMode || d.HideNotificationFilenames {
+		t.Fatalf("unexpected default notification flags: enabled=%v quiet=%v hideNames=%v",
+			d.NotificationsEnabled, d.QuietMode, d.HideNotificationFilenames)
+	}
+	if d.HistoryRetentionDays != DefaultHistoryRetentionDays || d.HistoryMaxRecords != DefaultHistoryMaxRecords {
+		t.Fatalf("unexpected default history retention: days=%d max=%d",
+			d.HistoryRetentionDays, d.HistoryMaxRecords)
+	}
 }
 
 func TestStore_SaveAndGetRoundTrip(t *testing.T) {

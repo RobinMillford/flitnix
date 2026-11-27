@@ -10,6 +10,10 @@ export function AddExpectedParticipant(arg1, arg2, arg3) {
   return window['go']['main']['App']['AddExpectedParticipant'](arg1, arg2, arg3);
 }
 
+export function ApplyHistoryRetentionNow() {
+  return window['go']['main']['App']['ApplyHistoryRetentionNow']();
+}
+
 export function ApplyUpdate() {
   return window['go']['main']['App']['ApplyUpdate']();
 }
@@ -392,6 +396,46 @@ export function StartSession(arg1) {
 
 export function TriggerNearbyScan() {
   return window['go']['main']['App']['TriggerNearbyScan']();
+}
+
+export function ClearTransferHistory() {
+  return window['go']['main']['App']['ClearTransferHistory']();
+}
+
+export function DeleteHistoryRecord(arg1) {
+  return window['go']['main']['App']['DeleteHistoryRecord'](arg1);
+}
+
+export function HideWindow() {
+  return window['go']['main']['App']['HideWindow']();
+}
+
+export function OpenHistoryFile(arg1) {
+  return window['go']['main']['App']['OpenHistoryFile'](arg1);
+}
+
+export function QueryTransferHistory(arg1) {
+  return window['go']['main']['App']['QueryTransferHistory'](arg1);
+}
+
+export function QuitApp() {
+  return window['go']['main']['App']['QuitApp']();
+}
+
+export function ReshareHistoryFile(arg1) {
+  return window['go']['main']['App']['ReshareHistoryFile'](arg1);
+}
+
+export function RestoreWindow() {
+  return window['go']['main']['App']['RestoreWindow']();
+}
+
+export function RevealHistoryFile(arg1) {
+  return window['go']['main']['App']['RevealHistoryFile'](arg1);
+}
+
+export function ToggleQuietMode() {
+  return window['go']['main']['App']['ToggleQuietMode']();
 }
 
 export function UpdateExpectedParticipant(arg1) {

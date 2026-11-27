@@ -21,6 +21,7 @@ import (
 
 	"github.com/itsyamin/flitnix/internal/client"
 	"github.com/itsyamin/flitnix/internal/devices"
+	"github.com/itsyamin/flitnix/internal/events"
 	"github.com/itsyamin/flitnix/internal/netenv"
 	"github.com/itsyamin/flitnix/internal/server"
 	"github.com/itsyamin/flitnix/internal/session"
@@ -61,6 +62,7 @@ type PeerTransferJob struct {
 	Error          string    `json:"error,omitempty"`
 	CreatedAt      time.Time `json:"createdAt"`
 	CompletedAt    time.Time `json:"completedAt,omitempty"`
+	SourcePath     string    `json:"-"`
 }
 
 // PeerSendRequest initiates a desktop-to-desktop transfer.
@@ -223,6 +225,15 @@ func (m *peerTransferManager) emitJob(j PeerTransferJob) {
 	m.app.startupMu.Unlock()
 	if ctx != nil && ctx.Value("frontend") != nil {
 		runtime.EventsEmit(ctx, "peer-transfer:updated", j)
+	}
+	if m.app.events != nil {
+		if j.State == "sending" || j.State == "receiving" {
+			if m.app.events.AllowProgress("peer:"+j.ID, events.DefaultProgressInterval) {
+				m.app.events.PublishDesktop(events.TypePeerTransfer, j)
+			}
+		} else {
+			m.app.events.PublishDesktop(events.TypePeerTransfer, j)
+		}
 	}
 }
 
@@ -655,6 +666,10 @@ func (a *App) ConnectAndSendToPeer(req PeerSendRequest) (PeerTransferJob, error)
 	if peerName == "" {
 		peerName = authority
 	}
+	sourcePath := ""
+	if len(req.Paths) > 0 {
+		sourcePath = filepath.Clean(req.Paths[0])
+	}
 	job := PeerTransferJob{
 		ID:          jobID,
 		PeerHostID:  req.ExpectedHostID,
@@ -666,6 +681,7 @@ func (a *App) ConnectAndSendToPeer(req PeerSendRequest) (PeerTransferJob, error)
 		TotalBytes:  lm.TotalBytes,
 		State:       "connecting",
 		CreatedAt:   time.Now(),
+		SourcePath:  sourcePath,
 	}
 
 	jobCtx, cancelFn := context.WithCancel(context.Background())

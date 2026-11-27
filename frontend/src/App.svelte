@@ -5,6 +5,7 @@
   import { OnFileDrop, OnFileDropOff, EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
   import logoUrl from './assets/images/logo-universal.png'
   import { createRefreshScheduler } from './refreshScheduler'
+  import { createDesktopEventCoalescer, type DesktopRealtimeEvent } from './realtimeEvents'
   import ConnectionDoctorModal from './components/ConnectionDoctorModal.svelte'
   import UpdateModal from './components/UpdateModal.svelte'
   import Toast from './components/Toast.svelte'
@@ -101,14 +102,30 @@
 
   // Persistent Settings state
   let settingsState: main.SettingsView = {
-    version: 2,
+    version: 6,
     theme: getInitialTheme(),
     locale: 'system',
     downloadDir: '',
     effectiveDir: '',
     autoStartSession: false,
     preserveModTimes: true,
-    preferredInterface: ''
+    preferredInterface: '',
+    minimizeToTray: true,
+    launchOnLogin: false,
+    traySupported: false,
+    autostartSupported: false,
+    notificationsEnabled: true,
+    quietMode: false,
+    hideNotificationFilenames: false,
+    notifyIncomingTransfers: true,
+    notifyCompletedTransfers: true,
+    notifyFailedTransfers: true,
+    notifyQuickText: true,
+    notifyPairingRequests: true,
+    notifyGuestRequests: true,
+    notificationsSupported: false,
+    historyRetentionDays: 90,
+    historyMaxRecords: 5000
   }
   let settingsSavedAlert = ''
   let settingsError = ''
@@ -206,6 +223,7 @@
   let networkRefreshGeneration = 0
   let disposed = false
   let networkState: netenv.NetworkState | null = null
+  let historyRevision = 0
   const SESSION_PORT = '43821'
 
   // Quick Text state
@@ -1297,12 +1315,57 @@
         updateCheckResult = res
       }
     }).catch(() => {})
-    const id = setInterval(refresh, 800)
+    const eventCoalescer = createDesktopEventCoalescer({
+      progressIntervalMs: 200,
+      onRefresh: () => {
+        if (!disposed) refresh()
+      }
+    })
+    EventsOn('flitnix:event', (ev: DesktopRealtimeEvent) => {
+      if (disposed) return
+      eventCoalescer.handleEvent(ev)
+      if (ev?.type === 'history.updated') {
+        historyRevision += 1
+      }
+    })
+    EventsOn('settings:changed', (s: main.SettingsView) => {
+      if (!disposed && s) settingsState = s
+    })
+    EventsOn('flitnix:navigate', (dest: { tab?: TabName }) => {
+      if (!disposed && dest?.tab && validTabs.includes(dest.tab)) {
+        switchTab(dest.tab)
+      }
+    })
+    const onVisibilityChange = () => {
+      if (!disposed && typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        refresh()
+      }
+    }
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', onVisibilityChange)
+    }
+    const reconcileId = setInterval(() => {
+      if (disposed) return
+      const hasActiveWork =
+        sessions.length > 0 ||
+        Boolean(guestRoomState?.room) ||
+        peerTransfers.some((j) => j.state === 'sending' || j.state === 'receiving')
+      if (hasActiveWork) {
+        refresh()
+      }
+    }, 15000)
     OnFileDrop(handleDrop, true)
     return () => {
       disposed = true
-      clearInterval(id)
+      clearInterval(reconcileId)
+      eventCoalescer.dispose()
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', onVisibilityChange)
+      }
       OnFileDropOff()
+      EventsOff('flitnix:event')
+      EventsOff('settings:changed')
+      EventsOff('flitnix:navigate')
       EventsOff('network:changed')
       EventsOff('visibility:changed')
       EventsOff('discovery:peers')
@@ -1772,11 +1835,10 @@
         {:else if activeTab === 'history'}
           <div id="panel-history" role="tabpanel" aria-labelledby="tab-history" tabindex="0">
             <TransferHistoryView
-              {uploads}
-              {downloads}
-              {batches}
+              {historyRevision}
               {handleOpenDownloadFolder}
               {copyTextToClipboard}
+              onReshared={() => refresh()}
               {showToast}
             />
           </div>
