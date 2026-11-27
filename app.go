@@ -78,29 +78,39 @@ type SessionView struct {
 }
 
 type GuestRoomView struct {
-	ID              string                      `json:"id"`
-	Date            string                      `json:"date"`
-	DestinationRoot string                      `json:"destinationRoot"`
-	RoomFolder      string                      `json:"roomFolder"`
-	Title           string                      `json:"title"`
-	Description     string                      `json:"description,omitempty"`
-	Deadline        *time.Time                  `json:"deadline,omitempty"`
-	CollisionPolicy string                      `json:"collisionPolicy"`
-	State           string                      `json:"state"`
-	DurationSeconds int                         `json:"durationSeconds"`
-	CreatedAt       time.Time                   `json:"createdAt"`
-	ExpiresAt       time.Time                   `json:"expiresAt"`
-	InviteSecret    string                      `json:"inviteSecret,omitempty"`
-	InviteURL       string                      `json:"inviteUrl,omitempty"`
-	QRDataURL       string                      `json:"qrDataUrl,omitempty"`
-	FormSchema      []guest.FormField           `json:"formSchema,omitempty"`
-	Roster          []guest.ExpectedParticipant `json:"roster,omitempty"`
-	HasRoster       bool                        `json:"hasRoster"`
+	ID                  string                      `json:"id"`
+	Date                string                      `json:"date"`
+	DestinationRoot     string                      `json:"destinationRoot"`
+	RoomFolder          string                      `json:"roomFolder"`
+	Mode                string                      `json:"mode"`
+	AllowsUpload        bool                        `json:"allowsUpload"`
+	AllowsDownload      bool                        `json:"allowsDownload"`
+	RequireJoinApproval bool                        `json:"requireJoinApproval"`
+	DownloadCount       int                         `json:"downloadCount"`
+	ActiveDownloads     int                         `json:"activeDownloads"`
+	Title               string                      `json:"title"`
+	Description         string                      `json:"description,omitempty"`
+	Deadline            *time.Time                  `json:"deadline,omitempty"`
+	CollisionPolicy     string                      `json:"collisionPolicy"`
+	State               string                      `json:"state"`
+	DurationSeconds     int                         `json:"durationSeconds"`
+	CreatedAt           time.Time                   `json:"createdAt"`
+	ExpiresAt           time.Time                   `json:"expiresAt"`
+	InviteSecret        string                      `json:"inviteSecret,omitempty"`
+	InviteURL           string                      `json:"inviteUrl,omitempty"`
+	QRDataURL           string                      `json:"qrDataUrl,omitempty"`
+	FormSchema          []guest.FormField           `json:"formSchema,omitempty"`
+	Roster              []guest.ExpectedParticipant `json:"roster,omitempty"`
+	HasRoster           bool                        `json:"hasRoster"`
+	SharedSources       []SharedSourceView          `json:"sharedSources,omitempty"`
 }
 
 type GuestRoomConfigView struct {
 	DestinationDir       string                      `json:"destinationDir"`
 	DurationMinutes      int                         `json:"durationMinutes"`
+	Mode                 string                      `json:"mode,omitempty"`
+	AutoApproveGuests    bool                        `json:"autoApproveGuests,omitempty"`
+	SharedPaths          []string                    `json:"sharedPaths,omitempty"`
 	Title                string                      `json:"title"`
 	Description          string                      `json:"description,omitempty"`
 	DeadlineRFC3339      string                      `json:"deadlineRFC3339,omitempty"`
@@ -3262,6 +3272,50 @@ func (a *App) StartGuestRoom(destinationDir string, durationMinutes int) (GuestR
 	})
 }
 
+func (a *App) buildGuestRoomView(room *guest.Room, srvURL string) GuestRoomView {
+	var qrDataURL string
+	inviteURL := ""
+	if srvURL != "" {
+		inviteURL = fmt.Sprintf("%s/guest#%s", srvURL, room.InviteSecret)
+		if qrPNG, err := qr.PNG(inviteURL, qr.DefaultSize); err == nil {
+			qrDataURL = "data:image/png;base64," + base64.StdEncoding.EncodeToString(qrPNG)
+		}
+	}
+	v := room.View()
+	sources := room.ListSharedSources()
+	sharedViews := make([]SharedSourceView, 0, len(sources))
+	for _, s := range sources {
+		sharedViews = append(sharedViews, sharedSourceView(s))
+	}
+	return GuestRoomView{
+		ID:                  v.ID,
+		Date:                v.Date,
+		DestinationRoot:     v.DestinationRoot,
+		RoomFolder:          v.RoomFolder,
+		Mode:                string(v.Mode),
+		AllowsUpload:        v.AllowsUpload,
+		AllowsDownload:      v.AllowsDownload,
+		RequireJoinApproval: v.RequireJoinApproval,
+		DownloadCount:       v.DownloadCount,
+		ActiveDownloads:     v.ActiveDownloads,
+		Title:               v.Title,
+		Description:         v.Description,
+		Deadline:            v.Deadline,
+		CollisionPolicy:     string(v.CollisionPolicy),
+		State:               string(v.State),
+		DurationSeconds:     v.DurationSeconds,
+		CreatedAt:           v.CreatedAt,
+		ExpiresAt:           v.ExpiresAt,
+		InviteSecret:        v.InviteSecret,
+		InviteURL:           inviteURL,
+		QRDataURL:           qrDataURL,
+		FormSchema:          v.FormSchema,
+		Roster:              v.Roster,
+		HasRoster:           v.HasRoster,
+		SharedSources:       sharedViews,
+	}
+}
+
 func (a *App) StartGuestRoomWithConfig(cfg GuestRoomConfigView) (GuestRoomView, error) {
 	if cfg.DestinationDir == "" {
 		cfg.DestinationDir = a.store.Dir()
@@ -3308,9 +3362,13 @@ func (a *App) StartGuestRoomWithConfig(cfg GuestRoomConfigView) (GuestRoomView, 
 		}
 	}
 
+	mode := guest.NormalizeRoomMode(guest.RoomMode(cfg.Mode))
 	room, err := a.guestMgr.CreateRoomWithConfig(guest.RoomConfig{
 		DestinationRoot:      cfg.DestinationDir,
 		Duration:             duration,
+		Mode:                 mode,
+		AutoApproveGuests:    cfg.AutoApproveGuests,
+		SharedPaths:          cfg.SharedPaths,
 		Title:                cfg.Title,
 		Description:          cfg.Description,
 		Deadline:             deadline,
@@ -3327,7 +3385,7 @@ func (a *App) StartGuestRoomWithConfig(cfg GuestRoomConfigView) (GuestRoomView, 
 			EventType: audit.EventRoomCreated,
 			RoomID:    room.ID,
 			Outcome:   audit.OutcomeSuccess,
-			Details:   fmt.Sprintf("title: %s, policy: %s", room.Title, room.CollisionPolicy),
+			Details:   fmt.Sprintf("title: %s, mode: %s, policy: %s", room.Title, room.Mode, room.CollisionPolicy),
 		})
 	}
 
@@ -3335,34 +3393,7 @@ func (a *App) StartGuestRoomWithConfig(cfg GuestRoomConfigView) (GuestRoomView, 
 	srvURL := a.srv.URL()
 	a.srvMu.Unlock()
 
-	inviteURL := fmt.Sprintf("%s/guest#%s", srvURL, room.InviteSecret)
-	qrPNG, err := qr.PNG(inviteURL, qr.DefaultSize)
-	var qrDataURL string
-	if err == nil {
-		qrDataURL = "data:image/png;base64," + base64.StdEncoding.EncodeToString(qrPNG)
-	}
-
-	v := room.View()
-	return GuestRoomView{
-		ID:              v.ID,
-		Date:            v.Date,
-		DestinationRoot: v.DestinationRoot,
-		RoomFolder:      v.RoomFolder,
-		Title:           v.Title,
-		Description:     v.Description,
-		Deadline:        v.Deadline,
-		CollisionPolicy: string(v.CollisionPolicy),
-		State:           string(v.State),
-		DurationSeconds: v.DurationSeconds,
-		CreatedAt:       v.CreatedAt,
-		ExpiresAt:       v.ExpiresAt,
-		InviteSecret:    v.InviteSecret,
-		InviteURL:       inviteURL,
-		QRDataURL:       qrDataURL,
-		FormSchema:      v.FormSchema,
-		Roster:          v.Roster,
-		HasRoster:       v.HasRoster,
-	}, nil
+	return a.buildGuestRoomView(room, srvURL), nil
 }
 
 func (a *App) GetGuestRoomState() (GuestRoomStateView, error) {
@@ -3378,37 +3409,9 @@ func (a *App) GetGuestRoomState() (GuestRoomStateView, error) {
 	}
 	a.srvMu.Unlock()
 
-	var qrDataURL string
-	inviteURL := ""
-	if srvURL != "" {
-		inviteURL = fmt.Sprintf("%s/guest#%s", srvURL, room.InviteSecret)
-		qrPNG, err := qr.PNG(inviteURL, qr.DefaultSize)
-		if err == nil {
-			qrDataURL = "data:image/png;base64," + base64.StdEncoding.EncodeToString(qrPNG)
-		}
-	}
-
 	rv := room.View()
-	roomView := &GuestRoomView{
-		ID:              rv.ID,
-		Date:            rv.Date,
-		DestinationRoot: rv.DestinationRoot,
-		RoomFolder:      rv.RoomFolder,
-		Title:           rv.Title,
-		Description:     rv.Description,
-		Deadline:        rv.Deadline,
-		CollisionPolicy: string(rv.CollisionPolicy),
-		State:           string(rv.State),
-		DurationSeconds: rv.DurationSeconds,
-		CreatedAt:       rv.CreatedAt,
-		ExpiresAt:       rv.ExpiresAt,
-		InviteSecret:    rv.InviteSecret,
-		InviteURL:       inviteURL,
-		QRDataURL:       qrDataURL,
-		FormSchema:      rv.FormSchema,
-		Roster:          rv.Roster,
-		HasRoster:       rv.HasRoster,
-	}
+	roomViewValue := a.buildGuestRoomView(room, srvURL)
+	roomView := &roomViewValue
 
 	var pendingGuests []GuestView
 	var approvedGuests []GuestView
@@ -3624,6 +3627,13 @@ func (a *App) EndGuestRoom() error {
 		roomID = room.ID
 	}
 	err := a.guestMgr.EndRoom()
+	if roomID != "" {
+		a.srvMu.Lock()
+		if a.srv != nil {
+			a.srv.RevokeRoomGrants(roomID)
+		}
+		a.srvMu.Unlock()
+	}
 	if err == nil && a.events != nil && roomID != "" {
 		a.events.PublishGuest(roomID, "", events.TypeGuestStatus, map[string]any{
 			"state": "ended",
@@ -3645,6 +3655,75 @@ func (a *App) EndGuestRoom() error {
 		})
 	}
 	return err
+}
+
+// PickGuestSharePaths lets the host choose files or a folder for Guest Drop Box sharing.
+func (a *App) PickGuestSharePaths(selectFolder bool) ([]string, error) {
+	if a.ctx == nil {
+		return []string{}, nil
+	}
+	if selectFolder {
+		dir, err := runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
+			Title: "Choose a folder to share with guests",
+		})
+		if err != nil || dir == "" {
+			return []string{}, nil
+		}
+		return []string{dir}, nil
+	}
+	paths, err := runtime.OpenMultipleFilesDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Choose files to share with guests",
+	})
+	if err != nil || len(paths) == 0 {
+		return []string{}, nil
+	}
+	return paths, nil
+}
+
+// AddGuestSharedPaths shares files or folders strictly inside the active guest room.
+func (a *App) AddGuestSharedPaths(paths []string) ([]SharedSourceView, error) {
+	room := a.guestMgr.ActiveRoom()
+	if room == nil {
+		return nil, errors.New("flitnix: no active guest room")
+	}
+	if !room.AllowsDownload() {
+		return nil, guest.ErrDownloadDisabled
+	}
+	added := make([]SharedSourceView, 0, len(paths))
+	for _, p := range paths {
+		source, err := room.AddSharedPath(p)
+		if err != nil {
+			return added, fmt.Errorf("%s: %w", filepath.Base(p), err)
+		}
+		added = append(added, sharedSourceView(source))
+	}
+	if len(added) > 0 && a.events != nil {
+		a.events.PublishGuest(room.ID, "", events.TypeGuestRoomUpdated, map[string]any{
+			"action": "shared_sources_updated",
+			"roomId": room.ID,
+			"count":  len(added),
+		})
+	}
+	return added, nil
+}
+
+// RemoveGuestSharedSource unlists a shared source from the active guest room.
+func (a *App) RemoveGuestSharedSource(id string) error {
+	room := a.guestMgr.ActiveRoom()
+	if room == nil {
+		return errors.New("flitnix: no active guest room")
+	}
+	if !room.RemoveSharedSource(id) {
+		return transfer.ErrNotFound
+	}
+	if a.events != nil {
+		a.events.PublishGuest(room.ID, "", events.TypeGuestRoomUpdated, map[string]any{
+			"action":   "shared_sources_updated",
+			"roomId":   room.ID,
+			"sourceId": id,
+		})
+	}
+	return nil
 }
 
 func (a *App) PickGuestDestination() (string, error) {

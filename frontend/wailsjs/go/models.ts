@@ -868,6 +868,9 @@ export namespace main {
 	export class GuestRoomConfigView {
 	    destinationDir: string;
 	    durationMinutes: number;
+	    mode?: string;
+	    autoApproveGuests?: boolean;
+	    sharedPaths?: string[];
 	    title: string;
 	    description?: string;
 	    deadlineRFC3339?: string;
@@ -883,6 +886,9 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.destinationDir = source["destinationDir"];
 	        this.durationMinutes = source["durationMinutes"];
+	        this.mode = source["mode"];
+	        this.autoApproveGuests = source["autoApproveGuests"];
+	        this.sharedPaths = source["sharedPaths"];
 	        this.title = source["title"];
 	        this.description = source["description"];
 	        this.deadlineRFC3339 = source["deadlineRFC3339"];
@@ -1004,11 +1010,60 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class SharedSourceView {
+	    id: string;
+	    kind: string;
+	    name: string;
+	    rootName?: string;
+	    itemCount: number;
+	    totalBytes: number;
+	    // Go type: time
+	    created: any;
+	
+	    static createFrom(source: any = {}) {
+	        return new SharedSourceView(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.kind = source["kind"];
+	        this.name = source["name"];
+	        this.rootName = source["rootName"];
+	        this.itemCount = source["itemCount"];
+	        this.totalBytes = source["totalBytes"];
+	        this.created = this.convertValues(source["created"], null);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class GuestRoomView {
 	    id: string;
 	    date: string;
 	    destinationRoot: string;
 	    roomFolder: string;
+	    mode: string;
+	    allowsUpload: boolean;
+	    allowsDownload: boolean;
+	    requireJoinApproval: boolean;
+	    downloadCount: number;
+	    activeDownloads: number;
 	    title: string;
 	    description?: string;
 	    // Go type: time
@@ -1026,6 +1081,7 @@ export namespace main {
 	    formSchema?: guest.FormField[];
 	    roster?: guest.ExpectedParticipant[];
 	    hasRoster: boolean;
+	    sharedSources?: SharedSourceView[];
 	
 	    static createFrom(source: any = {}) {
 	        return new GuestRoomView(source);
@@ -1037,6 +1093,12 @@ export namespace main {
 	        this.date = source["date"];
 	        this.destinationRoot = source["destinationRoot"];
 	        this.roomFolder = source["roomFolder"];
+	        this.mode = source["mode"];
+	        this.allowsUpload = source["allowsUpload"];
+	        this.allowsDownload = source["allowsDownload"];
+	        this.requireJoinApproval = source["requireJoinApproval"];
+	        this.downloadCount = source["downloadCount"];
+	        this.activeDownloads = source["activeDownloads"];
 	        this.title = source["title"];
 	        this.description = source["description"];
 	        this.deadline = this.convertValues(source["deadline"], null);
@@ -1051,6 +1113,7 @@ export namespace main {
 	        this.formSchema = this.convertValues(source["formSchema"], guest.FormField);
 	        this.roster = this.convertValues(source["roster"], guest.ExpectedParticipant);
 	        this.hasRoster = source["hasRoster"];
+	        this.sharedSources = this.convertValues(source["sharedSources"], SharedSourceView);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -1587,49 +1650,7 @@ export namespace main {
 		    return a;
 		}
 	}
-	export class SharedSourceView {
-	    id: string;
-	    kind: string;
-	    name: string;
-	    rootName?: string;
-	    itemCount: number;
-	    totalBytes: number;
-	    // Go type: time
-	    created: any;
 	
-	    static createFrom(source: any = {}) {
-	        return new SharedSourceView(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.id = source["id"];
-	        this.kind = source["kind"];
-	        this.name = source["name"];
-	        this.rootName = source["rootName"];
-	        this.itemCount = source["itemCount"];
-	        this.totalBytes = source["totalBytes"];
-	        this.created = this.convertValues(source["created"], null);
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
 	export class TextMessageView {
 	    id: string;
 	    sender: string;

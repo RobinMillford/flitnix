@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/itsyamin/flitnix/internal/guest"
 	"github.com/itsyamin/flitnix/internal/session"
 	"github.com/itsyamin/flitnix/internal/transfer"
 )
@@ -33,6 +35,8 @@ const (
 	// server memory by requesting grants in a loop.
 	maxGrantsPerSession   = 8
 	maxProgressPerSession = 32
+	maxActivePerGuest     = 2
+	maxActivePerRoom      = 32
 )
 
 // Download progress states reported to the phone.
@@ -50,6 +54,7 @@ var (
 	errGrantInvalid = errors.New("download grant is not valid")
 	errGrantExpired = errors.New("download grant expired")
 	errGrantBusy    = errors.New("another download is already active for this session")
+	errRoomBusy     = errors.New("room download capacity reached; try again shortly")
 	errGrantSession = errors.New("session is no longer active")
 )
 
@@ -74,6 +79,9 @@ type continuationRecord struct {
 	Ticket        string
 	SessionKey    string
 	Sess          *session.Session
+	GuestRoom     *guest.Room
+	GuestID       string
+	RoomKey       string
 	Entries       []archiveEntry
 	Total         int64
 	Filename      string
@@ -95,6 +103,9 @@ type downloadGrant struct {
 	ID, Secret, Session, Filename, Progress string
 	DownloadID                              string
 	Sess                                    *session.Session
+	GuestRoom                               *guest.Room
+	GuestID                                 string
+	RoomKey                                 string
 	Entries                                 []archiveEntry
 	Total                                   int64
 	Archive                                 bool
@@ -134,6 +145,7 @@ type DownloadGrantStore struct {
 	continuations map[string]*continuationRecord
 	progress      map[string]*archiveProgress
 	active        map[string]int
+	roomActive    map[string]int
 	downloads     *transfer.DownloadRegistry
 }
 
@@ -144,6 +156,7 @@ func newGrantStore(downloads *transfer.DownloadRegistry) *DownloadGrantStore {
 		continuations: make(map[string]*continuationRecord),
 		progress:      make(map[string]*archiveProgress),
 		active:        make(map[string]int),
+		roomActive:    make(map[string]int),
 		downloads:     downloads,
 	}
 }
@@ -200,13 +213,34 @@ func (s *DownloadGrantStore) pruneLocked(now time.Time) {
 	}
 }
 
+func guestGrantSessionKey(roomID, guestID string) string {
+	return "guest:" + roomID + ":" + guestID
+}
+
 func (s *DownloadGrantStore) create(sess *session.Session, sources []archiveSource, filename string) (downloadGrant, *archiveProgress, error) {
-	key := sess.Key()
+	return s.createInternal(sess.Key(), sess, nil, "", sources, filename)
+}
+
+func (s *DownloadGrantStore) createForGuest(room *guest.Room, guestID string, sources []archiveSource, filename string) (downloadGrant, *archiveProgress, error) {
+	if room == nil || guestID == "" {
+		return downloadGrant{}, nil, errors.New("guest room and identity are required")
+	}
+	return s.createInternal(guestGrantSessionKey(room.ID, guestID), nil, room, guestID, sources, filename)
+}
+
+func (s *DownloadGrantStore) createInternal(key string, sess *session.Session, room *guest.Room, guestID string, sources []archiveSource, filename string) (downloadGrant, *archiveProgress, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
 	s.pruneLocked(now)
-	if s.active[key] != 0 {
+	maxPerSession := 1
+	if room != nil {
+		maxPerSession = maxActivePerGuest
+		if s.roomActive["room:"+room.ID] >= maxActivePerRoom {
+			return downloadGrant{}, nil, errRoomBusy
+		}
+	}
+	if s.active[key] >= maxPerSession {
 		return downloadGrant{}, nil, errors.New("archive download already active")
 	}
 	var grants, records int
@@ -244,7 +278,7 @@ func (s *DownloadGrantStore) create(sess *session.Session, sources []archiveSour
 		kind = "archive"
 	}
 	var downloadID string
-	if s.downloads != nil {
+	if s.downloads != nil && room == nil {
 		record, startErr := s.downloads.StartKind(progressID, filename, key, total, kind)
 		if startErr != nil {
 			return downloadGrant{}, nil, startErr
@@ -255,14 +289,24 @@ func (s *DownloadGrantStore) create(sess *session.Session, sources []archiveSour
 	if len(sources) == 1 && sources[0].Kind == transfer.SourceKindFile {
 		sha256Hex = sources[0].File.SHA256
 	}
+	roomKey := ""
+	if room != nil {
+		roomKey = "room:" + room.ID
+	}
 	grant := downloadGrant{
-		ID: id, Secret: secret, Session: key, Sess: sess, Filename: filename,
-		Progress: progressID, DownloadID: downloadID, Entries: entries, Total: total,
+		ID: id, Secret: secret, Session: key, Sess: sess,
+		GuestRoom: room, GuestID: guestID, RoomKey: roomKey,
+		Filename: filename, Progress: progressID, DownloadID: downloadID,
+		Entries: entries, Total: total,
 		Archive:   len(sources) != 1 || sources[0].Kind != transfer.SourceKindFile,
 		SHA256:    sha256Hex,
 		ExpiresAt: now.Add(grantLifetime),
 	}
-	progress := &archiveProgress{ID: progressID, Session: key, Total: total, State: progressPending, Updated: now, clock: s.now, downloads: s.downloads, downloadID: downloadID}
+	var dlReg *transfer.DownloadRegistry
+	if room == nil {
+		dlReg = s.downloads
+	}
+	progress := &archiveProgress{ID: progressID, Session: key, Total: total, State: progressPending, Updated: now, clock: s.now, downloads: dlReg, downloadID: downloadID}
 	s.grants[id], s.progress[progressID] = grant, progress
 	return grant, progress, nil
 }
@@ -295,18 +339,34 @@ func (s *DownloadGrantStore) redeem(id, secret string) (downloadGrant, *archiveP
 		s.pruneLocked(now)
 		return downloadGrant{}, nil, errGrantExpired
 	}
-	if grant.Sess == nil || grant.Sess.Status() != session.StatusActive {
+	grantActive := true
+	if grant.GuestRoom != nil {
+		grantActive = grant.GuestRoom.ValidateGuestApproved(grant.GuestID) && grant.GuestRoom.AllowsDownload()
+	} else if grant.Sess == nil || grant.Sess.Status() != session.StatusActive {
+		grantActive = false
+	}
+	if !grantActive {
 		delete(s.grants, id)
 		if p := s.progress[grant.Progress]; p != nil {
 			setProgressFailed(p, "the session ended")
 		}
 		return downloadGrant{}, nil, errGrantSession
 	}
-	if s.active[grant.Session] != 0 {
+	maxPerSession := 1
+	if grant.GuestRoom != nil {
+		maxPerSession = maxActivePerGuest
+		if s.roomActive[grant.RoomKey] >= maxActivePerRoom {
+			return downloadGrant{}, nil, errRoomBusy
+		}
+	}
+	if s.active[grant.Session] >= maxPerSession {
 		return downloadGrant{}, nil, errGrantBusy
 	}
 	delete(s.grants, id)
 	s.active[grant.Session]++
+	if grant.RoomKey != "" {
+		s.roomActive[grant.RoomKey]++
+	}
 	p := s.progress[grant.Progress]
 	p.mu.Lock()
 	p.State, p.Updated = progressTransferring, now
@@ -323,6 +383,9 @@ func (s *DownloadGrantStore) redeem(id, secret string) (downloadGrant, *archiveP
 			Ticket:        ticket,
 			SessionKey:    grant.Session,
 			Sess:          grant.Sess,
+			GuestRoom:     grant.GuestRoom,
+			GuestID:       grant.GuestID,
+			RoomKey:       grant.RoomKey,
 			Entries:       grant.Entries,
 			Total:         grant.Total,
 			Filename:      grant.Filename,
@@ -353,7 +416,13 @@ func (s *DownloadGrantStore) authorizeContinuation(id, ticket string) (downloadG
 		s.pruneLocked(now)
 		return downloadGrant{}, nil, errGrantInvalid
 	}
-	if cont.Sess == nil || cont.Sess.Status() != session.StatusActive {
+	contActive := true
+	if cont.GuestRoom != nil {
+		contActive = cont.GuestRoom.ValidateGuestApproved(cont.GuestID) && cont.GuestRoom.AllowsDownload()
+	} else if cont.Sess == nil || cont.Sess.Status() != session.StatusActive {
+		contActive = false
+	}
+	if !contActive {
 		if cont.LockHandle != nil {
 			_ = cont.LockHandle.Close()
 		}
@@ -386,6 +455,9 @@ func (s *DownloadGrantStore) authorizeContinuation(id, ticket string) (downloadG
 		Secret:             cont.Ticket,
 		Session:            cont.SessionKey,
 		Sess:               cont.Sess,
+		GuestRoom:          cont.GuestRoom,
+		GuestID:            cont.GuestID,
+		RoomKey:            cont.RoomKey,
 		Filename:           cont.Filename,
 		Progress:           cont.ProgressID,
 		DownloadID:         cont.DownloadID,
@@ -432,6 +504,33 @@ func (s *DownloadGrantStore) RevokeSession(sessionKey string) {
 	delete(s.active, sessionKey)
 }
 
+// RevokeRoom purges all grants, continuations, and active records for an ended room.
+func (s *DownloadGrantStore) RevokeRoom(roomID string) {
+	prefix := "guest:" + roomID + ":"
+	roomKey := "room:" + roomID
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, g := range s.grants {
+		if strings.HasPrefix(g.Session, prefix) {
+			delete(s.grants, id)
+		}
+	}
+	for id, cont := range s.continuations {
+		if strings.HasPrefix(cont.SessionKey, prefix) {
+			if cont.LockHandle != nil {
+				_ = cont.LockHandle.Close()
+			}
+			delete(s.continuations, id)
+		}
+	}
+	for k := range s.active {
+		if strings.HasPrefix(k, prefix) {
+			delete(s.active, k)
+		}
+	}
+	delete(s.roomActive, roomKey)
+}
+
 func (s *DownloadGrantStore) attachContinuationLock(id string, lock io.Closer) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -467,6 +566,14 @@ func (s *DownloadGrantStore) finish(grant downloadGrant) {
 	}
 	if s.active[grant.Session] == 0 {
 		delete(s.active, grant.Session)
+	}
+	if grant.RoomKey != "" {
+		if s.roomActive[grant.RoomKey] > 0 {
+			s.roomActive[grant.RoomKey]--
+		}
+		if s.roomActive[grant.RoomKey] == 0 {
+			delete(s.roomActive, grant.RoomKey)
+		}
 	}
 	s.mu.Unlock()
 }

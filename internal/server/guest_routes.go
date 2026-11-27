@@ -29,7 +29,7 @@ func guestTokenFromRequest(r *http.Request) string {
 	return ""
 }
 
-func newGuestAPIMux(services *Services, stall time.Duration, shutdownCh <-chan struct{}) http.Handler {
+func newGuestAPIMux(services *Services, stall, downloadStall time.Duration, grants *DownloadGrantStore, shutdownCh <-chan struct{}) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /guest-api/events", handleGuestEvents(services, shutdownCh))
 	mux.HandleFunc("GET /guest-api/ping", handleDiagnosticsPing(services))
@@ -40,6 +40,14 @@ func newGuestAPIMux(services *Services, stall time.Duration, shutdownCh <-chan s
 	mux.HandleFunc("POST /guest-api/uploads", handleGuestUploadDeclare(services))
 	mux.HandleFunc("GET /guest-api/uploads/{id}", handleGuestUploadStatus(services))
 	mux.HandleFunc("PUT /guest-api/uploads/{id}/content", handleGuestUploadContent(services, stall))
+	mux.HandleFunc("GET /guest-api/files", handleGuestFilesList(services))
+	mux.HandleFunc("GET /guest-api/sources", handleGuestSourcesList(services))
+	mux.HandleFunc("GET /guest-api/sources/{id}/items", handleGuestSourceItems(services))
+	mux.HandleFunc("POST /guest-api/download-grants", handleGuestCreateDownloadGrant(services, grants))
+	mux.HandleFunc("GET /guest-api/download-progress/{id}", handleGuestDownloadProgress(services, grants))
+	dlHandler := serveGuestArchiveDownload(services, grants, downloadStall)
+	mux.HandleFunc("GET /guest-api/downloads/{id}/content", dlHandler)
+	mux.HandleFunc("HEAD /guest-api/downloads/{id}/content", dlHandler)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if services != nil {
 			services.RecordContact("guest_api")
@@ -49,14 +57,18 @@ func newGuestAPIMux(services *Services, stall time.Duration, shutdownCh <-chan s
 }
 
 type guestRoomInfoResponse struct {
-	ID          string                      `json:"id"`
-	Title       string                      `json:"title"`
-	Description string                      `json:"description,omitempty"`
-	Deadline    *time.Time                  `json:"deadline,omitempty"`
-	ExpiresAt   time.Time                   `json:"expiresAt"`
-	FormSchema  []guest.FormField           `json:"formSchema,omitempty"`
-	Roster      []guest.ExpectedParticipant `json:"roster,omitempty"`
-	HasRoster   bool                        `json:"hasRoster"`
+	ID                  string                      `json:"id"`
+	Title               string                      `json:"title"`
+	Description         string                      `json:"description,omitempty"`
+	Deadline            *time.Time                  `json:"deadline,omitempty"`
+	ExpiresAt           time.Time                   `json:"expiresAt"`
+	Mode                guest.RoomMode              `json:"mode"`
+	AllowsUpload        bool                        `json:"allowsUpload"`
+	AllowsDownload      bool                        `json:"allowsDownload"`
+	RequireJoinApproval bool                        `json:"requireJoinApproval"`
+	FormSchema          []guest.FormField           `json:"formSchema,omitempty"`
+	Roster              []guest.ExpectedParticipant `json:"roster,omitempty"`
+	HasRoster           bool                        `json:"hasRoster"`
 }
 
 func handleGuestRoomInfo(svcs *Services) http.HandlerFunc {
@@ -83,14 +95,18 @@ func handleGuestRoomInfo(svcs *Services) http.HandlerFunc {
 
 		v := room.View()
 		writeJSON(w, http.StatusOK, guestRoomInfoResponse{
-			ID:          v.ID,
-			Title:       v.Title,
-			Description: v.Description,
-			Deadline:    v.Deadline,
-			ExpiresAt:   v.ExpiresAt,
-			FormSchema:  v.FormSchema,
-			Roster:      v.Roster,
-			HasRoster:   v.HasRoster,
+			ID:                  v.ID,
+			Title:               v.Title,
+			Description:         v.Description,
+			Deadline:            v.Deadline,
+			ExpiresAt:           v.ExpiresAt,
+			Mode:                v.Mode,
+			AllowsUpload:        v.AllowsUpload,
+			AllowsDownload:      v.AllowsDownload,
+			RequireJoinApproval: v.RequireJoinApproval,
+			FormSchema:          v.FormSchema,
+			Roster:              v.Roster,
+			HasRoster:           v.HasRoster,
 		})
 	}
 }
@@ -215,12 +231,16 @@ func handleGuestJoin(svcs *Services) http.HandlerFunc {
 }
 
 type guestStatusResponse struct {
-	GuestID       string    `json:"guestId,omitempty"`
-	Nickname      string    `json:"nickname,omitempty"`
-	State         string    `json:"state"`
-	Error         string    `json:"error,omitempty"`
-	RoomState     string    `json:"roomState,omitempty"`
-	RoomExpiresAt time.Time `json:"roomExpiresAt,omitempty"`
+	GuestID             string         `json:"guestId,omitempty"`
+	Nickname            string         `json:"nickname,omitempty"`
+	State               string         `json:"state"`
+	Error               string         `json:"error,omitempty"`
+	RoomState           string         `json:"roomState,omitempty"`
+	RoomExpiresAt       time.Time      `json:"roomExpiresAt,omitempty"`
+	Mode                guest.RoomMode `json:"mode,omitempty"`
+	AllowsUpload        bool           `json:"allowsUpload"`
+	AllowsDownload      bool           `json:"allowsDownload"`
+	RequireJoinApproval bool           `json:"requireJoinApproval"`
 }
 
 func handleGuestStatus(svcs *Services) http.HandlerFunc {
@@ -257,12 +277,17 @@ func handleGuestStatus(svcs *Services) http.HandlerFunc {
 			}
 		}
 
+		v := room.View()
 		writeJSON(w, http.StatusOK, guestStatusResponse{
-			GuestID:       g.ID,
-			Nickname:      g.Nickname,
-			State:         string(g.State),
-			RoomState:     string(room.State),
-			RoomExpiresAt: room.ExpiresAt,
+			GuestID:             g.ID,
+			Nickname:            g.Nickname,
+			State:               string(g.State),
+			RoomState:           string(v.State),
+			RoomExpiresAt:       v.ExpiresAt,
+			Mode:                v.Mode,
+			AllowsUpload:        v.AllowsUpload,
+			AllowsDownload:      v.AllowsDownload,
+			RequireJoinApproval: v.RequireJoinApproval,
 		})
 	}
 }
@@ -306,6 +331,10 @@ func handleGuestUploadDeclare(svcs *Services) http.HandlerFunc {
 
 		if g.State != guest.GuestApproved {
 			writeError(w, http.StatusForbidden, "guest is not approved for upload")
+			return
+		}
+		if !room.AllowsUpload() {
+			writeErrorCode(w, http.StatusForbidden, "uploads are disabled in download-only rooms", "room_download_only")
 			return
 		}
 
@@ -440,6 +469,10 @@ func handleGuestUploadContent(svcs *Services, stall time.Duration) http.HandlerF
 			writeError(w, http.StatusBadRequest, "upload request is not approved")
 			return
 		}
+		if !room.AllowsUpload() {
+			writeErrorCode(w, http.StatusForbidden, "uploads are disabled in download-only rooms", "room_download_only")
+			return
+		}
 
 		body := io.Reader(r.Body)
 		if rc := http.NewResponseController(w); rc != nil && stall > 0 {
@@ -517,5 +550,124 @@ func handleGuestUploadContent(svcs *Services, stall time.Duration) http.HandlerF
 			Written: res.Written,
 			SHA256:  res.SHA256,
 		})
+	}
+}
+
+func requireApprovedGuestDownload(w http.ResponseWriter, r *http.Request, svcs *Services) (*guest.Room, *guest.Guest, bool) {
+	token := guestTokenFromRequest(r)
+	if token == "" {
+		writeError(w, http.StatusUnauthorized, "missing guest credential")
+		return nil, nil, false
+	}
+	if svcs == nil || svcs.GuestManager == nil {
+		writeError(w, http.StatusNotFound, "guest room service unavailable")
+		return nil, nil, false
+	}
+	room, g, err := svcs.GuestManager.ValidateGuest(token)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return nil, nil, false
+	}
+	if g.State != guest.GuestApproved {
+		writeError(w, http.StatusForbidden, "guest is not approved")
+		return nil, nil, false
+	}
+	if !room.AllowsDownload() {
+		writeErrorCode(w, http.StatusForbidden, "downloads are disabled in upload-only rooms", "room_upload_only")
+		return nil, nil, false
+	}
+	return room, g, true
+}
+
+func handleGuestFilesList(svcs *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		room, _, ok := requireApprovedGuestDownload(w, r, svcs)
+		if !ok {
+			return
+		}
+		files := room.SharedRegistry().List()
+		out := make([]fileJSON, len(files))
+		for i, sf := range files {
+			out[i] = toFileJSON(sf)
+		}
+		writeJSON(w, http.StatusOK, out)
+	}
+}
+
+func handleGuestSourcesList(svcs *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		room, _, ok := requireApprovedGuestDownload(w, r, svcs)
+		if !ok {
+			return
+		}
+		writeJSON(w, http.StatusOK, buildSourcesList(room.SharedRegistry()))
+	}
+}
+
+func handleGuestSourceItems(svcs *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		room, _, ok := requireApprovedGuestDownload(w, r, svcs)
+		if !ok {
+			return
+		}
+		serveSourceItemsFromRegistry(w, r, room.SharedRegistry())
+	}
+}
+
+func handleGuestCreateDownloadGrant(svcs *Services, grants *DownloadGrantStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		room, g, ok := requireApprovedGuestDownload(w, r, svcs)
+		if !ok {
+			return
+		}
+		if grants == nil {
+			writeError(w, http.StatusServiceUnavailable, "download grants unavailable")
+			return
+		}
+		var req createGrantRequest
+		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 512*1024)).Decode(&req) != nil {
+			writeError(w, http.StatusBadRequest, "invalid source selection")
+			return
+		}
+		sources, errCode, errMsg := resolveGrantSources(room.SharedRegistry(), req)
+		if errCode != 0 {
+			writeError(w, errCode, errMsg)
+			return
+		}
+		grant, progress, err := grants.createForGuest(room, g.ID, sources, grantFilename(sources))
+		if err != nil {
+			if errors.Is(err, errRoomBusy) {
+				writeError(w, http.StatusTooManyRequests, err.Error())
+				return
+			}
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name:     grantCookieName,
+			Value:    grant.Secret,
+			Path:     "/guest-api/downloads/" + grant.ID + "/content",
+			HttpOnly: true,
+			SameSite: http.SameSiteStrictMode,
+			MaxAge:   int(grantLifetime.Seconds()),
+			Secure:   r.TLS != nil,
+		})
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusCreated, createGrantResponse{
+			DownloadURL: "/guest-api/downloads/" + grant.ID + "/content",
+			ProgressID:  progress.ID,
+			Archive:     grant.Archive,
+			Filename:    grant.Filename,
+		})
+	}
+}
+
+func handleGuestDownloadProgress(svcs *Services, grants *DownloadGrantStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		room, g, ok := requireApprovedGuestDownload(w, r, svcs)
+		if !ok {
+			return
+		}
+		writeDownloadProgress(w, grants, r.PathValue("id"), guestGrantSessionKey(room.ID, g.ID))
 	}
 }

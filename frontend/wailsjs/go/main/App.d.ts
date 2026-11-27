@@ -18,6 +18,8 @@ export function AddDroppedSources(arg1:Array<string>):Promise<Array<main.SharedS
 
 export function AddExpectedParticipant(arg1:string,arg2:string,arg3:string):Promise<void>;
 
+export function AddGuestSharedPaths(arg1:Array<string>):Promise<Array<main.SharedSourceView>>;
+
 export function ApplyHistoryRetentionNow():Promise<number>;
 
 export function ApplyUpdate():Promise<void>;
@@ -154,6 +156,8 @@ export function PickFolderForSharing():Promise<main.SharedSourceView>;
 
 export function PickGuestDestination():Promise<string>;
 
+export function PickGuestSharePaths(arg1:boolean):Promise<Array<string>>;
+
 export function QueryTransferHistory(arg1:main.HistoryFilterView):Promise<main.HistoryQueryResultView>;
 
 export function QuitApp():Promise<void>;
@@ -179,6 +183,8 @@ export function RejectGuestUpload(arg1:string):Promise<void>;
 export function RejectUpload(arg1:string):Promise<main.UploadView>;
 
 export function RemoveExpectedParticipant(arg1:string):Promise<void>;
+
+export function RemoveGuestSharedSource(arg1:string):Promise<void>;
 
 export function RemoveKnownHost(arg1:string):Promise<void>;
 

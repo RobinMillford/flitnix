@@ -32,6 +32,7 @@
     GetLocalHTTPSStatus, GetSessionShortCode, RegenerateSessionShortCode,
     StartGuestRoomWithConfig, GetGuestRoomState, ApproveGuest, RejectGuest, RevokeGuest,
     ApproveGuestUpload, RejectGuestUpload, EndGuestRoom, PickGuestDestination, OpenGuestFolder,
+    PickGuestSharePaths, AddGuestSharedPaths, RemoveGuestSharedSource,
     PickExportDestination, ExportGuestCollection,
     ListGuestPresets, ListGuestTemplates, SaveGuestTemplate, DeleteGuestTemplate, DuplicateGuestTemplate, StartGuestRoomFromTemplate,
     ListAuditEvents, ClearAuditHistory,
@@ -249,6 +250,9 @@
   let guestDescription = 'Submit your assignment files. Provide your student ID and notes.'
   let guestCollisionPolicy: 'preserve_both' | 'reject' = 'preserve_both'
   let guestFormSchema: guest.FormField[] = []
+  let guestMode: 'upload_only' | 'download_only' | 'two_way' = 'upload_only'
+  let guestAutoApproveGuests = false
+  let guestSharedPaths: string[] = []
   let exporting = false
   let exportSuccessMsg = ''
 
@@ -717,6 +721,38 @@
     guestFormSchema = p.formSchema || []
   }
 
+  async function pickGuestShareAction(selectFolder: boolean): Promise<void> {
+    try {
+      const picked = await PickGuestSharePaths(selectFolder)
+      if (!picked || picked.length === 0) return
+      const isLive = Boolean(guestRoomState?.room && guestRoomState.room.state !== 'ended' && guestRoomState.room.state !== 'expired')
+      if (isLive) {
+        await AddGuestSharedPaths(picked)
+        showToast(selectFolder ? 'Shared folder added to room' : `Shared ${picked.length} file(s) with guests`, 'success')
+        refresh()
+      } else {
+        const merged = new Set([...guestSharedPaths, ...picked])
+        guestSharedPaths = Array.from(merged)
+      }
+    } catch (err) {
+      report(err)
+    }
+  }
+
+  function removeStagedGuestSharePath(index: number): void {
+    guestSharedPaths = guestSharedPaths.filter((_, i) => i !== index)
+  }
+
+  async function removeGuestSharedSourceAction(sourceId: string): Promise<void> {
+    try {
+      await RemoveGuestSharedSource(sourceId)
+      showToast('Removed shared item from room', 'info')
+      refresh()
+    } catch (err) {
+      report(err)
+    }
+  }
+
   async function startGuestRoomAction(): Promise<void> {
     if (guestStarting) return
     guestStarting = true
@@ -724,6 +760,9 @@
       await StartGuestRoomWithConfig({
         destinationDir: guestDestDir,
         durationMinutes: guestDurationMinutes,
+        mode: guestMode,
+        autoApproveGuests: guestAutoApproveGuests,
+        sharedPaths: guestMode === 'upload_only' ? [] : guestSharedPaths,
         title: guestTitle,
         description: guestDescription,
         collisionPolicy: guestCollisionPolicy,
@@ -1804,6 +1843,9 @@
               bind:guestFormSchema
               bind:guestDestDir
               bind:guestDurationMinutes
+              bind:guestMode
+              bind:guestAutoApproveGuests
+              {guestSharedPaths}
               {guestStarting}
               {guestCopiedLink}
               {exporting}
@@ -1817,6 +1859,10 @@
               rejectUpload={rejectGuestUploadAction}
               pickDestination={chooseGuestDestination}
               openFolder={openGuestFolderAction}
+              pickShareFiles={() => pickGuestShareAction(false)}
+              pickShareFolder={() => pickGuestShareAction(true)}
+              removeStagedSharePath={removeStagedGuestSharePath}
+              removeSharedSource={removeGuestSharedSourceAction}
               exportCollection={exportCollectionAction}
               copyGuestLink={copyGuestLink}
               {copyTextToClipboard}
