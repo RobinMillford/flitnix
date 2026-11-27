@@ -34,9 +34,20 @@ Flitnix combines the performance and concurrency safety of Go with a modern Svel
 
 ---
 
-## Key Features & What's New in v0.3.0
+## Key Features & Phase 4 Highlights (v0.3.1.0 Target)
 
-Flitnix provides high-speed, private local file transfers between desktop computers and phones. Version **v0.3.0** completes Phase 3 with real-time events, background receiving through the system tray, native OS notifications, and persistent transfer history with configurable retention — on top of trusted device-to-device sharing and the unbreakable transfer engine.
+Flitnix provides high-speed, private local file transfers between desktop computers and phones. Building on **v0.3.0**, Phase 4 adds hardened transport security, installable PWA Share Target workflows, multi-recipient room modes, PIN/download-limited shares, and opt-in trusted clipboard sync:
+
+- **Encrypted Peer/CLI Transport & Opt-In Local HTTPS (G11)**:
+  - Fail-closed TLS 1.3 with Ed25519 host identity + TOFU pinning across desktop GUI and CLI (`flitnix send`, `flitnix pair`, `flitnix known-hosts`), plus opt-in Local CA HTTPS (`flitnix-<host>.local`) alongside zero-setup LAN HTTP QR sharing.
+- **Installable Mobile PWA & OS Share Target (G12)**:
+  - Installable mobile shell (`/manifest.webmanifest`, `/sw.js`) and `POST /share-target` OS Share Sheet receiver over IndexedDB with explicit send confirmation.
+- **Multi-Recipient Guest Drop Box Rooms (G19)**:
+  - `upload_only`, `download_only`, and `two_way` modes extending Guest Drop Box with room-isolated host shared files/folders, bounded concurrent streaming downloads, and unchanged dual join + upload approval gates.
+- **PIN Protection, Custom Expiry & Download Limits (G23)**:
+  - Optional salted PIN access with brute-force lockouts, custom absolute expiration windows, and atomic one-time/download-limited links for personal sessions and guest rooms.
+- **Opt-In Trusted Clipboard Sync (G17)**:
+  - Disabled by default; ephemeral 64 KiB UTF-8 clipboard sync over authenticated trusted-device channels with echo suppression and sensitive/concealed OS item filtering.
 
 ### What's New in v0.3.0
 

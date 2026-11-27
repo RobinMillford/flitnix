@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Phase 4: Secure & Advanced Sharing (`v0.3.1.0` target)
+- **G11 — Encrypted Peer/CLI Transport & Optional Local HTTPS**:
+  - Extended TLS 1.3 with Ed25519 host identity verification, `LastAddress` TOFU pinning, revoked-device rejection, and fail-closed `RequireEncryptedTransport` across both Desktop-to-Desktop sharing and CLI (`flitnix send`, `flitnix pair`, `flitnix known-hosts`, `flitnix serve`).
+  - Added opt-in Local Root CA HTTPS (`internal/server/local_https.go`, `LocalHTTPSEnabled`) with SNI routing on port `43821`, LAN IP + `flitnix-<host>.local` mDNS SAN certificates (`internal/discovery/mdns_wire.go`), `GET /local-ca.crt`, and Settings Local CA Export/Removal while preserving zero-friction LAN HTTP for guest QR sharing.
+- **G12 — Installable Mobile PWA & Web Share Target**:
+  - Added web app manifest (`/manifest.webmanifest`), shell-only Service Worker (`/sw.js`), offline shell page (`/offline.html`), and OS Share Sheet Web Share Target (`POST /share-target`) queueing files directly via IndexedDB handles with explicit `#share-target-card` user confirmation.
+- **G19 — Multi-Recipient Local Sharing Rooms**:
+  - Extended Guest Drop Box (`internal/guest`, `/guest-api/*`, `GuestDropBoxView.svelte`, `guest.html`/`guest.js`) with `upload_only`, `download_only`, and `two_way` modes backed by room-isolated `transfer.Registry` instances, bounded concurrent download streaming (`grants.go`, `archive.go`), preserved independent guest-join & upload approval gates, and private per-guest upload isolation.
+- **G23 — PIN-Protected, Expiring & Download-Limited Sessions**:
+  - Added salted iterative SHA-256 PIN protection (`internal/session/policy.go`) with per-IP rate limiting (`429`), custom absolute expiration deadlines, atomic download caps, and 1-time self-destruct sharing across both Personal Sharing (`/api/pin/status`, `/api/pin/verify`) and Guest Drop Box rooms.
+- **G17 — Opt-In Trusted Clipboard Synchronization**:
+  - Added strictly opt-in (default OFF) transient clipboard sync (`internal/clipboard`) restricted to authenticated trusted devices over `events.Hub` + `/api/clipboard`, with `64 KiB` UTF-8 bounds, echo-loop suppression, OS concealed password-manager filtering, Pause/Resume controls, zero disk/history persistence, and complete Guest Drop Box exclusion.
+
 ## [0.3.0] - 2026-11-27
 
 ### Added
