@@ -1214,6 +1214,20 @@ export namespace main {
 	    visibilityPreviousMode?: string;
 	    visibilityExpiresAt?: string;
 	    qrSharingPaused?: boolean;
+	    minimizeToTray: boolean;
+	    launchOnLogin: boolean;
+	    traySupported?: boolean;
+	    autostartSupported?: boolean;
+	    notificationsEnabled: boolean;
+	    quietMode: boolean;
+	    hideNotificationFilenames: boolean;
+	    notifyIncomingTransfers: boolean;
+	    notifyCompletedTransfers: boolean;
+	    notifyFailedTransfers: boolean;
+	    notifyQuickText: boolean;
+	    notifyPairingRequests: boolean;
+	    notifyGuestRequests: boolean;
+	    notificationsSupported?: boolean;
 
 	    static createFrom(source: any = {}) {
 	        return new SettingsView(source);
@@ -1233,6 +1247,20 @@ export namespace main {
 	        this.visibilityPreviousMode = source["visibilityPreviousMode"];
 	        this.visibilityExpiresAt = source["visibilityExpiresAt"];
 	        this.qrSharingPaused = source["qrSharingPaused"];
+	        this.minimizeToTray = source["minimizeToTray"] !== undefined ? source["minimizeToTray"] : true;
+	        this.launchOnLogin = Boolean(source["launchOnLogin"]);
+	        this.traySupported = Boolean(source["traySupported"]);
+	        this.autostartSupported = Boolean(source["autostartSupported"]);
+	        this.notificationsEnabled = source["notificationsEnabled"] !== undefined ? source["notificationsEnabled"] : true;
+	        this.quietMode = Boolean(source["quietMode"]);
+	        this.hideNotificationFilenames = Boolean(source["hideNotificationFilenames"]);
+	        this.notifyIncomingTransfers = source["notifyIncomingTransfers"] !== undefined ? source["notifyIncomingTransfers"] : true;
+	        this.notifyCompletedTransfers = source["notifyCompletedTransfers"] !== undefined ? source["notifyCompletedTransfers"] : true;
+	        this.notifyFailedTransfers = source["notifyFailedTransfers"] !== undefined ? source["notifyFailedTransfers"] : true;
+	        this.notifyQuickText = source["notifyQuickText"] !== undefined ? source["notifyQuickText"] : true;
+	        this.notifyPairingRequests = source["notifyPairingRequests"] !== undefined ? source["notifyPairingRequests"] : true;
+	        this.notifyGuestRequests = source["notifyGuestRequests"] !== undefined ? source["notifyGuestRequests"] : true;
+	        this.notificationsSupported = Boolean(source["notificationsSupported"]);
 	    }
 	}
 	export class SharedFileView {

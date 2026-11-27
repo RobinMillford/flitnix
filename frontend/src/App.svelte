@@ -102,14 +102,28 @@
 
   // Persistent Settings state
   let settingsState: main.SettingsView = {
-    version: 2,
+    version: 5,
     theme: getInitialTheme(),
     locale: 'system',
     downloadDir: '',
     effectiveDir: '',
     autoStartSession: false,
     preserveModTimes: true,
-    preferredInterface: ''
+    preferredInterface: '',
+    minimizeToTray: true,
+    launchOnLogin: false,
+    traySupported: false,
+    autostartSupported: false,
+    notificationsEnabled: true,
+    quietMode: false,
+    hideNotificationFilenames: false,
+    notifyIncomingTransfers: true,
+    notifyCompletedTransfers: true,
+    notifyFailedTransfers: true,
+    notifyQuickText: true,
+    notifyPairingRequests: true,
+    notifyGuestRequests: true,
+    notificationsSupported: false
   }
   let settingsSavedAlert = ''
   let settingsError = ''
@@ -1307,6 +1321,14 @@
     EventsOn('flitnix:event', (ev: DesktopRealtimeEvent) => {
       if (!disposed) eventCoalescer.handleEvent(ev)
     })
+    EventsOn('settings:changed', (s: main.SettingsView) => {
+      if (!disposed && s) settingsState = s
+    })
+    EventsOn('flitnix:navigate', (dest: { tab?: TabName }) => {
+      if (!disposed && dest?.tab && validTabs.includes(dest.tab)) {
+        switchTab(dest.tab)
+      }
+    })
     const onVisibilityChange = () => {
       if (!disposed && typeof document !== 'undefined' && document.visibilityState === 'visible') {
         refresh()
@@ -1335,6 +1357,8 @@
       }
       OnFileDropOff()
       EventsOff('flitnix:event')
+      EventsOff('settings:changed')
+      EventsOff('flitnix:navigate')
       EventsOff('network:changed')
       EventsOff('visibility:changed')
       EventsOff('discovery:peers')
