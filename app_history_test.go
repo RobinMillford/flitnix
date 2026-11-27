@@ -190,4 +190,3 @@ func TestAppHistoryRetentionPolicyIntegration(t *testing.T) {
 		t.Fatalf("history retention must never delete actual transferred file: %v", err)
 	}
 }
-

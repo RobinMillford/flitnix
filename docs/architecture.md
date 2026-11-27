@@ -197,6 +197,21 @@ Reports categorize overall health as `PASS`, `WARNING`, or `FAIL` and provide on
 - **Single-Port TLS 1.3 + HTTP Multiplexing (`tlsPeekListener`)**: Peeks the first byte of incoming connections on the unified transfer port (`0x16` TLS ClientHello vs plaintext HTTP) so mobile browsers continue using zero-setup HTTP while desktop-to-desktop peers negotiate TLS 1.3 pinned to each host's Ed25519 X.509 identity certificate (`NewHostIdentityCertificate`, `NewPeerHTTPClient`).
 - **GUI Peer Discovery, Pairing & Bidirectional Transfer**: Dedicated **Computer Sharing** tab (`ComputerSharingView.svelte`) lets desktop users discover nearby or manual peers, connect via 6-digit code or interactive TOFU/SAS pairing (`POST /api/peer/challenge`, `POST /api/peer/connect`), stage files and folders (`SelectPeerFiles`, `SelectPeerFolder`), track live progress/speed/ETAs, cancel in-flight jobs, and share bidirectionally without CLI commands.
 
+### 2.20 Real-Time Event Infrastructure (`internal/events`, `internal/server/events_routes.go`, `docs/ADR-001-realtime-events.md`)
+- **Hybrid SSE + Wails Events**: Desktop receives real-time events through `events.Hub` bridged to Wails (`runtime.EventsEmit("flitnix:event", ...)`), while personal mobile (`GET /api/events` with `Authorization: Bearer`) and guest browsers (`GET /guest-api/events` with `HttpOnly` cookie) consume `fetch`-based `ReadableStream` Server-Sent Events without exposing credentials in URLs.
+- **Reliability & Security**: Enforces same-origin/`Sec-Fetch-Site` checks, session/device revocation checks, 15-minute stream TTLs, bounded queues (`DefaultQueueSize = 64`) with non-blocking progress shedding and `resync` directives, monotonic ID deduplication, and automatic polling fallback.
+
+### 2.21 System Tray, Background Lifecycle & Login Autostart (`internal/tray`, `internal/autostart`, `app.go`, `main.go`)
+- **Always-Ready Tray Lifecycle**: Supports `--background` silent startup (`StartHidden`), minimize/close-to-tray interception (`OnBeforeClose` preserving live sessions, HTTP server, discovery, and transfers), single-instance window restoration, explicit quit (`QuitApp`), live visibility switching, Quiet Mode toggle, and graceful headless fallback.
+- **Cross-Platform Tray & Autostart**: Uses D-Bus `org.kde.StatusNotifierItem` + `com.canonical.dbusmenu` on Linux, native Win32 `Shell_NotifyIconW` + `PopupMenu` on Windows, Cocoa `NSStatusBar` on macOS, and OS-native login registration (XDG autostart `.desktop`, `HKCU\...\Run`, macOS `LaunchAgent` plist).
+
+### 2.22 Native OS Notifications & Validated Interactive Actions (`internal/notify`)
+- **Cross-Platform Notifications**: Dispatches sanitized, bounded alerts via D-Bus `org.freedesktop.Notifications` on Linux, `go-toast/v2` on Windows, and argument-safe `osascript` on macOS.
+- **Security & Privacy Controls**: Binds interactive buttons (`Approve`, `Decline`, `Open`, `Open Folder`, `Review Pairing`) to 128-bit single-use opaque action tokens, revalidates device/visibility/quota state at execution time, keeps SAS pairing confirmation strictly inside the app window, masks filenames/senders under `HideNotificationFilenames`, and respects Do Not Disturb (`QuietMode`) plus per-category toggles.
+
+### 2.23 Persistent Personal Transfer History & Retention (`internal/history`, `app_history.go`, `internal/settings`)
+- **Durable Metadata Store**: Records completed, failed, canceled, rejected, and discarded incoming, batch, phone download, and computer-sharing transfers into private (`0600`) `<dataDir>/history.jsonl` files separate from Guest Drop Box `audit.jsonl`, while never leaking local filesystem paths to frontend/mobile APIs.
+- **Confined Actions & Bounded Retention (G26)**: `Open`, `Reveal`, and `Reshare` strictly resolve symlinks and confine received paths inside the effective Flitnix receive directory before launching OS handlers (`xdg-open`/FileManager1, `explorer.exe /select,`, `open -R`). Configurable retention (`HistoryRetentionDays`, default 90 days; `HistoryMaxRecords`, default 5,000) automatically prunes expired metadata without deleting user files on disk.
 
 
 

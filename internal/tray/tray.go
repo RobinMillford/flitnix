@@ -12,18 +12,18 @@ import (
 
 // Menu action identifiers shared across platform backends.
 const (
-	ActionStatus         = "status"
-	ActionToggleWindow   = "toggle_window"
-	ActionOpen           = "open"
-	ActionHide           = "hide"
-	ActionVisMenu        = "visibility_menu"
-	ActionVisHidden      = "vis_hidden"
-	ActionVisTrusted     = "vis_trusted"
+	ActionStatus          = "status"
+	ActionToggleWindow    = "toggle_window"
+	ActionOpen            = "open"
+	ActionHide            = "hide"
+	ActionVisMenu         = "visibility_menu"
+	ActionVisHidden       = "vis_hidden"
+	ActionVisTrusted      = "vis_trusted"
 	ActionVisTempEveryone = "vis_temporary_everyone"
-	ActionVisEveryone    = "vis_everyone"
-	ActionToggleQuiet    = "toggle_quiet"
-	ActionOpenSettings   = "open_settings"
-	ActionQuit           = "quit"
+	ActionVisEveryone     = "vis_everyone"
+	ActionToggleQuiet     = "toggle_quiet"
+	ActionOpenSettings    = "open_settings"
+	ActionQuit            = "quit"
 )
 
 // MenuItem describes a platform-agnostic tray menu entry.
