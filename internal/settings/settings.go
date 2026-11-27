@@ -13,7 +13,7 @@ import (
 
 const (
 	// CurrentSchemaVersion is the current version of the settings file schema.
-	CurrentSchemaVersion = 6
+	CurrentSchemaVersion = 7
 
 	DefaultHistoryRetentionDays = 90
 	DefaultHistoryMaxRecords    = 5000
@@ -61,6 +61,8 @@ type Settings struct {
 	NotifyGuestRequests       bool      `json:"notifyGuestRequests"`
 	HistoryRetentionDays      int       `json:"historyRetentionDays"`
 	HistoryMaxRecords         int       `json:"historyMaxRecords"`
+	RequireEncryptedTransport bool      `json:"requireEncryptedTransport"`
+	LocalHTTPSEnabled         bool      `json:"localHttpsEnabled"`
 	UpdatedAt                 time.Time `json:"updatedAt"`
 }
 

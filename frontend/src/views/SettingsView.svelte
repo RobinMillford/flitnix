@@ -1,6 +1,10 @@
 <script lang="ts">
-  import type { main, netenv, version, power, transfer } from '../../wailsjs/go/models'
-  import { ApplyHistoryRetentionNow, QueryTransferHistory } from '../../wailsjs/go/main/App.js'
+  import type { main, netenv, version, power, transfer, client } from '../../wailsjs/go/models'
+  import {
+    ApplyHistoryRetentionNow, QueryTransferHistory,
+    GetLocalHTTPSStatus, ExportLocalCACert, RemoveLocalCACert,
+    ListKnownHosts, RemoveKnownHost
+  } from '../../wailsjs/go/main/App.js'
   import { openExternalURL, formatBytes } from '../utils'
   import logoUrl from '../assets/images/logo-universal.png'
 
@@ -30,6 +34,69 @@
   let historyTotalRecords: number = 0
   let pruningHistory: boolean = false
   let pruneMessage: string = ''
+  let localHttpsStatus: main.LocalHTTPSStatus | null = null
+  let knownHosts: client.KnownHostEntry[] = []
+  let httpsActionMessage: string = ''
+  let httpsActionError: string = ''
+  let workingHttpsAction: boolean = false
+
+  async function refreshNetworkSecurityInfo(): Promise<void> {
+    try {
+      const [httpsSt, khList] = await Promise.all([
+        GetLocalHTTPSStatus(),
+        ListKnownHosts()
+      ])
+      localHttpsStatus = httpsSt ?? null
+      knownHosts = khList ?? []
+    } catch {
+      // ignore in non-Wails preview environments
+    }
+  }
+
+  async function handleExportLocalCA(): Promise<void> {
+    workingHttpsAction = true
+    httpsActionMessage = ''
+    httpsActionError = ''
+    try {
+      const savedPath = await ExportLocalCACert()
+      await refreshNetworkSecurityInfo()
+      if (savedPath) {
+        httpsActionMessage = `Exported Local Root CA certificate to ${savedPath}. Install it in your phone or desktop trust store to use Local HTTPS without browser warnings.`
+      }
+    } catch (err: any) {
+      httpsActionError = err?.message || String(err)
+    } finally {
+      workingHttpsAction = false
+    }
+  }
+
+  async function handleRemoveLocalCA(): Promise<void> {
+    workingHttpsAction = true
+    httpsActionMessage = ''
+    httpsActionError = ''
+    try {
+      await RemoveLocalCACert()
+      settingsState.localHttpsEnabled = false
+      await refreshNetworkSecurityInfo()
+      httpsActionMessage = 'Removed Local Root CA and disabled Local HTTPS. Plain LAN HTTP and Desktop TLS 1.3 remain available.'
+    } catch (err: any) {
+      httpsActionError = err?.message || String(err)
+    } finally {
+      workingHttpsAction = false
+    }
+  }
+
+  async function handleRemoveKnownHost(hostId: string): Promise<void> {
+    httpsActionMessage = ''
+    httpsActionError = ''
+    try {
+      await RemoveKnownHost(hostId)
+      await refreshNetworkSecurityInfo()
+      httpsActionMessage = `Removed pinned identity for ${hostId.slice(0, 12)}…. The next connection will require fresh verification.`
+    } catch (err: any) {
+      httpsActionError = err?.message || String(err)
+    }
+  }
 
   async function refreshHistoryStorageInfo(): Promise<void> {
     try {
@@ -58,6 +125,9 @@
 
   $: if (activeSection === 'storage') {
     void refreshHistoryStorageInfo()
+  }
+  $: if (activeSection === 'network') {
+    void refreshNetworkSecurityInfo()
   }
 
   $: uniqueInterfaces = interfaces.filter((item, index, self) =>
@@ -487,6 +557,120 @@
           </div>
         {/if}
         <span class="setting-hint">Flitnix automatically chooses the active LAN/Wi-Fi adapter when set to Automatic.</span>
+      </div>
+
+      <div class="card-section-head" style="margin-top: 24px;">
+        <h4>Desktop &amp; CLI Transport Security</h4>
+        <p>Control cryptographic requirements for desktop-to-desktop and CLI peer transfers.</p>
+      </div>
+
+      <div class="setting-row">
+        <label class="toggle-control-label">
+          <input
+            type="checkbox"
+            bind:checked={settingsState.requireEncryptedTransport}
+          />
+          <div class="toggle-text-block">
+            <strong>Require Encrypted Transport for Desktop/CLI</strong>
+            <span>Refuses unencrypted HTTP peer connections and never silently falls back if TLS 1.3 or Ed25519 certificate pinning cannot be verified. Incompatible with legacy peers lacking TLS 1.3.</span>
+          </div>
+        </label>
+      </div>
+
+      <div class="card-section-head" style="margin-top: 24px;">
+        <h4>Optional Local HTTPS for Browser &amp; Mobile PWA</h4>
+        <p>Enable an opt-in Local Root CA so mobile browsers can connect over TLS 1.3 (required on non-localhost LAN addresses for PWA Share Target and Wake Lock). Plain LAN HTTP remains available for zero-friction guest QR scans.</p>
+      </div>
+
+      <div class="setting-row">
+        <label class="toggle-control-label">
+          <input
+            type="checkbox"
+            bind:checked={settingsState.localHttpsEnabled}
+          />
+          <div class="toggle-text-block">
+            <strong>Enable Local HTTPS (TLS 1.3) alongside LAN HTTP</strong>
+            <span>Serves a Local CA-signed certificate bound to your LAN IP and <code>{localHttpsStatus?.mdnsHostname || 'flitnix-<host>.local'}</code> on port 43821. Save settings to apply.</span>
+          </div>
+        </label>
+      </div>
+
+      <div class="setting-row" style="margin-top: 8px;">
+        <div class="storage-card">
+          <div class="storage-card-head">
+            <span class="status-tag {localHttpsStatus?.active ? 'ready' : localHttpsStatus?.enabled ? 'warn' : 'neutral'}">
+              {#if localHttpsStatus?.active}
+                Local HTTPS Active (TLS 1.3)
+              {:else if localHttpsStatus?.enabled}
+                Local HTTPS Enabled (Starts with Session)
+              {:else}
+                LAN HTTP Mode (Default)
+              {/if}
+            </span>
+            {#if localHttpsStatus?.mdnsHostname}
+              <span class="storage-target-note monospace">{localHttpsStatus.mdnsHostname}</span>
+            {/if}
+          </div>
+
+          {#if localHttpsStatus?.caSha256}
+            <p class="setting-hint" style="margin-top: 6px;">
+              Local Root CA SHA-256: <code style="word-break: break-all;">{localHttpsStatus.caSha256}</code>
+            </p>
+          {/if}
+          {#if localHttpsStatus?.httpsUrl}
+            <p class="setting-hint" style="margin-top: 4px;">
+              HTTPS Origin: <code>{localHttpsStatus.httpsUrl}</code>
+              {#if localHttpsStatus.mdnsHttpsUrl} · mDNS: <code>{localHttpsStatus.mdnsHttpsUrl}</code>{/if}
+            </p>
+          {/if}
+          <p class="setting-hint" style="margin-top: 6px;">
+            Without trusting the Local Root CA on your phone/browser, browsers show a certificate warning on HTTPS. For zero-install guests, keep using the standard LAN HTTP QR code.
+          </p>
+
+          <div style="display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px;">
+            <button type="button" class="button secondary small" disabled={workingHttpsAction} on:click={handleExportLocalCA}>
+              Export Local Root CA (.crt)
+            </button>
+            {#if localHttpsStatus?.hasCa}
+              <button type="button" class="button ghost small" disabled={workingHttpsAction} on:click={handleRemoveLocalCA}>
+                Remove Local CA &amp; Disable
+              </button>
+            {/if}
+          </div>
+
+          {#if httpsActionMessage}
+            <p class="setting-hint" style="color: var(--success); margin-top: 8px;">{httpsActionMessage}</p>
+          {/if}
+          {#if httpsActionError}
+            <p class="setting-hint" style="color: var(--danger); margin-top: 8px;">{httpsActionError}</p>
+          {/if}
+        </div>
+      </div>
+
+      <div class="card-section-head" style="margin-top: 24px;">
+        <h4>Pinned Peer Identities (TOFU Recovery)</h4>
+        <p>Pinned Ed25519 peer certificates from Desktop-to-Desktop and CLI transfers. Remove an entry only after verifying a legitimate host key rotation.</p>
+      </div>
+
+      <div class="setting-row">
+        {#if knownHosts.length === 0}
+          <span class="setting-hint">No pinned peer host identities stored in <code>known_hosts.json</code> yet.</span>
+        {:else}
+          <div class="storage-card" style="display: flex; flex-direction: column; gap: 8px;">
+            {#each knownHosts as kh (kh.hostId)}
+              <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--border-base);">
+                <div>
+                  <strong>{kh.name || 'Pinned Peer'}</strong>
+                  {#if kh.lastAddress}<span class="setting-hint"> · {kh.lastAddress}</span>{/if}
+                  <div class="setting-hint monospace">ID: {kh.hostId.slice(0, 16)}…</div>
+                </div>
+                <button type="button" class="button ghost small" on:click={() => handleRemoveKnownHost(kh.hostId)}>
+                  Remove Pin
+                </button>
+              </div>
+            {/each}
+          </div>
+        {/if}
       </div>
     </div>
 
