@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (Phase 3 — G10)
+Accepted (Phase 3)
 
 ## Context
 
