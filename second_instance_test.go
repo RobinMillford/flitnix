@@ -11,10 +11,7 @@ import (
 )
 
 func TestSecondInstanceLaunch_Handoff(t *testing.T) {
-	app, err := NewApp()
-	if err != nil {
-		t.Fatal(err)
-	}
+	app := newIsolatedApp(t)
 
 	secondDir := t.TempDir()
 	relFile := "second_instance_doc.txt"
@@ -62,10 +59,7 @@ func TestSecondInstanceLaunch_Handoff(t *testing.T) {
 }
 
 func TestSecondInstanceLaunch_PreStartupQueue(t *testing.T) {
-	app, err := NewApp()
-	if err != nil {
-		t.Fatal(err)
-	}
+	app := newIsolatedApp(t)
 
 	dir := t.TempDir()
 	f := filepath.Join(dir, "pre_startup.txt")
@@ -96,10 +90,7 @@ func TestSecondInstanceLaunch_PreStartupQueue(t *testing.T) {
 }
 
 func TestSecondInstanceLaunch_Deduplication(t *testing.T) {
-	app, err := NewApp()
-	if err != nil {
-		t.Fatal(err)
-	}
+	app := newIsolatedApp(t)
 	app.startup(context.Background())
 
 	dir := t.TempDir()

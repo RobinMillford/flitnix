@@ -13,13 +13,8 @@ import (
 )
 
 func TestAppVisibilityPersistenceAndRestartExpiry(t *testing.T) {
-	tempConfig := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", tempConfig)
-
-	app, err := NewApp()
-	if err != nil {
-		t.Fatalf("NewApp: %v", err)
-	}
+	dir := isolateAppStorage(t)
+	app := newIsolatedAppIn(t, dir)
 	t.Cleanup(func() { app.shutdown(context.Background()) })
 
 	st, err := app.SetVisibilityMode(string(devices.VisibilityHidden))
@@ -59,10 +54,7 @@ func TestAppVisibilityPersistenceAndRestartExpiry(t *testing.T) {
 		t.Fatalf("write settings.json: %v", err)
 	}
 
-	restarted, err := NewApp()
-	if err != nil {
-		t.Fatalf("restarted NewApp: %v", err)
-	}
+	restarted := newIsolatedAppIn(t, dir)
 	t.Cleanup(func() { restarted.shutdown(context.Background()) })
 
 	got := restarted.GetVisibilityState()
@@ -72,13 +64,7 @@ func TestAppVisibilityPersistenceAndRestartExpiry(t *testing.T) {
 }
 
 func TestAppRemoveTrustedDeviceRevokesActiveDeviceSession(t *testing.T) {
-	tempConfig := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", tempConfig)
-
-	app, err := NewApp()
-	if err != nil {
-		t.Fatalf("NewApp: %v", err)
-	}
+	app := newIsolatedApp(t)
 	t.Cleanup(func() { app.shutdown(context.Background()) })
 
 	pub, _, err := devices.GenerateKeyPair()
