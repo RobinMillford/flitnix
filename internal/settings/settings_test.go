@@ -35,6 +35,10 @@ func TestDefaultSettings(t *testing.T) {
 		t.Fatalf("unexpected default notification flags: enabled=%v quiet=%v hideNames=%v",
 			d.NotificationsEnabled, d.QuietMode, d.HideNotificationFilenames)
 	}
+	if d.HistoryRetentionDays != DefaultHistoryRetentionDays || d.HistoryMaxRecords != DefaultHistoryMaxRecords {
+		t.Fatalf("unexpected default history retention: days=%d max=%d",
+			d.HistoryRetentionDays, d.HistoryMaxRecords)
+	}
 }
 
 func TestStore_SaveAndGetRoundTrip(t *testing.T) {

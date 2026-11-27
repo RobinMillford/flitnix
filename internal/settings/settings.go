@@ -13,7 +13,12 @@ import (
 
 const (
 	// CurrentSchemaVersion is the current version of the settings file schema.
-	CurrentSchemaVersion = 5
+	CurrentSchemaVersion = 6
+
+	DefaultHistoryRetentionDays = 90
+	DefaultHistoryMaxRecords    = 5000
+	MaxHistoryRetentionDays     = 3650
+	MaxHistoryMaxRecords        = 100000
 
 	// Allowed themes
 	ThemeSystem = "system"
@@ -54,6 +59,8 @@ type Settings struct {
 	NotifyQuickText           bool      `json:"notifyQuickText"`
 	NotifyPairingRequests     bool      `json:"notifyPairingRequests"`
 	NotifyGuestRequests       bool      `json:"notifyGuestRequests"`
+	HistoryRetentionDays      int       `json:"historyRetentionDays"`
+	HistoryMaxRecords         int       `json:"historyMaxRecords"`
 	UpdatedAt                 time.Time `json:"updatedAt"`
 }
 
@@ -80,6 +87,8 @@ func DefaultSettings() Settings {
 		NotifyQuickText:           true,
 		NotifyPairingRequests:     true,
 		NotifyGuestRequests:       true,
+		HistoryRetentionDays:      DefaultHistoryRetentionDays,
+		HistoryMaxRecords:         DefaultHistoryMaxRecords,
 		UpdatedAt:                 time.Now().UTC(),
 	}
 }
@@ -192,6 +201,17 @@ func ValidateAndNormalize(s Settings) Settings {
 		s.VisibilityExpiresAt = time.Time{}
 	}
 
+	if s.HistoryRetentionDays < 0 {
+		s.HistoryRetentionDays = 0
+	} else if s.HistoryRetentionDays > MaxHistoryRetentionDays {
+		s.HistoryRetentionDays = MaxHistoryRetentionDays
+	}
+	if s.HistoryMaxRecords < 0 {
+		s.HistoryMaxRecords = 0
+	} else if s.HistoryMaxRecords > MaxHistoryMaxRecords {
+		s.HistoryMaxRecords = MaxHistoryMaxRecords
+	}
+
 	return s
 }
 
@@ -222,6 +242,14 @@ func migrateSettings(old Settings) Settings {
 			migrated.NotifyQuickText = true
 			migrated.NotifyPairingRequests = true
 			migrated.NotifyGuestRequests = true
+		}
+	}
+	if old.Version < 6 {
+		if migrated.HistoryRetentionDays < 0 {
+			migrated.HistoryRetentionDays = DefaultHistoryRetentionDays
+		}
+		if migrated.HistoryMaxRecords < 0 {
+			migrated.HistoryMaxRecords = DefaultHistoryMaxRecords
 		}
 	}
 	migrated.Version = CurrentSchemaVersion

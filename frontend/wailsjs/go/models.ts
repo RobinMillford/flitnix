@@ -1228,6 +1228,8 @@ export namespace main {
 	    notifyPairingRequests: boolean;
 	    notifyGuestRequests: boolean;
 	    notificationsSupported?: boolean;
+	    historyRetentionDays: number;
+	    historyMaxRecords: number;
 
 	    static createFrom(source: any = {}) {
 	        return new SettingsView(source);
@@ -1261,6 +1263,8 @@ export namespace main {
 	        this.notifyPairingRequests = source["notifyPairingRequests"] !== undefined ? source["notifyPairingRequests"] : true;
 	        this.notifyGuestRequests = source["notifyGuestRequests"] !== undefined ? source["notifyGuestRequests"] : true;
 	        this.notificationsSupported = Boolean(source["notificationsSupported"]);
+	        this.historyRetentionDays = source["historyRetentionDays"] ?? 90;
+	        this.historyMaxRecords = source["historyMaxRecords"] ?? 5000;
 	    }
 	}
 	export class SharedFileView {

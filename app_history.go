@@ -170,6 +170,30 @@ func (a *App) ClearTransferHistory() error {
 	return nil
 }
 
+// ApplyHistoryRetentionNow prunes transfer history metadata exceeding configured
+// age/count retention limits without touching any files on disk.
+func (a *App) ApplyHistoryRetentionNow() (int, error) {
+	if a.historyStore == nil || a.settingsStore == nil {
+		return 0, nil
+	}
+	s := a.settingsStore.Get()
+	var maxAge time.Duration
+	if s.HistoryRetentionDays > 0 {
+		maxAge = time.Duration(s.HistoryRetentionDays) * 24 * time.Hour
+	}
+	removed, err := a.historyStore.ApplyRetention(maxAge, s.HistoryMaxRecords)
+	if err != nil {
+		return removed, err
+	}
+	if removed > 0 && a.events != nil {
+		a.events.PublishDesktop(events.TypeHistoryUpdated, map[string]any{
+			"action":  "pruned",
+			"removed": removed,
+		})
+	}
+	return removed, nil
+}
+
 // DeleteHistoryRecord deletes one history entry without removing any user file.
 func (a *App) DeleteHistoryRecord(id string) error {
 	if a.historyStore == nil {
