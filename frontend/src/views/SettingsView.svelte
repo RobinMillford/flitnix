@@ -114,6 +114,117 @@
         </label>
       </div>
 
+      <div class="card-section-head" style="margin-top: 22px;">
+        <h4>Always-Ready Tray & Autostart</h4>
+        <p>Keep Flitnix available in the background so your devices can connect without opening the window first.</p>
+      </div>
+
+      <div class="setting-row">
+        <label class="toggle-control-label">
+          <input
+            type="checkbox"
+            bind:checked={settingsState.minimizeToTray}
+            disabled={settingsState.traySupported === false}
+          />
+          <div class="toggle-text-block">
+            <strong>Minimize to system tray / menu bar on close</strong>
+            <span>Hides the window while keeping LAN discovery and incoming transfer approvals running.</span>
+          </div>
+        </label>
+        {#if settingsState.traySupported === false}
+          <span class="setting-hint">System tray indicator is unavailable in this desktop session; closing will quit Flitnix.</span>
+        {/if}
+      </div>
+
+      <div class="setting-row" style="margin-top: 12px;">
+        <label class="toggle-control-label">
+          <input
+            type="checkbox"
+            bind:checked={settingsState.launchOnLogin}
+            disabled={settingsState.autostartSupported === false}
+          />
+          <div class="toggle-text-block">
+            <strong>Launch Flitnix silently when logging in</strong>
+            <span>Starts Flitnix minimized to the tray on desktop login (no background telemetry or cloud login).</span>
+          </div>
+        </label>
+      </div>
+
+      <div class="card-section-head" style="margin-top: 22px;">
+        <h4>Desktop Notifications</h4>
+        <p>Control native OS alerts and interactive transfer approval prompts.</p>
+      </div>
+
+      <div class="setting-row">
+        <label class="toggle-control-label">
+          <input
+            type="checkbox"
+            bind:checked={settingsState.notificationsEnabled}
+          />
+          <div class="toggle-text-block">
+            <strong>Enable native OS notifications</strong>
+            <span>Notify when transfers arrive, finish, or need your decision while Flitnix is in the background.</span>
+          </div>
+        </label>
+      </div>
+
+      <div class="setting-row" style="margin-top: 12px;">
+        <label class="toggle-control-label">
+          <input
+            type="checkbox"
+            bind:checked={settingsState.quietMode}
+            disabled={!settingsState.notificationsEnabled}
+          />
+          <div class="toggle-text-block">
+            <strong>Pause notifications (Do Not Disturb)</strong>
+            <span>Temporarily silence all desktop popups while still recording transfers in History.</span>
+          </div>
+        </label>
+      </div>
+
+      <div class="setting-row" style="margin-top: 12px;">
+        <label class="toggle-control-label">
+          <input
+            type="checkbox"
+            bind:checked={settingsState.hideNotificationFilenames}
+            disabled={!settingsState.notificationsEnabled}
+          />
+          <div class="toggle-text-block">
+            <strong>Hide file and sender names in notifications</strong>
+            <span>Masks sensitive filenames, Quick Text snippets, and device names in OS banners.</span>
+          </div>
+        </label>
+      </div>
+
+      {#if settingsState.notificationsEnabled}
+        <div class="setting-row" style="margin-top: 12px; padding-left: 16px; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px;">
+          <label class="toggle-control-label">
+            <input type="checkbox" bind:checked={settingsState.notifyIncomingTransfers} />
+            <span class="toggle-text-block"><strong>Incoming transfer requests</strong></span>
+          </label>
+          <label class="toggle-control-label">
+            <input type="checkbox" bind:checked={settingsState.notifyCompletedTransfers} />
+            <span class="toggle-text-block"><strong>Completed transfers</strong></span>
+          </label>
+          <label class="toggle-control-label">
+            <input type="checkbox" bind:checked={settingsState.notifyFailedTransfers} />
+            <span class="toggle-text-block"><strong>Transfer failures</strong></span>
+          </label>
+          <label class="toggle-control-label">
+            <input type="checkbox" bind:checked={settingsState.notifyPairingRequests} />
+            <span class="toggle-text-block"><strong>Device pairing alerts</strong></span>
+          </label>
+          <label class="toggle-control-label">
+            <input type="checkbox" bind:checked={settingsState.notifyGuestRequests} />
+            <span class="toggle-text-block"><strong>Guest Drop Box alerts</strong></span>
+          </label>
+          <label class="toggle-control-label">
+            <input type="checkbox" bind:checked={settingsState.notifyQuickText} />
+            <span class="toggle-text-block"><strong>Quick Text while hidden</strong></span>
+          </label>
+        </div>
+      {/if}
+
       {#if sleepInhibition}
         <div class="card-section-head" style="margin-top: 20px;">
           <h4>System Power & Sleep</h4>

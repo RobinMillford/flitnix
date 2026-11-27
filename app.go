@@ -498,6 +498,7 @@ func NewApp() (*App, error) {
 			if ctx != nil && ctx.Value("frontend") != nil {
 				runtime.EventsEmit(ctx, "visibility:changed", st)
 			}
+			a.updateTrayState()
 		},
 		func(st devices.VisibilityState) error {
 			if a.settingsStore == nil {
@@ -768,12 +769,42 @@ func (a *App) initTray() {
 		OnOpen:         func() { a.RestoreWindow() },
 		OnHide:         func() { a.HideWindow() },
 		OnToggleWindow: func() { a.ToggleWindow() },
-		OnQuit:         func() { a.QuitApp() },
+		OnSetVisibility: func(mode string) {
+			if _, err := a.SetVisibilityMode(mode); err == nil {
+				a.updateTrayState()
+			}
+		},
+		OnToggleQuietMode: func() {
+			a.ToggleQuietMode()
+		},
+		OnOpenSettings: func() {
+			a.RestoreWindow()
+			a.emitFrontendEvent("flitnix:navigate", map[string]string{"tab": "settings"})
+		},
+		OnQuit: func() { a.QuitApp() },
 	})
 	a.tray = t
 	a.startupMu.Unlock()
 
 	t.Start(a.buildTrayState())
+}
+
+// ToggleQuietMode toggles notification Do-Not-Disturb mode from the tray or UI.
+func (a *App) ToggleQuietMode() bool {
+	if a.settingsStore == nil {
+		return false
+	}
+	cur := a.settingsStore.Get()
+	cur.QuietMode = !cur.QuietMode
+	if err := a.settingsStore.Save(cur); err != nil {
+		return !cur.QuietMode
+	}
+	if a.notify != nil {
+		a.notify.SetPolicy(a.notifyPolicyFromSettings())
+	}
+	a.updateTrayState()
+	a.emitFrontendEvent("settings:changed", a.GetSettings())
+	return cur.QuietMode
 }
 
 func (a *App) buildTrayState() tray.State {
@@ -818,12 +849,14 @@ func (a *App) buildTrayState() tray.State {
 		status = fmt.Sprintf("Flitnix Active (%d session) · %s", sessCount, visLabel)
 	}
 
+	quiet := a.settingsStore != nil && a.settingsStore.Get().QuietMode
 	return tray.State{
 		Tooltip:          status,
 		StatusLabel:      status,
 		Attention:        pendingCount > 0,
 		WindowVisible:    !a.windowHidden.Load(),
 		VisibilityMode:   string(vis.Mode),
+		QuietMode:        quiet,
 		HasActiveSession: sessCount > 0,
 		PendingCount:     pendingCount,
 	}
