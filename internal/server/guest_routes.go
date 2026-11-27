@@ -31,11 +31,12 @@ func guestTokenFromRequest(r *http.Request) string {
 
 func newGuestAPIMux(services *Services, stall, downloadStall time.Duration, grants *DownloadGrantStore, shutdownCh <-chan struct{}) http.Handler {
 	mux := http.NewServeMux()
+	pinLimiter := newPINLimiter()
 	mux.HandleFunc("GET /guest-api/events", handleGuestEvents(services, shutdownCh))
 	mux.HandleFunc("GET /guest-api/ping", handleDiagnosticsPing(services))
 	mux.HandleFunc("POST /guest-api/ping", handleDiagnosticsPing(services))
 	mux.HandleFunc("GET /guest-api/room-info", handleGuestRoomInfo(services))
-	mux.HandleFunc("POST /guest-api/join", handleGuestJoin(services))
+	mux.HandleFunc("POST /guest-api/join", handleGuestJoin(services, pinLimiter))
 	mux.HandleFunc("GET /guest-api/status", handleGuestStatus(services))
 	mux.HandleFunc("POST /guest-api/uploads", handleGuestUploadDeclare(services))
 	mux.HandleFunc("GET /guest-api/uploads/{id}", handleGuestUploadStatus(services))
@@ -66,6 +67,9 @@ type guestRoomInfoResponse struct {
 	AllowsUpload        bool                        `json:"allowsUpload"`
 	AllowsDownload      bool                        `json:"allowsDownload"`
 	RequireJoinApproval bool                        `json:"requireJoinApproval"`
+	PINRequired         bool                        `json:"pinRequired"`
+	MaxDownloads        int                         `json:"maxDownloads"`
+	RemainingDownloads  int                         `json:"remainingDownloads"`
 	FormSchema          []guest.FormField           `json:"formSchema,omitempty"`
 	Roster              []guest.ExpectedParticipant `json:"roster,omitempty"`
 	HasRoster           bool                        `json:"hasRoster"`
@@ -104,6 +108,9 @@ func handleGuestRoomInfo(svcs *Services) http.HandlerFunc {
 			AllowsUpload:        v.AllowsUpload,
 			AllowsDownload:      v.AllowsDownload,
 			RequireJoinApproval: v.RequireJoinApproval,
+			PINRequired:         v.PINRequired,
+			MaxDownloads:        v.MaxDownloads,
+			RemainingDownloads:  v.RemainingDownloads,
 			FormSchema:          v.FormSchema,
 			Roster:              v.Roster,
 			HasRoster:           v.HasRoster,
@@ -115,6 +122,7 @@ type guestJoinRequest struct {
 	Secret        string `json:"secret"`
 	Nickname      string `json:"nickname"`
 	ParticipantID string `json:"participantId,omitempty"`
+	Pin           string `json:"pin,omitempty"`
 }
 
 // guestJoinResponse is the join acknowledgement shown to the guest page. It
@@ -127,7 +135,7 @@ type guestJoinResponse struct {
 	State    string `json:"state"`
 }
 
-func handleGuestJoin(svcs *Services) http.HandlerFunc {
+func handleGuestJoin(svcs *Services, pinLimiter *deviceSessionLimiter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if svcs.GuestManager == nil {
 			writeError(w, http.StatusNotFound, "guest room service unavailable")
@@ -137,6 +145,12 @@ func handleGuestJoin(svcs *Services) http.HandlerFunc {
 		room := svcs.GuestManager.ActiveRoom()
 		if room == nil {
 			writeError(w, http.StatusUnauthorized, "no active guest room")
+			return
+		}
+
+		ip := clientIPFromRequest(r)
+		if allowed, retryAfter := pinLimiter.checkAllowed(ip); !allowed {
+			writeRateLimit(w, retryAfter)
 			return
 		}
 
@@ -158,6 +172,21 @@ func handleGuestJoin(svcs *Services) http.HandlerFunc {
 			writeError(w, http.StatusUnauthorized, "invalid invitation secret")
 			return
 		}
+
+		if room.PINRequired() && !room.VerifyPIN(req.Pin) {
+			pinLimiter.recordFailure(ip)
+			if allowed, retryAfter := pinLimiter.checkAllowed(ip); !allowed {
+				writeRateLimit(w, retryAfter)
+				return
+			}
+			if strings.TrimSpace(req.Pin) == "" {
+				writeErrorCode(w, http.StatusForbidden, "PIN required to join this room", "pin_required")
+				return
+			}
+			writeErrorCode(w, http.StatusForbidden, "Incorrect room PIN", "invalid_pin")
+			return
+		}
+		pinLimiter.clear(ip)
 
 		var g *guest.Guest
 		if req.ParticipantID != "" {
@@ -241,6 +270,8 @@ type guestStatusResponse struct {
 	AllowsUpload        bool           `json:"allowsUpload"`
 	AllowsDownload      bool           `json:"allowsDownload"`
 	RequireJoinApproval bool           `json:"requireJoinApproval"`
+	MaxDownloads        int            `json:"maxDownloads"`
+	RemainingDownloads  int            `json:"remainingDownloads"`
 }
 
 func handleGuestStatus(svcs *Services) http.HandlerFunc {
@@ -288,6 +319,8 @@ func handleGuestStatus(svcs *Services) http.HandlerFunc {
 			AllowsUpload:        v.AllowsUpload,
 			AllowsDownload:      v.AllowsDownload,
 			RequireJoinApproval: v.RequireJoinApproval,
+			MaxDownloads:        v.MaxDownloads,
+			RemainingDownloads:  v.RemainingDownloads,
 		})
 	}
 }
@@ -636,6 +669,10 @@ func handleGuestCreateDownloadGrant(svcs *Services, grants *DownloadGrantStore) 
 		}
 		grant, progress, err := grants.createForGuest(room, g.ID, sources, grantFilename(sources))
 		if err != nil {
+			if errors.Is(err, errDownloadLimit) {
+				writeErrorCode(w, http.StatusGone, "download limit reached for this room", "download_limit_reached")
+				return
+			}
 			if errors.Is(err, errRoomBusy) {
 				writeError(w, http.StatusTooManyRequests, err.Error())
 				return

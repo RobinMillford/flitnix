@@ -15,6 +15,8 @@
   export let guestDurationMinutes: number = 60
   export let guestMode: 'upload_only' | 'download_only' | 'two_way' = 'upload_only'
   export let guestAutoApproveGuests: boolean = false
+  export let guestPinCode: string = ''
+  export let guestMaxDownloads: number = 0
   export let guestSharedPaths: string[] = []
   export let guestStarting: boolean = false
   export let guestCopiedLink: boolean = false
@@ -448,7 +450,7 @@
               <span class="subcard-title">Room Active Duration</span>
               <p class="subcard-desc">After this duration, the room expires automatically and stops accepting guest connections.</p>
               <div class="duration-pills-row">
-                {#each [15, 30, 60, 120, 240] as mins}
+                {#each [5, 15, 30, 60, 120, 240, 1440] as mins}
                   <button
                     type="button"
                     class="duration-pill"
@@ -458,6 +460,37 @@
                     {mins >= 60 ? `${mins / 60} ${mins === 60 ? 'Hour' : 'Hours'}` : `${mins} Minutes`}
                   </button>
                 {/each}
+              </div>
+            </div>
+
+            <!-- Access PIN & Download Limit -->
+            <div class="option-subcard">
+              <span class="subcard-title">Access Controls (PIN &amp; Download Limit)</span>
+              <p class="subcard-desc">Optionally require a PIN to join this room (never embedded in the QR code) or cap total host-file downloads.</p>
+              <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px;">
+                <div>
+                  <label for="guest-pin-input" style="font-size:12px; font-weight:600; display:block; margin-bottom:4px;">Room PIN (Optional)</label>
+                  <input
+                    id="guest-pin-input"
+                    type="password"
+                    class="text-input compact"
+                    maxlength="32"
+                    bind:value={guestPinCode}
+                    placeholder="4-32 chars (blank = none)"
+                  />
+                </div>
+                {#if guestMode !== 'upload_only'}
+                  <div>
+                    <label for="guest-dl-limit" style="font-size:12px; font-weight:600; display:block; margin-bottom:4px;">Download Cap</label>
+                    <select id="guest-dl-limit" class="text-input compact" bind:value={guestMaxDownloads}>
+                      <option value={0}>Unlimited</option>
+                      <option value={1}>1 Download</option>
+                      <option value={5}>5 Downloads</option>
+                      <option value={25}>25 Downloads</option>
+                      <option value={50}>50 Downloads</option>
+                    </select>
+                  </div>
+                {/if}
               </div>
             </div>
           </div>
@@ -500,6 +533,14 @@
               <span class="chip-pulse active"></span>
               Live {fmtMode(guestRoomState?.room?.mode)} Room
             </span>
+            {#if guestRoomState?.room?.pinRequired}
+              <span class="countdown-chip">🔐 PIN Protected</span>
+            {/if}
+            {#if (guestRoomState?.room?.maxDownloads ?? 0) > 0}
+              <span class="countdown-chip tabular">
+                {guestRoomState?.room?.remainingDownloads}/{guestRoomState?.room?.maxDownloads} Downloads left
+              </span>
+            {/if}
             {#if guestRoomState?.room?.expiresAt}
               <span class="countdown-chip tabular">
                 ⏱ {fmtRemaining(guestRoomState.room.expiresAt)}

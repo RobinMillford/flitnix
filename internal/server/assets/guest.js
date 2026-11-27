@@ -42,6 +42,8 @@
   var joinView = document.getElementById("join-view");
   var joinForm = document.getElementById("join-form");
   var nicknameInput = document.getElementById("nickname-input");
+  var guestPinGroup = document.getElementById("guest-pin-group");
+  var guestPinInput = document.getElementById("guest-pin-input");
   var joinBtn = document.getElementById("join-btn");
   var waitingView = document.getElementById("waiting-view");
   var waitingMsg = document.getElementById("waiting-msg");
@@ -442,6 +444,10 @@
         if (info.mode) {
           applyRoomModeUI(info.mode, info.allowsUpload !== false, !!info.allowsDownload);
         }
+        if (guestPinGroup) {
+          guestPinGroup.hidden = !info.pinRequired;
+          if (guestPinInput) guestPinInput.required = !!info.pinRequired;
+        }
         if (info.formSchema) {
           renderFormFields(info.formSchema);
         }
@@ -497,6 +503,9 @@
       if (participantId) {
         reqBody.participantId = participantId;
       }
+      if (guestPinGroup && !guestPinGroup.hidden && guestPinInput) {
+        reqBody.pin = guestPinInput.value.trim();
+      }
 
       fetch("/guest-api/join", {
         method: "POST",
@@ -504,7 +513,11 @@
         body: JSON.stringify(reqBody)
       })
         .then(function (res) {
-          if (!res.ok) throw new Error("Join request failed (" + res.status + ")");
+          if (!res.ok) {
+            return res.json().catch(function () { return {}; }).then(function (body) {
+              throw new Error((body && body.error) || ("Join request failed (" + res.status + ")"));
+            });
+          }
           return res.json();
         })
         .then(function (data) {

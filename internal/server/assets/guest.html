@@ -175,6 +175,10 @@
         <label for="nickname-input" class="input-label" id="nickname-label">Your Nickname (Optional)</label>
         <input type="text" id="nickname-input" class="text-input" placeholder="e.g. Alex (Pixel 8)" maxlength="30" autocomplete="name">
       </div>
+      <div class="input-group" id="guest-pin-group" hidden>
+        <label for="guest-pin-input" class="input-label">Room PIN *</label>
+        <input type="password" id="guest-pin-input" class="text-input" placeholder="Enter PIN shared by host" maxlength="32" autocomplete="off">
+      </div>
       <button type="submit" id="join-btn" class="btn-primary">Request to Join</button>
     </form>
   </section>

@@ -21,6 +21,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/itsyamin/flitnix/internal/events"
 	"github.com/itsyamin/flitnix/internal/guest"
 	"github.com/itsyamin/flitnix/internal/session"
 	"github.com/itsyamin/flitnix/internal/transfer"
@@ -251,6 +252,10 @@ func createDownloadGrant(svcs *Services, grants *DownloadGrantStore) http.Handle
 		}
 		grant, progress, err := grants.create(sess, sources, grantFilename(sources))
 		if err != nil {
+			if errors.Is(err, errDownloadLimit) {
+				writeErrorCode(w, http.StatusGone, "download limit reached for this session", "download_limit_reached")
+				return
+			}
 			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
@@ -630,7 +635,7 @@ func (g *guardedReader) Read(b []byte) (int, error) {
 	if g.ctx.Err() != nil {
 		return 0, errDownloadCanceled
 	}
-	if g.sess != nil && g.sess.Status() == session.StatusRevoked {
+	if g.sess != nil && g.sess.Status() != session.StatusActive {
 		return 0, errDownloadSession
 	}
 	if g.activeCheck != nil && !g.activeCheck() {
@@ -862,6 +867,11 @@ func serveArchiveDownload(svcs *Services, grants *DownloadGrantStore, stall time
 				http.Error(w, "download unavailable", http.StatusForbidden)
 				return
 			}
+			if grant.Sess != nil && !isRequestPINUnlocked(r, grant.Sess) {
+				grants.finishStream(grantID)
+				writeErrorCode(w, http.StatusForbidden, "PIN required to unlock this session", "pin_required")
+				return
+			}
 			isContinuation = true
 			defer grants.finishStream(grantID)
 		} else {
@@ -885,6 +895,11 @@ func serveArchiveDownload(svcs *Services, grants *DownloadGrantStore, stall time
 			defer grants.finishStream(grantID)
 			if grant.GuestRoom != nil {
 				http.Error(w, "download unavailable", http.StatusForbidden)
+				return
+			}
+			if grant.Sess != nil && !isRequestPINUnlocked(r, grant.Sess) {
+				grants.finishQuota(grant, false)
+				writeErrorCode(w, http.StatusForbidden, "PIN required to unlock this session", "pin_required")
 				return
 			}
 
@@ -996,19 +1011,38 @@ func serveGuestArchiveDownload(svcs *Services, grants *DownloadGrantStore, stall
 	}
 }
 
+func endSessionForDownloadLimit(svcs *Services, grants *DownloadGrantStore, sess *session.Session) {
+	if svcs == nil || sess == nil {
+		return
+	}
+	if grants != nil {
+		grants.RevokeSession(sess.Key())
+	}
+	if svcs.Sessions != nil {
+		_ = svcs.Sessions.RevokeSession(sess)
+	}
+	svcs.EmitPersonal(sess.Key(), events.TypeSessionEnded, map[string]any{
+		"key":    sess.Key(),
+		"reason": "download_limit_reached",
+	})
+}
+
 func streamAuthorizedGrant(svcs *Services, grants *DownloadGrantStore, stall time.Duration, w http.ResponseWriter, r *http.Request, grant downloadGrant, progress *archiveProgress, isContinuation bool) {
 	// Pin session during stream
 	if grant.Sess != nil {
 		grant.Sess.Begin()
 		defer grant.Sess.End()
 	}
-	var guestCompleted bool
+	var downloadCompleted bool
 	if grant.GuestRoom != nil {
 		grant.GuestRoom.RecordDownloadStart()
-		defer func() {
-			grant.GuestRoom.RecordDownloadEnd(guestCompleted)
-		}()
 	}
+	defer func() {
+		_, autoEnd := grants.finishQuota(grant, downloadCompleted)
+		if autoEnd && grant.Sess != nil {
+			go endSessionForDownloadLimit(svcs, grants, grant.Sess)
+		}
+	}()
 	if svcs.Inhibitor != nil {
 		pLease, pErr := svcs.Inhibitor.Acquire("Downloading " + grant.Filename)
 		if pErr != nil && svcs.Diagnose != nil {
@@ -1049,7 +1083,7 @@ func streamAuthorizedGrant(svcs *Services, grants *DownloadGrantStore, stall tim
 			finishProgressWithDigest(progress, nil, actualSHA256)
 			err = flushResponse(w)
 			if err == nil {
-				guestCompleted = true
+				downloadCompleted = true
 			}
 		} else {
 			finishProgressWithDigest(progress, err, "")
@@ -1115,7 +1149,7 @@ func streamAuthorizedGrant(svcs *Services, grants *DownloadGrantStore, stall tim
 		seeker.flush()
 		if r.Method != http.MethodHead && seeker.read == info.Size() {
 			finishProgressWithDigest(progress, nil, grant.SHA256)
-			guestCompleted = true
+			downloadCompleted = true
 		}
 		return
 	}
@@ -1145,13 +1179,13 @@ func streamAuthorizedGrant(svcs *Services, grants *DownloadGrantStore, stall tim
 		}
 		if r.Method != http.MethodHead && (seeker.read == info.Size() || (seeker.curOffset == info.Size() && progressProcessedAtLeast(progress, info.Size()))) {
 			finishProgressWithDigest(progress, nil, "")
-			guestCompleted = true
+			downloadCompleted = true
 		}
 		return
 	}
 	started, err := streamSingleFileWithSnapshot(r.Context(), r.Method, w, out, grant, progress, f, snap)
 	if err == nil && r.Method != http.MethodHead {
-		guestCompleted = true
+		downloadCompleted = true
 	}
 	if err != nil && !started {
 		finishProgressWithDigest(progress, err, "")

@@ -67,6 +67,11 @@
   // ------------------------------------------------------------------
   var statusEl = document.getElementById("status");
   var statusText = statusEl ? statusEl.querySelector(".status__text") : null;
+  var pinUnlockCard = document.getElementById("pin-unlock-card");
+  var pinUnlockForm = document.getElementById("pin-unlock-form");
+  var pinUnlockInput = document.getElementById("pin-unlock-input");
+  var pinUnlockBtn = document.getElementById("pin-unlock-btn");
+  var pinUnlockError = document.getElementById("pin-unlock-error");
   var flowEl = document.getElementById("flow");
   var rescanCard = document.getElementById("rescan");
   var rescanText = document.getElementById("rescan-text");
@@ -525,6 +530,14 @@
         if (res.status === 401) { endUnauthorized(body && body.code); }
         if (res.status === 403 && body && body.code === "qr_sharing_paused") {
           setStatus("reconnecting", body.error || "QR sharing is currently paused by the host");
+        }
+        if (res.status === 403 && body && body.code === "pin_required") {
+          if (flowEl) flowEl.hidden = true;
+          if (pinUnlockCard) pinUnlockCard.hidden = false;
+          setStatus("checking", "Session PIN required");
+        }
+        if (res.status === 410 && body && body.code === "download_limit_reached") {
+          showAwarenessBanner(body.error || "Download limit reached for this session.");
         }
         if (res.status >= 200 && res.status < 300) return body;
         var msg = body && body.error ? body.error
@@ -2936,9 +2949,8 @@
     });
   }
 
-  function startConnectedSession() {
-    appState.ended = false;
-    if (rescanCard) rescanCard.hidden = true;
+  function finishPinUnlockFlow() {
+    if (pinUnlockCard) pinUnlockCard.hidden = true;
     setStatus("ready", "Connected — pick files to send or download the shared ones");
     flowEl.hidden = false;
     updateAwarenessUI();
@@ -2948,6 +2960,56 @@
     connectEvents();
     scheduleTextPoll();
     refreshShareTargetButtons();
+  }
+
+  function showPinUnlockError(msg) {
+    if (!pinUnlockError) return;
+    pinUnlockError.textContent = msg || "";
+    pinUnlockError.hidden = !msg;
+  }
+
+  if (pinUnlockForm && pinUnlockInput) {
+    pinUnlockForm.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var pin = pinUnlockInput.value;
+      if (!pin.trim()) {
+        showPinUnlockError("Enter the session PIN.");
+        return;
+      }
+      showPinUnlockError("");
+      if (pinUnlockBtn) pinUnlockBtn.disabled = true;
+      api("/api/pin/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: pin })
+      }).then(function () {
+        pinUnlockInput.value = "";
+        finishPinUnlockFlow();
+      }).catch(function (err) {
+        showPinUnlockError((err && err.message) || "Incorrect PIN.");
+      }).finally(function () {
+        if (pinUnlockBtn) pinUnlockBtn.disabled = false;
+      });
+    });
+  }
+
+  function startConnectedSession() {
+    appState.ended = false;
+    if (rescanCard) rescanCard.hidden = true;
+    api("/api/pin/status").then(function (st) {
+      if (st && st.pinRequired && !st.pinUnlocked) {
+        if (flowEl) flowEl.hidden = true;
+        if (pinUnlockCard) pinUnlockCard.hidden = false;
+        setStatus("checking", "Session PIN required");
+        if (pinUnlockInput) {
+          try { pinUnlockInput.focus(); } catch (_) {}
+        }
+        return;
+      }
+      finishPinUnlockFlow();
+    }).catch(function () {
+      finishPinUnlockFlow();
+    });
   }
 
   function showCodeError(msg) {

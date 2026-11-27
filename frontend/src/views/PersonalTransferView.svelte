@@ -20,6 +20,9 @@
   export let serverAddress: string = ''
   export let localHttpsStatus: main.LocalHTTPSStatus | null = null
   export let qrUseHttps: boolean = false
+  export let sessionPinCode: string = ''
+  export let sessionMaxDownloads: number = 0
+  export let sessionDurationMinutes: number = 0
   export let toggleQrHttpsAction: (useHttps: boolean) => void = () => {}
   export let qrUrl: string = ''
   export let qrError: string = ''
@@ -262,6 +265,42 @@
               </dl>
             </div>
           {/if}
+
+          <div class="network-details-drawer" style="margin-top: 10px;">
+            <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end;">
+              <div style="min-width:140px; flex:1;">
+                <label for="session-pin-input" style="font-size:11.5px; font-weight:600; display:block; margin-bottom:4px;">Access PIN (Optional)</label>
+                <input
+                  id="session-pin-input"
+                  type="password"
+                  class="text-input compact"
+                  maxlength="32"
+                  bind:value={sessionPinCode}
+                  placeholder="4-32 chars (blank = none)"
+                />
+              </div>
+              <div style="min-width:130px;">
+                <label for="session-dl-limit" style="font-size:11.5px; font-weight:600; display:block; margin-bottom:4px;">Download Limit</label>
+                <select id="session-dl-limit" class="text-input compact" bind:value={sessionMaxDownloads}>
+                  <option value={0}>Unlimited</option>
+                  <option value={1}>1-Time Self-Destruct</option>
+                  <option value={3}>3 Downloads</option>
+                  <option value={5}>5 Downloads</option>
+                  <option value={10}>10 Downloads</option>
+                </select>
+              </div>
+              <div style="min-width:130px;">
+                <label for="session-expiry-select" style="font-size:11.5px; font-weight:600; display:block; margin-bottom:4px;">Session Expiry</label>
+                <select id="session-expiry-select" class="text-input compact" bind:value={sessionDurationMinutes}>
+                  <option value={0}>Default (10m idle)</option>
+                  <option value={5}>5 Minutes</option>
+                  <option value={15}>15 Minutes</option>
+                  <option value={60}>1 Hour</option>
+                  <option value={1440}>24 Hours</option>
+                </select>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div class="hub-action-col">
@@ -376,6 +415,17 @@
               </span>
             {/if}
             <span class="muted" style="font-size: 12px;">Port 43821 · Ephemeral Token</span>
+            {#if sessions[0]?.pinRequired}
+              <span class="hub-status-chip ready" title="Phone/browser must verify the session PIN before accessing files">🔐 PIN Protected</span>
+            {/if}
+            {#if (sessions[0]?.maxDownloads ?? 0) > 0}
+              <span class="hub-network-chip" title="Completed and remaining download allowance for this session">
+                {sessions[0].maxDownloads === 1 ? '1-Time Self-Destruct' : `${sessions[0].remainingDownloads}/${sessions[0].maxDownloads} DL left`}
+              </span>
+            {/if}
+            {#if sessions[0]?.hardExpiresAt && !String(sessions[0].hardExpiresAt).startsWith('0001-')}
+              <span class="hub-network-chip tabular">Expires {fmtTime(sessions[0].hardExpiresAt)}</span>
+            {/if}
             <button
               type="button"
               class="hub-refresh-btn"

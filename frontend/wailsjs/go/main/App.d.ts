@@ -246,6 +246,8 @@ export function StartGuestRoomWithConfig(arg1:main.GuestRoomConfigView):Promise<
 
 export function StartSession(arg1:string):Promise<main.SessionView>;
 
+export function StartSessionWithConfig(arg1:main.SessionConfigView):Promise<main.SessionView>;
+
 export function ToggleQuietMode():Promise<boolean>;
 
 export function ToggleWindow():Promise<void>;

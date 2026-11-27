@@ -466,6 +466,10 @@ export function StartSession(arg1) {
   return window['go']['main']['App']['StartSession'](arg1);
 }
 
+export function StartSessionWithConfig(arg1) {
+  return window['go']['main']['App']['StartSessionWithConfig'](arg1);
+}
+
 export function ToggleQuietMode() {
   return window['go']['main']['App']['ToggleQuietMode']();
 }

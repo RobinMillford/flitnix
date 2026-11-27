@@ -870,6 +870,8 @@ export namespace main {
 	    durationMinutes: number;
 	    mode?: string;
 	    autoApproveGuests?: boolean;
+	    pinCode?: string;
+	    maxDownloads?: number;
 	    sharedPaths?: string[];
 	    title: string;
 	    description?: string;
@@ -888,6 +890,8 @@ export namespace main {
 	        this.durationMinutes = source["durationMinutes"];
 	        this.mode = source["mode"];
 	        this.autoApproveGuests = source["autoApproveGuests"];
+	        this.pinCode = source["pinCode"];
+	        this.maxDownloads = source["maxDownloads"];
 	        this.sharedPaths = source["sharedPaths"];
 	        this.title = source["title"];
 	        this.description = source["description"];
@@ -1062,6 +1066,9 @@ export namespace main {
 	    allowsUpload: boolean;
 	    allowsDownload: boolean;
 	    requireJoinApproval: boolean;
+	    pinRequired: boolean;
+	    maxDownloads: number;
+	    remainingDownloads: number;
 	    downloadCount: number;
 	    activeDownloads: number;
 	    title: string;
@@ -1097,6 +1104,9 @@ export namespace main {
 	        this.allowsUpload = source["allowsUpload"];
 	        this.allowsDownload = source["allowsDownload"];
 	        this.requireJoinApproval = source["requireJoinApproval"];
+	        this.pinRequired = source["pinRequired"];
+	        this.maxDownloads = source["maxDownloads"];
+	        this.remainingDownloads = source["remainingDownloads"];
 	        this.downloadCount = source["downloadCount"];
 	        this.activeDownloads = source["activeDownloads"];
 	        this.title = source["title"];
@@ -1499,13 +1509,39 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class SessionConfigView {
+	    ip: string;
+	    pinCode?: string;
+	    maxDownloads?: number;
+	    durationMinutes?: number;
+	    oneTimeAutoEnd?: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new SessionConfigView(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.ip = source["ip"];
+	        this.pinCode = source["pinCode"];
+	        this.maxDownloads = source["maxDownloads"];
+	        this.durationMinutes = source["durationMinutes"];
+	        this.oneTimeAutoEnd = source["oneTimeAutoEnd"];
+	    }
+	}
 	export class SessionView {
 	    key: string;
 	    // Go type: time
 	    created: any;
 	    // Go type: time
 	    expiresAt: any;
+	    // Go type: time
+	    hardExpiresAt?: any;
 	    pinnedTransfers: number;
+	    pinRequired: boolean;
+	    maxDownloads: number;
+	    completedDownloads: number;
+	    remainingDownloads: number;
 	    token?: string;
 	    interfaceName?: string;
 	    address?: string;
@@ -1519,7 +1555,12 @@ export namespace main {
 	        this.key = source["key"];
 	        this.created = this.convertValues(source["created"], null);
 	        this.expiresAt = this.convertValues(source["expiresAt"], null);
+	        this.hardExpiresAt = this.convertValues(source["hardExpiresAt"], null);
 	        this.pinnedTransfers = source["pinnedTransfers"];
+	        this.pinRequired = source["pinRequired"];
+	        this.maxDownloads = source["maxDownloads"];
+	        this.completedDownloads = source["completedDownloads"];
+	        this.remainingDownloads = source["remainingDownloads"];
 	        this.token = source["token"];
 	        this.interfaceName = source["interfaceName"];
 	        this.address = source["address"];
