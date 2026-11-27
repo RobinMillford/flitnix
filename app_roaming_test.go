@@ -48,7 +48,7 @@ func TestAppWiFiRoamingKeepsSessionAndResumesMultiFileBatch(t *testing.T) {
 	decReq.Host = "127.0.0.1"
 	decReq.Header.Set("Authorization", "Bearer "+tok)
 	decRec := httptest.NewRecorder()
-	a.srv.Handler().ServeHTTP(decRec, decReq)
+	testAppHandler(t, a).ServeHTTP(decRec, decReq)
 	if decRec.Code != http.StatusCreated {
 		t.Fatalf("declare batch = %d %s", decRec.Code, decRec.Body.String())
 	}
@@ -61,7 +61,7 @@ func TestAppWiFiRoamingKeepsSessionAndResumesMultiFileBatch(t *testing.T) {
 	// Upload chunk 0 (4 MiB) before Wi-Fi drops.
 	chunk1 := int64(4 << 20)
 	pReq, _ := http.NewRequest(http.MethodPatch,
-		a.srv.URL()+"/api/batches/"+batch.ID+"/items/"+batch.Items[0].ID+"/content",
+		testAppServerURL(t, a)+"/api/batches/"+batch.ID+"/items/"+batch.Items[0].ID+"/content",
 		bytes.NewReader(payload0[:chunk1]))
 	pReq.Header.Set("Authorization", "Bearer "+tok)
 	pReq.Header.Set("Upload-Offset", "0")
