@@ -5,6 +5,7 @@ import {update} from '../models';
 import {guest} from '../models';
 import {session} from '../models';
 import {version} from '../models';
+import {clipboard} from '../models';
 import {netenv} from '../models';
 import {devices} from '../models';
 import {transfer} from '../models';
@@ -81,6 +82,8 @@ export function ExportLocalCACert():Promise<string>;
 export function GetAppVersion():Promise<version.Info>;
 
 export function GetBatch(arg1:string):Promise<main.BatchView>;
+
+export function GetClipboardSyncStatus():Promise<clipboard.StatusView>;
 
 export function GetGuestRoomState():Promise<main.GuestRoomStateView>;
 
@@ -227,6 +230,10 @@ export function ServerAddress():Promise<string>;
 export function SessionHTTPSQR(arg1:string,arg2:boolean):Promise<string>;
 
 export function SessionQR(arg1:string):Promise<string>;
+
+export function SetClipboardSyncEnabled(arg1:boolean):Promise<clipboard.StatusView>;
+
+export function SetClipboardSyncPaused(arg1:boolean):Promise<clipboard.StatusView>;
 
 export function SetDeviceAutoApprove(arg1:string,arg2:boolean):Promise<void>;
 

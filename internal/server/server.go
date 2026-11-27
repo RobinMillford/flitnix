@@ -65,6 +65,7 @@ import (
 	"time"
 
 	"github.com/itsyamin/flitnix/internal/audit"
+	"github.com/itsyamin/flitnix/internal/clipboard"
 	"github.com/itsyamin/flitnix/internal/devices"
 	"github.com/itsyamin/flitnix/internal/events"
 	"github.com/itsyamin/flitnix/internal/guest"
@@ -161,6 +162,7 @@ type Services struct {
 	Downloads      *transfer.DownloadRegistry
 	GuestManager   *guest.Manager
 	TextMessages   *textmsg.Store
+	Clipboard      *clipboard.Coordinator
 	Audit          *audit.Store
 	Devices        *devices.Store
 	HostIdentity   *devices.HostIdentity

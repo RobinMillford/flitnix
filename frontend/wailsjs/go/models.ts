@@ -187,6 +187,64 @@ export namespace client {
 
 }
 
+export namespace clipboard {
+	
+	export class StatusView {
+	    enabled: boolean;
+	    paused: boolean;
+	    watching: boolean;
+	    supported: boolean;
+	    backendName: string;
+	    concealedFilterSafe: boolean;
+	    unsupportedReason?: string;
+	    // Go type: time
+	    lastSyncAt?: any;
+	    lastOrigin?: string;
+	    lastSizeBytes?: number;
+	    lastSkippedReason?: string;
+	    hasPendingItem: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new StatusView(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.paused = source["paused"];
+	        this.watching = source["watching"];
+	        this.supported = source["supported"];
+	        this.backendName = source["backendName"];
+	        this.concealedFilterSafe = source["concealedFilterSafe"];
+	        this.unsupportedReason = source["unsupportedReason"];
+	        this.lastSyncAt = this.convertValues(source["lastSyncAt"], null);
+	        this.lastOrigin = source["lastOrigin"];
+	        this.lastSizeBytes = source["lastSizeBytes"];
+	        this.lastSkippedReason = source["lastSkippedReason"];
+	        this.hasPendingItem = source["hasPendingItem"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+
+}
+
 export namespace devices {
 	
 	export class Device {
@@ -1615,6 +1673,7 @@ export namespace main {
 	    historyMaxRecords: number;
 	    requireEncryptedTransport: boolean;
 	    localHttpsEnabled: boolean;
+	    autoClipboardSync: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new SettingsView(source);
@@ -1652,6 +1711,7 @@ export namespace main {
 	        this.historyMaxRecords = source["historyMaxRecords"];
 	        this.requireEncryptedTransport = source["requireEncryptedTransport"];
 	        this.localHttpsEnabled = source["localHttpsEnabled"];
+	        this.autoClipboardSync = source["autoClipboardSync"];
 	    }
 	}
 	export class SharedFileView {

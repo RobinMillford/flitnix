@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { main, netenv, transfer, devices, session } from '../../wailsjs/go/models'
+  import type { main, netenv, transfer, devices, session, clipboard } from '../../wailsjs/go/models'
   import { formatBytes, percent, speed, calcEta, fmtTime, openExternalURL } from '../utils'
   import ProgressBar from '../components/ProgressBar.svelte'
 
@@ -58,6 +58,9 @@
   export let handleOpenDownloadFolder: () => void = () => {}
   export let visibilityState: devices.VisibilityState | null = null
   export let shortCode: session.ShortCodeView | null = null
+  export let clipboardStatus: clipboard.StatusView | null = null
+  export let toggleClipboardSyncAction: () => void = () => {}
+  export let toggleClipboardPauseAction: () => void = () => {}
   export let setVisibilityModeAction: (mode: string) => void = () => {}
   export let setQRSharingPausedAction: (paused: boolean) => void = () => {}
   export let revokeAllSessionsAction: () => void = () => {}
@@ -933,11 +936,32 @@
             <span class="eyebrow-neutral">Quick Text & Links</span>
             <h3>Notes & Clipboard</h3>
           </div>
-          {#if textMessages.length > 0}
-            <button type="button" class="button ghost small clear-btn" on:click={clearTextAction}>
-              Clear
-            </button>
-          {/if}
+          <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+            {#if clipboardStatus}
+              <button
+                type="button"
+                class="button {clipboardStatus.enabled && !clipboardStatus.paused ? 'secondary' : 'ghost'} small"
+                on:click={toggleClipboardSyncAction}
+                title="Opt-in automatic UTF-8 clipboard sync with paired trusted devices (64 KiB max, never saved to history)"
+              >
+                {clipboardStatus.enabled ? 'Auto-Clipboard: On' : 'Auto-Clipboard: Off'}
+              </button>
+              {#if clipboardStatus.enabled}
+                <button
+                  type="button"
+                  class="button ghost small"
+                  on:click={toggleClipboardPauseAction}
+                >
+                  {clipboardStatus.paused ? 'Resume' : 'Pause'}
+                </button>
+              {/if}
+            {/if}
+            {#if textMessages.length > 0}
+              <button type="button" class="button ghost small clear-btn" on:click={clearTextAction}>
+                Clear
+              </button>
+            {/if}
+          </div>
         </div>
 
         <div class="quick-text-widget">

@@ -37,6 +37,7 @@ import (
 	"github.com/itsyamin/flitnix/internal/audit"
 	"github.com/itsyamin/flitnix/internal/autostart"
 	"github.com/itsyamin/flitnix/internal/client"
+	"github.com/itsyamin/flitnix/internal/clipboard"
 	"github.com/itsyamin/flitnix/internal/devices"
 	"github.com/itsyamin/flitnix/internal/discovery"
 	"github.com/itsyamin/flitnix/internal/doctor"
@@ -316,6 +317,7 @@ type SettingsView struct {
 	HistoryMaxRecords         int    `json:"historyMaxRecords"`
 	RequireEncryptedTransport bool   `json:"requireEncryptedTransport"`
 	LocalHTTPSEnabled         bool   `json:"localHttpsEnabled"`
+	AutoClipboardSync         bool   `json:"autoClipboardSync"`
 }
 
 // LocalHTTPSStatus describes the opt-in Local CA HTTPS state for browser & PWA sharing.
@@ -356,6 +358,7 @@ type App struct {
 	downloads     *transfer.DownloadRegistry
 	guestMgr      *guest.Manager
 	textStore     *textmsg.Store
+	clipboardMgr  *clipboard.Coordinator
 	auditStore    *audit.Store
 	historyStore  *history.Store
 	templateStore *guest.TemplateStore
@@ -507,6 +510,32 @@ func NewApp() (*App, error) {
 		inhibitor:     power.New(),
 		source:        netenv.DefaultSource(),
 		updater:       update.New(update.Config{RepoOwner: "RobinMillford", RepoName: "flitnix"}),
+	}
+	hostIDForClip := ""
+	if hostIdentity != nil {
+		hostIDForClip = hostIdentity.HostID
+	}
+	hostNameForClip, _ := os.Hostname()
+	if strings.TrimSpace(hostNameForClip) == "" {
+		hostNameForClip = "Desktop"
+	}
+	a.clipboardMgr = clipboard.NewCoordinator(clipboard.Config{
+		HostDeviceID: hostIDForClip,
+		HostName:     hostNameForClip,
+		OnLocalSync: func(item clipboard.SyncItem) {
+			a.publishClipboardItem("", item)
+		},
+		OnRemoteSync: func(item clipboard.SyncItem) {
+			a.publishClipboardItem(item.OriginDeviceID, item)
+		},
+		OnState: func(st clipboard.StatusView) {
+			if a.events != nil {
+				a.events.PublishDesktop(events.TypeClipboardState, st)
+			}
+		},
+	})
+	if settingsStore != nil {
+		a.clipboardMgr.SetEnabled(settingsStore.Get().AutoClipboardSync)
 	}
 	a.downloads.SetEventHook(func(d transfer.Download, isProgress bool) {
 		if a.events == nil {
@@ -1469,6 +1498,9 @@ func (a *App) shutdown(ctx context.Context) {
 		if a.events != nil {
 			a.events.Close()
 		}
+		if a.clipboardMgr != nil {
+			a.clipboardMgr.Close()
+		}
 		if a.notify != nil {
 			a.notify.Close()
 		}
@@ -1567,6 +1599,7 @@ func (a *App) startServerLocked(listen string) error {
 			Downloads:      a.downloads,
 			GuestManager:   a.guestMgr,
 			TextMessages:   a.textStore,
+			Clipboard:      a.clipboardMgr,
 			Audit:          a.auditStore,
 			Devices:        a.devicesStore,
 			HostIdentity:   a.hostIdentity,
@@ -1710,6 +1743,7 @@ func (a *App) StartSessionWithConfig(cfg SessionConfigView) (SessionView, error)
 	if a.events != nil {
 		a.events.PublishDesktop(events.TypeSessionCreated, sessionView(s, ""))
 	}
+	a.refreshClipboardAuthorizedPeers()
 	return out, nil
 }
 
@@ -2210,6 +2244,7 @@ func (a *App) EndSession(key string) error {
 			a.stopServer()
 		}
 	}
+	a.refreshClipboardAuthorizedPeers()
 	return nil
 }
 
@@ -2947,6 +2982,7 @@ func (a *App) GetSettings() SettingsView {
 		HistoryMaxRecords:         s.HistoryMaxRecords,
 		RequireEncryptedTransport: s.RequireEncryptedTransport,
 		LocalHTTPSEnabled:         s.LocalHTTPSEnabled,
+		AutoClipboardSync:         s.AutoClipboardSync,
 	}
 }
 
@@ -3037,10 +3073,15 @@ func (a *App) SaveSettings(view SettingsView) error {
 		HistoryMaxRecords:         view.HistoryMaxRecords,
 		RequireEncryptedTransport: view.RequireEncryptedTransport,
 		LocalHTTPSEnabled:         view.LocalHTTPSEnabled,
+		AutoClipboardSync:         view.AutoClipboardSync,
 	}
 	prevLocalHTTPS := current.LocalHTTPSEnabled
 	if err := a.settingsStore.Save(s); err != nil {
 		return err
+	}
+	if a.clipboardMgr != nil {
+		a.clipboardMgr.SetEnabled(view.AutoClipboardSync)
+		a.refreshClipboardAuthorizedPeers()
 	}
 	if prevLocalHTTPS != view.LocalHTTPSEnabled {
 		if view.LocalHTTPSEnabled && a.localHTTPS != nil && a.hostIdentity != nil {
@@ -4157,6 +4198,7 @@ func (a *App) RemoveTrustedDevice(id string) error {
 			}
 		}
 	}
+	a.refreshClipboardAuthorizedPeers()
 	return nil
 }
 
@@ -4165,6 +4207,85 @@ func (a *App) SetDeviceAutoApprove(id string, autoApprove bool) error {
 		return nil
 	}
 	return a.devicesStore.SetAutoApprove(id, autoApprove)
+}
+
+func (a *App) publishClipboardItem(excludeDeviceID string, item clipboard.SyncItem) {
+	if a.events == nil {
+		return
+	}
+	if a.sessions != nil {
+		for _, s := range a.sessions.ActiveSessions() {
+			devID := s.DeviceID()
+			if devID == "" || devID == excludeDeviceID {
+				continue
+			}
+			if a.devicesStore != nil {
+				if _, ok := a.devicesStore.Get(devID); !ok {
+					continue
+				}
+			}
+			a.events.PublishPersonal(s.Key(), events.TypeClipboardUpdated, item)
+		}
+	}
+	a.events.PublishDesktop(events.TypeClipboardUpdated, item)
+}
+
+func (a *App) refreshClipboardAuthorizedPeers() {
+	if a.clipboardMgr == nil {
+		return
+	}
+	hasTrusted := false
+	if a.sessions != nil {
+		for _, s := range a.sessions.ActiveSessions() {
+			devID := s.DeviceID()
+			if devID == "" {
+				continue
+			}
+			if a.devicesStore == nil {
+				hasTrusted = true
+				break
+			}
+			if _, ok := a.devicesStore.Get(devID); ok {
+				hasTrusted = true
+				break
+			}
+		}
+	}
+	a.clipboardMgr.SetActiveAuthorizedPeers(hasTrusted)
+}
+
+// GetClipboardSyncStatus returns current opt-in automatic clipboard sync status.
+func (a *App) GetClipboardSyncStatus() clipboard.StatusView {
+	if a.clipboardMgr == nil {
+		return clipboard.StatusView{}
+	}
+	return a.clipboardMgr.Status()
+}
+
+// SetClipboardSyncEnabled turns opt-in automatic clipboard sync on or off and persists the setting.
+func (a *App) SetClipboardSyncEnabled(enabled bool) (clipboard.StatusView, error) {
+	if a.settingsStore != nil {
+		cur := a.settingsStore.Get()
+		cur.AutoClipboardSync = enabled
+		if err := a.settingsStore.Save(cur); err != nil {
+			return clipboard.StatusView{}, err
+		}
+	}
+	if a.clipboardMgr != nil {
+		a.clipboardMgr.SetEnabled(enabled)
+		a.refreshClipboardAuthorizedPeers()
+		return a.clipboardMgr.Status(), nil
+	}
+	return clipboard.StatusView{}, nil
+}
+
+// SetClipboardSyncPaused pauses or resumes clipboard sync without changing persistent settings.
+func (a *App) SetClipboardSyncPaused(paused bool) clipboard.StatusView {
+	if a.clipboardMgr == nil {
+		return clipboard.StatusView{}
+	}
+	a.clipboardMgr.SetPaused(paused)
+	return a.clipboardMgr.Status()
 }
 
 func (a *App) SetDevicePolicy(id string, policy devices.DevicePolicy) error {

@@ -21,6 +21,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/itsyamin/flitnix/internal/clipboard"
 	"github.com/itsyamin/flitnix/internal/devices"
 	"github.com/itsyamin/flitnix/internal/events"
 	"github.com/itsyamin/flitnix/internal/session"
@@ -381,6 +382,8 @@ func newAPIMux(services *Services, stall time.Duration, grants *DownloadGrantSto
 	mux.Handle("GET /api/download-progress/{id}", gate(serveDownloadProgress(services, grants)))
 	mux.Handle("POST /api/text", gate(handleTextMessageSend(services)))
 	mux.Handle("GET /api/text", gate(handleTextMessageList(services)))
+	mux.Handle("GET /api/clipboard", gate(handleClipboardGet(services)))
+	mux.Handle("POST /api/clipboard", gate(handleClipboardPush(services)))
 	mux.HandleFunc("GET /api/diagnostics/ping", handleDiagnosticsPing(services))
 	mux.HandleFunc("POST /api/diagnostics/ping", handleDiagnosticsPing(services))
 
@@ -2203,6 +2206,159 @@ func handleTextMessageList(svcs *Services) http.HandlerFunc {
 	}
 }
 
+func publishClipboardItemToTrusted(svcs *Services, excludeDeviceID string, item clipboard.SyncItem) {
+	if svcs == nil || svcs.Events == nil {
+		return
+	}
+	if svcs.Sessions != nil {
+		for _, s := range svcs.Sessions.ActiveSessions() {
+			devID := s.DeviceID()
+			if devID == "" || devID == excludeDeviceID {
+				continue
+			}
+			if svcs.Devices != nil {
+				if _, ok := svcs.Devices.Get(devID); !ok {
+					continue
+				}
+			}
+			svcs.Events.PublishPersonal(s.Key(), events.TypeClipboardUpdated, item)
+		}
+	}
+	svcs.Events.PublishDesktop(events.TypeClipboardUpdated, item)
+}
+
+func refreshClipboardAuthorizedPeers(svcs *Services) {
+	if svcs == nil || svcs.Clipboard == nil {
+		return
+	}
+	hasTrusted := false
+	if svcs.Sessions != nil {
+		for _, s := range svcs.Sessions.ActiveSessions() {
+			devID := s.DeviceID()
+			if devID == "" {
+				continue
+			}
+			if svcs.Devices == nil {
+				hasTrusted = true
+				break
+			}
+			if _, ok := svcs.Devices.Get(devID); ok {
+				hasTrusted = true
+				break
+			}
+		}
+	}
+	svcs.Clipboard.SetActiveAuthorizedPeers(hasTrusted)
+}
+
+func requireTrustedClipboardDevice(w http.ResponseWriter, r *http.Request, svcs *Services) (devices.Device, bool) {
+	sess := sessionFrom(r)
+	if sess == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return devices.Device{}, false
+	}
+	devID := sess.DeviceID()
+	if devID == "" || svcs == nil || svcs.Devices == nil {
+		writeErrorCode(w, http.StatusForbidden, "Automatic clipboard sync is restricted to paired trusted devices", "trusted_device_required")
+		return devices.Device{}, false
+	}
+	dev, ok := svcs.Devices.Get(devID)
+	if !ok {
+		writeErrorCode(w, http.StatusUnauthorized, "This device is no longer trusted", "device_revoked")
+		return devices.Device{}, false
+	}
+	return dev, true
+}
+
+func handleClipboardGet(svcs *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := requireTrustedClipboardDevice(w, r, svcs); !ok {
+			return
+		}
+		if svcs.Clipboard == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"enabled": false, "supported": false})
+			return
+		}
+		st := svcs.Clipboard.Status()
+		resp := map[string]any{
+			"enabled":             st.Enabled,
+			"paused":              st.Paused,
+			"watching":            st.Watching,
+			"supported":           st.Supported,
+			"backendName":         st.BackendName,
+			"concealedFilterSafe": st.ConcealedFilterSafe,
+			"unsupportedReason":   st.UnsupportedReason,
+			"lastSyncAt":          st.LastSyncAt,
+			"lastOrigin":          st.LastOrigin,
+			"lastSizeBytes":       st.LastSizeBytes,
+			"lastSkippedReason":   st.LastSkippedReason,
+		}
+		if item, hasItem := svcs.Clipboard.Latest(); hasItem {
+			resp["latest"] = item
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+func handleClipboardPush(svcs *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		dev, ok := requireTrustedClipboardDevice(w, r, svcs)
+		if !ok {
+			return
+		}
+		if svcs.Clipboard == nil || !svcs.Clipboard.Enabled() {
+			writeErrorCode(w, http.StatusForbidden, "Automatic clipboard sync is disabled on this desktop", "clipboard_sync_disabled")
+			return
+		}
+		if svcs.Clipboard.Paused() {
+			writeErrorCode(w, http.StatusConflict, "Automatic clipboard sync is currently paused on this desktop", "clipboard_sync_paused")
+			return
+		}
+		raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, clipboard.MaxContentBytes+2048))
+		if err != nil {
+			writeError(w, http.StatusRequestEntityTooLarge, "clipboard payload exceeds 64 KiB limit")
+			return
+		}
+		if !utf8.Valid(raw) {
+			writeError(w, http.StatusBadRequest, "clipboard content must be valid UTF-8 text")
+			return
+		}
+		var req struct {
+			Content string `json:"content"`
+		}
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid clipboard JSON payload")
+			return
+		}
+		item, applied, err := svcs.Clipboard.ReceiveRemote(r.Context(), dev.ID, dev.Name, req.Content)
+		if err != nil {
+			switch {
+			case errors.Is(err, clipboard.ErrPayloadTooLarge):
+				writeErrorCode(w, http.StatusRequestEntityTooLarge, "clipboard content exceeds 64 KiB limit", "clipboard_too_large")
+			case errors.Is(err, clipboard.ErrInvalidUTF8), errors.Is(err, clipboard.ErrEmptyContent):
+				writeError(w, http.StatusBadRequest, err.Error())
+			case errors.Is(err, clipboard.ErrDisabled):
+				writeErrorCode(w, http.StatusForbidden, "Automatic clipboard sync is disabled", "clipboard_sync_disabled")
+			case errors.Is(err, clipboard.ErrPaused):
+				writeErrorCode(w, http.StatusConflict, "Automatic clipboard sync is paused", "clipboard_sync_paused")
+			default:
+				writeError(w, http.StatusInternalServerError, "clipboard sync failed")
+			}
+			return
+		}
+		if applied {
+			publishClipboardItemToTrusted(svcs, dev.ID, item)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"applied": applied,
+			"item":    item,
+		})
+	}
+}
+
 // ---- Trusted Devices Pairing & Management Handlers ----
 
 func handlePairChallenge(svcs *Services) http.HandlerFunc {
@@ -2492,6 +2648,7 @@ func handleDeviceRemove(svcs *Services) http.HandlerFunc {
 				}
 			}
 		}
+		refreshClipboardAuthorizedPeers(svcs)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
 	}
 }
