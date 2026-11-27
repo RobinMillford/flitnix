@@ -21,6 +21,7 @@ import (
 
 	"github.com/itsyamin/flitnix/internal/client"
 	"github.com/itsyamin/flitnix/internal/devices"
+	"github.com/itsyamin/flitnix/internal/events"
 	"github.com/itsyamin/flitnix/internal/netenv"
 	"github.com/itsyamin/flitnix/internal/server"
 	"github.com/itsyamin/flitnix/internal/session"
@@ -223,6 +224,15 @@ func (m *peerTransferManager) emitJob(j PeerTransferJob) {
 	m.app.startupMu.Unlock()
 	if ctx != nil && ctx.Value("frontend") != nil {
 		runtime.EventsEmit(ctx, "peer-transfer:updated", j)
+	}
+	if m.app.events != nil {
+		if j.State == "sending" || j.State == "receiving" {
+			if m.app.events.AllowProgress("peer:"+j.ID, events.DefaultProgressInterval) {
+				m.app.events.PublishDesktop(events.TypePeerTransfer, j)
+			}
+		} else {
+			m.app.events.PublishDesktop(events.TypePeerTransfer, j)
+		}
 	}
 }
 

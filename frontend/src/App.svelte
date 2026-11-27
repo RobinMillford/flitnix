@@ -5,6 +5,7 @@
   import { OnFileDrop, OnFileDropOff, EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
   import logoUrl from './assets/images/logo-universal.png'
   import { createRefreshScheduler } from './refreshScheduler'
+  import { createDesktopEventCoalescer, type DesktopRealtimeEvent } from './realtimeEvents'
   import ConnectionDoctorModal from './components/ConnectionDoctorModal.svelte'
   import UpdateModal from './components/UpdateModal.svelte'
   import Toast from './components/Toast.svelte'
@@ -1297,12 +1298,43 @@
         updateCheckResult = res
       }
     }).catch(() => {})
-    const id = setInterval(refresh, 800)
+    const eventCoalescer = createDesktopEventCoalescer({
+      progressIntervalMs: 200,
+      onRefresh: () => {
+        if (!disposed) refresh()
+      }
+    })
+    EventsOn('flitnix:event', (ev: DesktopRealtimeEvent) => {
+      if (!disposed) eventCoalescer.handleEvent(ev)
+    })
+    const onVisibilityChange = () => {
+      if (!disposed && typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        refresh()
+      }
+    }
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', onVisibilityChange)
+    }
+    const reconcileId = setInterval(() => {
+      if (disposed) return
+      const hasActiveWork =
+        sessions.length > 0 ||
+        Boolean(guestRoomState?.room) ||
+        peerTransfers.some((j) => j.state === 'sending' || j.state === 'receiving')
+      if (hasActiveWork) {
+        refresh()
+      }
+    }, 15000)
     OnFileDrop(handleDrop, true)
     return () => {
       disposed = true
-      clearInterval(id)
+      clearInterval(reconcileId)
+      eventCoalescer.dispose()
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', onVisibilityChange)
+      }
       OnFileDropOff()
+      EventsOff('flitnix:event')
       EventsOff('network:changed')
       EventsOff('visibility:changed')
       EventsOff('discovery:peers')

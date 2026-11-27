@@ -36,6 +36,7 @@ import (
 	"github.com/itsyamin/flitnix/internal/devices"
 	"github.com/itsyamin/flitnix/internal/discovery"
 	"github.com/itsyamin/flitnix/internal/doctor"
+	"github.com/itsyamin/flitnix/internal/events"
 	"github.com/itsyamin/flitnix/internal/guest"
 	"github.com/itsyamin/flitnix/internal/netenv"
 	"github.com/itsyamin/flitnix/internal/power"
@@ -289,6 +290,7 @@ type App struct {
 	visibility    *devices.VisibilityManager
 	discovery     *discovery.Service
 	peerMgr       *peerTransferManager
+	events        *events.Hub
 	inhibitor     power.Inhibitor
 	updater       *update.Service
 	startupMu     sync.Mutex
@@ -418,9 +420,30 @@ func NewApp() (*App, error) {
 		hostIdentity:  hostIdentity,
 		pairing:       pairingCoord,
 		visibility:    visMgr,
+		events:        events.NewHub(),
 		inhibitor:     power.New(),
 		source:        netenv.DefaultSource(),
 		updater:       update.New(update.Config{RepoOwner: "RobinMillford", RepoName: "flitnix"}),
+	}
+	a.downloads.SetEventHook(func(d transfer.Download, isProgress bool) {
+		if a.events == nil {
+			return
+		}
+		dv := downloadView(d)
+		if isProgress {
+			if a.events.AllowProgress("dl:"+d.ID, events.DefaultProgressInterval) {
+				a.events.PublishPersonal(d.Session, events.TypeDownloadProgress, dv)
+			}
+			return
+		}
+		a.events.PublishPersonal(d.Session, events.TypeDownloadUpdated, dv)
+	})
+	if a.pairing != nil {
+		a.pairing.OnPromptChanged = func(st devices.PairingStatusView) {
+			if a.events != nil {
+				a.events.PublishDesktop(events.TypePairingPrompt, st)
+			}
+		}
 	}
 	if settingsStore != nil {
 		// If a stale temporary_everyone expired while the app was closed,
@@ -531,6 +554,9 @@ func (a *App) releaseSession(key string) {
 		}
 	}
 	a.textStore.Clear(key)
+	if a.events != nil {
+		a.events.CloseSession(key, "session_expired")
+	}
 }
 
 // startup records the Wails runtime context so bound methods can call the
@@ -551,6 +577,13 @@ func (a *App) startup(ctx context.Context) {
 	}
 	if a.discovery != nil {
 		a.discovery.Start(bgCtx)
+	}
+	if a.events != nil {
+		a.bgWg.Add(1)
+		go func() {
+			defer a.bgWg.Done()
+			a.runEventsBridge(bgCtx)
+		}()
 	}
 
 	if a.visibility != nil {
@@ -710,6 +743,58 @@ func shortKey(key string) string {
 // tokens, pairing URLs, cookies or paths.
 func (a *App) logSessionEnd(ev session.EndEvent) {
 	fmt.Fprintf(os.Stderr, "flitnix: session %s ended: %s\n", shortKey(ev.Key), ev.Reason)
+	if a.events != nil {
+		reason := "session_revoked"
+		if ev.Reason == session.EndIdleExpiry {
+			reason = "session_expired"
+		}
+		a.events.CloseSession(ev.Key, reason)
+		a.events.PublishDesktop(events.TypeSessionEnded, map[string]string{
+			"key":    shortKey(ev.Key),
+			"reason": string(ev.Reason),
+		})
+	}
+}
+
+func (a *App) runEventsBridge(ctx context.Context) {
+	if a.events == nil {
+		return
+	}
+	sub, err := a.events.SubscribeDesktop()
+	if err != nil {
+		return
+	}
+	defer sub.Close()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-sub.Done():
+			return
+		case <-sub.Resync():
+			a.emitFrontendEvent("flitnix:event", map[string]any{
+				"type": "resync",
+			})
+		case ev := <-sub.C():
+			a.emitFrontendEvent("flitnix:event", map[string]any{
+				"id":      ev.ID,
+				"type":    ev.Type,
+				"ts":      ev.Timestamp,
+				"scope":   ev.Scope,
+				"payload": ev.RawPayload,
+			})
+		}
+	}
+}
+
+func (a *App) emitFrontendEvent(name string, data any) {
+	a.startupMu.Lock()
+	ctx := a.ctx
+	a.startupMu.Unlock()
+	if ctx != nil && ctx.Value("frontend") != nil {
+		runtime.EventsEmit(ctx, name, data)
+	}
 }
 
 // logTransferDiagnostics is the server's Diagnose sink: the low-volume
@@ -751,6 +836,9 @@ func (a *App) shutdown(ctx context.Context) {
 		a.sessions.Shutdown()
 		a.registry.Clear()
 		a.guestMgr.Close()
+		if a.events != nil {
+			a.events.Close()
+		}
 		if a.auditStore != nil {
 			a.auditStore.Close()
 		}
@@ -841,6 +929,7 @@ func (a *App) startServerLocked(listen string) error {
 			Pairing:        a.pairing,
 			Visibility:     a.visibility,
 			Inhibitor:      a.inhibitor,
+			Events:         a.events,
 			OnPhoneContact: a.recordPhoneContact,
 			Diagnose:       a.logTransferDiagnostics,
 		},
@@ -957,6 +1046,9 @@ func (a *App) StartSession(ip string) (SessionView, error) {
 	out := sessionView(s, s.Token())
 	out.InterfaceName = view.Name
 	out.Address = view.IP
+	if a.events != nil {
+		a.events.PublishDesktop(events.TypeSessionCreated, sessionView(s, ""))
+	}
 	return out, nil
 }
 
@@ -1370,7 +1462,11 @@ func (a *App) ApproveUpload(id string) (UploadView, error) {
 	if err != nil {
 		return UploadView{}, err
 	}
-	return a.uploadViewWithStorage(up), nil
+	view := a.uploadViewWithStorage(up)
+	if a.events != nil {
+		a.events.PublishPersonal(up.Session, events.TypeUploadUpdated, view)
+	}
+	return view, nil
 }
 
 // RejectUpload refuses the pending upload with the given ID.
@@ -1382,7 +1478,11 @@ func (a *App) RejectUpload(id string) (UploadView, error) {
 	if err != nil {
 		return UploadView{}, err
 	}
-	return uploadView(up), nil
+	view := uploadView(up)
+	if a.events != nil {
+		a.events.PublishPersonal(up.Session, events.TypeUploadUpdated, view)
+	}
+	return view, nil
 }
 
 // CancelUpload aborts a pending, approved or streaming upload. A streaming
@@ -1391,7 +1491,13 @@ func (a *App) CancelUpload(id string) error {
 	if err := a.requireStandalone(id); err != nil {
 		return err
 	}
-	return a.transfers.Cancel(id)
+	err := a.transfers.Cancel(id)
+	if err == nil && a.events != nil {
+		if up, ok := a.transfers.Get(id); ok {
+			a.events.PublishPersonal(up.Session, events.TypeUploadUpdated, uploadView(up))
+		}
+	}
+	return err
 }
 
 // errBatchLinked refuses an individual decision on a batch item.
@@ -1562,7 +1668,11 @@ func (a *App) ApproveBatch(id string) (BatchView, error) {
 		return BatchView{}, err
 	}
 	v, err = a.coordinator.GetBatch(key, id)
-	return batchView(v), err
+	bv := batchView(v)
+	if err == nil && a.events != nil {
+		a.events.PublishPersonal(key, events.TypeBatchUpdated, bv)
+	}
+	return bv, err
 }
 
 // RejectBatch declines a batch. Rejecting an already rejected batch returns
@@ -1595,7 +1705,11 @@ func (a *App) RejectBatch(id string) (BatchView, error) {
 	// The root was reserved before the desktop decided; a rejected batch
 	// never publishes into it, so it must not stay on disk.
 	a.discardEmptyRoot(v)
-	return batchView(v), nil
+	bv := batchView(v)
+	if a.events != nil {
+		a.events.PublishPersonal(key, events.TypeBatchUpdated, bv)
+	}
+	return bv, nil
 }
 
 // CancelBatch cancels every unfinished item of a batch in both subsystems.
@@ -1633,6 +1747,9 @@ func (a *App) CancelBatch(id string) error {
 	// now empty and can be removed; one that published a file is non-empty
 	// and os.Remove refuses it.
 	a.discardEmptyRoot(v)
+	if a.events != nil {
+		a.events.PublishPersonal(key, events.TypeBatchUpdated, batchView(v))
+	}
 	return nil
 }
 
@@ -1652,7 +1769,11 @@ func (a *App) PauseBatch(id string) (BatchView, error) {
 	for _, cid := range contentIDs {
 		_ = a.transfers.Pause(cid)
 	}
-	return batchView(v), nil
+	bv := batchView(v)
+	if a.events != nil {
+		a.events.PublishPersonal(key, events.TypeBatchUpdated, bv)
+	}
+	return bv, nil
 }
 
 // ResumeBatch re-enables a paused or interrupted batch so clients can continue
@@ -1671,7 +1792,11 @@ func (a *App) ResumeBatch(id string) (BatchView, error) {
 	for _, cid := range contentIDs {
 		_ = a.transfers.Resume(cid)
 	}
-	return batchView(v), nil
+	bv := batchView(v)
+	if a.events != nil {
+		a.events.PublishPersonal(key, events.TypeBatchUpdated, bv)
+	}
+	return bv, nil
 }
 
 // DiscardBatch explicitly discards unfinished partial uploads in a batch,
@@ -1691,6 +1816,9 @@ func (a *App) DiscardBatch(id string) error {
 		_ = a.transfers.Discard(cid)
 	}
 	a.discardEmptyRoot(v)
+	if a.events != nil {
+		a.events.PublishPersonal(key, events.TypeBatchUpdated, batchView(v))
+	}
 	return nil
 }
 
@@ -1699,7 +1827,13 @@ func (a *App) DiscardUpload(id string) error {
 	if err := a.requireStandalone(id); err != nil {
 		return err
 	}
-	return a.transfers.Discard(id)
+	err := a.transfers.Discard(id)
+	if err == nil && a.events != nil {
+		if up, ok := a.transfers.Get(id); ok {
+			a.events.PublishPersonal(up.Session, events.TypeUploadUpdated, uploadView(up))
+		}
+	}
+	return err
 }
 
 // listBatches merges the coordinator's batch records over every session
@@ -1795,6 +1929,9 @@ func (a *App) PickFilesForSharing() ([]SharedFileView, error) {
 			Created: source.Created,
 		})
 	}
+	if len(views) > 0 && a.events != nil {
+		a.events.PublishPersonal("", events.TypeFilesUpdated, map[string]any{"count": len(views)})
+	}
 	return views, nil
 }
 
@@ -1812,7 +1949,11 @@ func (a *App) PickFolderForSharing() (SharedSourceView, error) {
 	if err != nil {
 		return SharedSourceView{}, err
 	}
-	return sharedSourceView(source), nil
+	sv := sharedSourceView(source)
+	if a.events != nil {
+		a.events.PublishPersonal("", events.TypeFilesUpdated, map[string]any{"sourceId": sv.ID})
+	}
+	return sv, nil
 }
 
 // AddDroppedSources registers native paths delivered by Wails file-drop
@@ -1838,6 +1979,9 @@ func (a *App) AddDroppedSources(paths []string) ([]SharedSourceView, error) {
 			continue
 		}
 		views = append(views, sharedSourceView(source))
+	}
+	if len(views) > 0 && a.events != nil {
+		a.events.PublishPersonal("", events.TypeFilesUpdated, map[string]any{"count": len(views)})
 	}
 	if len(failures) > 0 {
 		return views, fmt.Errorf("could not add dropped source(s): %s", strings.Join(failures, "; "))
@@ -1873,6 +2017,9 @@ func (a *App) RevokeSharedFile(id string) error {
 	if !a.registry.Remove(id) {
 		return errors.New("flitnix: that file is no longer shared")
 	}
+	if a.events != nil {
+		a.events.PublishPersonal("", events.TypeFilesUpdated, map[string]any{"removed": id})
+	}
 	return nil
 }
 
@@ -1880,6 +2027,9 @@ func (a *App) RevokeSharedFile(id string) error {
 func (a *App) RevokeSharedSource(id string) error {
 	if !a.registry.RemoveSource(id) {
 		return errors.New("flitnix: that source is no longer selected")
+	}
+	if a.events != nil {
+		a.events.PublishPersonal("", events.TypeFilesUpdated, map[string]any{"removed": id})
 	}
 	return nil
 }
@@ -2447,13 +2597,21 @@ func (a *App) ApproveGuest(guestID string) error {
 		return errors.New("flitnix: no active guest room")
 	}
 	err := room.ApproveGuest(guestID)
-	if err == nil && a.auditStore != nil {
-		a.auditStore.Record(audit.Entry{
-			EventType: audit.EventGuestApproved,
-			RoomID:    room.ID,
-			GuestID:   guestID,
-			Outcome:   audit.OutcomeSuccess,
-		})
+	if err == nil {
+		if a.auditStore != nil {
+			a.auditStore.Record(audit.Entry{
+				EventType: audit.EventGuestApproved,
+				RoomID:    room.ID,
+				GuestID:   guestID,
+				Outcome:   audit.OutcomeSuccess,
+			})
+		}
+		if a.events != nil {
+			a.events.PublishGuest(room.ID, guestID, events.TypeGuestStatus, map[string]any{
+				"guestId": guestID,
+				"state":   string(guest.GuestApproved),
+			})
+		}
 	}
 	return err
 }
@@ -2464,13 +2622,22 @@ func (a *App) RejectGuest(guestID string) error {
 		return errors.New("flitnix: no active guest room")
 	}
 	err := room.RejectGuest(guestID)
-	if err == nil && a.auditStore != nil {
-		a.auditStore.Record(audit.Entry{
-			EventType: audit.EventGuestRejected,
-			RoomID:    room.ID,
-			GuestID:   guestID,
-			Outcome:   audit.OutcomeRejected,
-		})
+	if err == nil {
+		if a.auditStore != nil {
+			a.auditStore.Record(audit.Entry{
+				EventType: audit.EventGuestRejected,
+				RoomID:    room.ID,
+				GuestID:   guestID,
+				Outcome:   audit.OutcomeRejected,
+			})
+		}
+		if a.events != nil {
+			a.events.PublishGuest(room.ID, guestID, events.TypeGuestStatus, map[string]any{
+				"guestId": guestID,
+				"state":   string(guest.GuestRejected),
+			})
+			a.events.CloseGuest(room.ID, guestID, "guest_rejected")
+		}
 	}
 	return err
 }
@@ -2481,13 +2648,22 @@ func (a *App) RevokeGuest(guestID string) error {
 		return errors.New("flitnix: no active guest room")
 	}
 	err := room.RevokeGuest(guestID)
-	if err == nil && a.auditStore != nil {
-		a.auditStore.Record(audit.Entry{
-			EventType: audit.EventGuestRevoked,
-			RoomID:    room.ID,
-			GuestID:   guestID,
-			Outcome:   audit.OutcomeCanceled,
-		})
+	if err == nil {
+		if a.auditStore != nil {
+			a.auditStore.Record(audit.Entry{
+				EventType: audit.EventGuestRevoked,
+				RoomID:    room.ID,
+				GuestID:   guestID,
+				Outcome:   audit.OutcomeCanceled,
+			})
+		}
+		if a.events != nil {
+			a.events.PublishGuest(room.ID, guestID, events.TypeGuestStatus, map[string]any{
+				"guestId": guestID,
+				"state":   string(guest.GuestRevoked),
+			})
+			a.events.CloseGuest(room.ID, guestID, "guest_revoked")
+		}
 	}
 	return err
 }
@@ -2498,13 +2674,25 @@ func (a *App) ApproveGuestUpload(uploadID string) error {
 		return errors.New("flitnix: no active guest room")
 	}
 	err := room.ApproveUpload(uploadID)
-	if err == nil && a.auditStore != nil {
-		a.auditStore.Record(audit.Entry{
-			EventType: audit.EventUploadApproved,
-			RoomID:    room.ID,
-			Details:   fmt.Sprintf("upload_id: %s", uploadID),
-			Outcome:   audit.OutcomeSuccess,
-		})
+	if err == nil {
+		if a.auditStore != nil {
+			a.auditStore.Record(audit.Entry{
+				EventType: audit.EventUploadApproved,
+				RoomID:    room.ID,
+				Details:   fmt.Sprintf("upload_id: %s", uploadID),
+				Outcome:   audit.OutcomeSuccess,
+			})
+		}
+		if a.events != nil {
+			if up, uErr := room.GetUpload(uploadID); uErr == nil {
+				a.events.PublishGuest(room.ID, up.GuestID, events.TypeGuestUploadUpdated, map[string]any{
+					"id":    up.ID,
+					"name":  up.FileName,
+					"size":  up.Size,
+					"state": string(up.State),
+				})
+			}
+		}
 	}
 	return err
 }
@@ -2515,13 +2703,25 @@ func (a *App) RejectGuestUpload(uploadID string) error {
 		return errors.New("flitnix: no active guest room")
 	}
 	err := room.RejectUpload(uploadID)
-	if err == nil && a.auditStore != nil {
-		a.auditStore.Record(audit.Entry{
-			EventType: audit.EventUploadRejected,
-			RoomID:    room.ID,
-			Details:   fmt.Sprintf("upload_id: %s", uploadID),
-			Outcome:   audit.OutcomeRejected,
-		})
+	if err == nil {
+		if a.auditStore != nil {
+			a.auditStore.Record(audit.Entry{
+				EventType: audit.EventUploadRejected,
+				RoomID:    room.ID,
+				Details:   fmt.Sprintf("upload_id: %s", uploadID),
+				Outcome:   audit.OutcomeRejected,
+			})
+		}
+		if a.events != nil {
+			if up, uErr := room.GetUpload(uploadID); uErr == nil {
+				a.events.PublishGuest(room.ID, up.GuestID, events.TypeGuestUploadUpdated, map[string]any{
+					"id":    up.ID,
+					"name":  up.FileName,
+					"size":  up.Size,
+					"state": string(up.State),
+				})
+			}
+		}
 	}
 	return err
 }
@@ -2546,6 +2746,13 @@ func (a *App) EndGuestRoom() error {
 		roomID = room.ID
 	}
 	err := a.guestMgr.EndRoom()
+	if err == nil && a.events != nil && roomID != "" {
+		a.events.PublishGuest(roomID, "", events.TypeGuestStatus, map[string]any{
+			"state": "ended",
+			"error": "room_ended",
+		})
+		a.events.CloseRoom(roomID, "room_ended")
+	}
 	if a.sessions.Len() == 0 {
 		a.stopServer()
 	}
@@ -2854,6 +3061,9 @@ func (a *App) SendTextMessage(sessionKey, content string) (TextMessageView, erro
 	if err != nil {
 		return TextMessageView{}, err
 	}
+	if a.events != nil {
+		a.events.PublishPersonal(sessionKey, events.TypeTextMessage, msg)
+	}
 	return TextMessageView{
 		ID:        msg.ID,
 		Sender:    msg.Sender,
@@ -2908,6 +3118,9 @@ func (a *App) ClearTextMessages(sessionKey string) error {
 	}
 	if sessionKey != "" {
 		a.textStore.Clear(sessionKey)
+		if a.events != nil {
+			a.events.PublishPersonal(sessionKey, events.TypeTextCleared, map[string]any{})
+		}
 	}
 	return nil
 }
