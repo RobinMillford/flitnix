@@ -22,6 +22,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/itsyamin/flitnix/internal/devices"
+	"github.com/itsyamin/flitnix/internal/events"
 	"github.com/itsyamin/flitnix/internal/session"
 	"github.com/itsyamin/flitnix/internal/textmsg"
 	"github.com/itsyamin/flitnix/internal/transfer"
@@ -56,6 +57,10 @@ import (
 // Everything below /api/ that is unknown yields 404 within the API router.
 // With a nil Services every /api/ path answers 404 (page-only server).
 func newRouter(services *Services, stall, downloadStall time.Duration, grants *DownloadGrantStore) http.Handler {
+	return newRouterWithShutdown(services, stall, downloadStall, grants, nil)
+}
+
+func newRouterWithShutdown(services *Services, stall, downloadStall time.Duration, grants *DownloadGrantStore, shutdownCh <-chan struct{}) http.Handler {
 	index, err := pageAssets.ReadFile("assets/index.html")
 	if err != nil {
 		panic("server: embedded assets missing: " + err.Error())
@@ -97,7 +102,7 @@ func newRouter(services *Services, stall, downloadStall time.Duration, grants *D
 		mux.HandleFunc("POST /api/device-sessions/verify", handleDeviceSessionVerify(services, devLimiter))
 		mux.HandleFunc("POST /api/peer/challenge", handlePeerChallenge(services, devLimiter, peerStore))
 		mux.HandleFunc("POST /api/peer/connect", handlePeerConnect(services, devLimiter, peerStore))
-		api := newAPIMux(services, stall, grants)
+		api := newAPIMux(services, stall, grants, shutdownCh)
 		mux.Handle("/api/", requireSession(services, api.ServeHTTP))
 		downloadHandler := serveArchiveDownload(services, grants, downloadStall)
 		mux.HandleFunc("GET /api/downloads/{id}", downloadHandler)
@@ -108,7 +113,7 @@ func newRouter(services *Services, stall, downloadStall time.Duration, grants *D
 		mux.HandleFunc("HEAD /api/archive-downloads/{id}", downloadHandler)
 
 		if services.GuestManager != nil {
-			guestAPI := newGuestAPIMux(services, stall)
+			guestAPI := newGuestAPIMux(services, stall, shutdownCh)
 			mux.Handle("/guest-api/", guestAPI)
 		} else {
 			mux.HandleFunc("/guest-api/", serveNotFound)
@@ -316,8 +321,9 @@ func securityMiddleware(next http.Handler) http.Handler {
 // newAPIMux registers the transfer endpoints. Authentication is applied at
 // the /api/ boundary by newRouter, so nothing reaches these handlers
 // without an authenticated session in the request context.
-func newAPIMux(services *Services, stall time.Duration, grants *DownloadGrantStore) http.Handler {
+func newAPIMux(services *Services, stall time.Duration, grants *DownloadGrantStore, shutdownCh <-chan struct{}) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/events", handlePersonalEvents(services, shutdownCh))
 	mux.HandleFunc("POST /api/uploads", handleUploadDeclare(services, stall))
 	mux.HandleFunc("GET /api/uploads/{id}", handleUploadStatus(services))
 	mux.HandleFunc("HEAD /api/uploads/{id}/content", handleUploadHead(services))
@@ -767,6 +773,12 @@ func handleUploadDeclare(svcs *Services, _ time.Duration) http.HandlerFunc {
 			return
 		}
 
+		evType := events.TypeUploadPending
+		if autoApproveUpload {
+			evType = events.TypeUploadUpdated
+		}
+		svcs.EmitPersonal(sess.Key(), evType, toUploadJSON(up))
+
 		writeJSON(w, http.StatusCreated, toUploadJSON(up))
 	}
 }
@@ -898,7 +910,9 @@ func handleUploadContent(svcs *Services, stall time.Duration) http.HandlerFunc {
 			rc:         http.NewResponseController(w),
 			stall:      stall,
 		}
-		res, err := svcs.Transfers.SubmitContentWithPublish(id, sess.Key(), body, nil, func() error {
+		res, err := svcs.Transfers.SubmitContentWithPublish(id, sess.Key(), body, func(up transfer.Upload) {
+			svcs.EmitPersonalProgress(sess.Key(), "up:"+id, events.TypeUploadProgress, toUploadJSON(up))
+		}, func() error {
 			if devID != "" && svcs.Devices != nil {
 				if _, exists := svcs.Devices.Get(devID); !exists {
 					return errors.New("device revoked mid-transfer")
@@ -906,6 +920,9 @@ func handleUploadContent(svcs *Services, stall time.Duration) http.HandlerFunc {
 			}
 			return nil
 		})
+		if upAfter, ok := svcs.Transfers.Get(id); ok {
+			svcs.EmitPersonal(sess.Key(), events.TypeUploadUpdated, toUploadJSON(upAfter))
+		}
 		if err != nil {
 			writeUploadStreamError(w, err)
 			return
@@ -1169,6 +1186,11 @@ func handleBatchCreate(svcs *Services) http.HandlerFunc {
 		if svcs.OnBatchPending != nil {
 			svcs.OnBatchPending(sess.Key(), view, r.RemoteAddr)
 		}
+		batchEvType := events.TypeBatchPending
+		if autoApproveBatch {
+			batchEvType = events.TypeBatchUpdated
+		}
+		svcs.EmitPersonal(sess.Key(), batchEvType, view)
 		writeJSON(w, http.StatusCreated, view)
 	}
 }
@@ -1250,6 +1272,7 @@ func handleBatchItemCancel(svcs *Services) http.HandlerFunc {
 			writeBatchError(w, err)
 			return
 		}
+		svcs.EmitPersonal(sess.Key(), events.TypeBatchUpdated, view)
 		writeJSON(w, http.StatusOK, view)
 	}
 }
@@ -1332,6 +1355,13 @@ func handleBatchContent(svcs *Services, stall time.Duration) http.HandlerFunc {
 		lastMilestone := int64(0)
 		res, streamErr := svcs.Transfers.SubmitContentWithPublish(contentID, sess.Key(), body, func(up transfer.Upload) {
 			_ = svcs.Coordinator.UpdateItemProgress(sess.Key(), lease, up.Uploaded)
+			svcs.EmitPersonalProgress(sess.Key(), "batch:"+batchID+":"+itemID, events.TypeBatchProgress, map[string]any{
+				"batchId":      batchID,
+				"itemId":       itemID,
+				"transferred":  up.Uploaded,
+				"declaredSize": lease.DeclaredSize,
+				"speed":        up.Speed,
+			})
 			for lastMilestone < 3 && milestoneBytes > 0 && up.Uploaded >= (lastMilestone+1)*milestoneBytes {
 				lastMilestone++
 				diagnose(svcs, "batch item progress session=%s item=%s at=%d%%",
@@ -1354,6 +1384,9 @@ func handleBatchContent(svcs *Services, stall time.Duration) http.HandlerFunc {
 			// cancellation the request asked for (and that later request then
 			// finds the item already canceled).
 			_ = svcs.Coordinator.CancelItem(sess.Key(), batchID, itemID)
+			if v, vErr := svcs.Coordinator.GetBatch(sess.Key(), batchID); vErr == nil {
+				svcs.EmitPersonal(sess.Key(), events.TypeBatchUpdated, v)
+			}
 			diagnose(svcs, "batch item canceled session=%s item=%s bytes=%d elapsed=%s",
 				shortKey(sess.Key()), shortID(itemID), res.Written, time.Since(start))
 			writeUploadStreamError(w, streamErr)
@@ -1361,6 +1394,9 @@ func handleBatchContent(svcs *Services, stall time.Duration) http.HandlerFunc {
 		}
 		if streamErr != nil {
 			failBatch(svcs, sess.Key(), lease, streamErr)
+			if v, vErr := svcs.Coordinator.GetBatch(sess.Key(), batchID); vErr == nil {
+				svcs.EmitPersonal(sess.Key(), events.TypeBatchUpdated, v)
+			}
 			diagnose(svcs, "batch item failed session=%s item=%s bytes=%d reason=%s elapsed=%s",
 				shortKey(sess.Key()), shortID(itemID), res.Written,
 				classifyStreamFailure(r, streamErr), time.Since(start))
@@ -1381,6 +1417,11 @@ func handleBatchContent(svcs *Services, stall time.Duration) http.HandlerFunc {
 		if completeErr != nil {
 			writeBatchError(w, completeErr)
 			return
+		}
+		if fullView, vErr := svcs.Coordinator.GetBatch(sess.Key(), batchID); vErr == nil {
+			svcs.EmitPersonal(sess.Key(), events.TypeBatchUpdated, fullView)
+		} else {
+			svcs.EmitPersonal(sess.Key(), events.TypeBatchUpdated, view)
 		}
 		writeJSON(w, http.StatusOK, struct {
 			Written int64              `json:"written"`
@@ -1877,6 +1918,7 @@ func handleTextMessageSend(svcs *Services) http.HandlerFunc {
 			return
 		}
 
+		svcs.EmitPersonal(sess.Key(), events.TypeTextMessage, msg)
 		writeJSON(w, http.StatusCreated, msg)
 	}
 }
@@ -2181,7 +2223,11 @@ func handleDeviceRemove(svcs *Services) http.HandlerFunc {
 			return
 		}
 		if svcs.Sessions != nil {
-			svcs.Sessions.RevokeByDeviceID(id)
+			for _, key := range svcs.Sessions.RevokeByDeviceID(id) {
+				if svcs.Events != nil {
+					svcs.Events.CloseSession(key, "device_revoked")
+				}
+			}
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
 	}

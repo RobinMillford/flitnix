@@ -13,7 +13,12 @@ import (
 
 const (
 	// CurrentSchemaVersion is the current version of the settings file schema.
-	CurrentSchemaVersion = 3
+	CurrentSchemaVersion = 6
+
+	DefaultHistoryRetentionDays = 90
+	DefaultHistoryMaxRecords    = 5000
+	MaxHistoryRetentionDays     = 3650
+	MaxHistoryMaxRecords        = 100000
 
 	// Allowed themes
 	ThemeSystem = "system"
@@ -33,32 +38,58 @@ var (
 
 // Settings represents persistent user preferences.
 type Settings struct {
-	Version                int       `json:"version"`
-	Theme                  string    `json:"theme"`
-	Locale                 string    `json:"locale"`
-	DownloadDir            string    `json:"downloadDir"`
-	AutoStartSession       bool      `json:"autoStartSession"`
-	PreserveModTimes       bool      `json:"preserveModTimes"`
-	PreferredInterface     string    `json:"preferredInterface"`
-	VisibilityMode         string    `json:"visibilityMode"`
-	VisibilityPreviousMode string    `json:"visibilityPreviousMode"`
-	VisibilityExpiresAt    time.Time `json:"visibilityExpiresAt,omitempty"`
-	UpdatedAt              time.Time `json:"updatedAt"`
+	Version                   int       `json:"version"`
+	Theme                     string    `json:"theme"`
+	Locale                    string    `json:"locale"`
+	DownloadDir               string    `json:"downloadDir"`
+	AutoStartSession          bool      `json:"autoStartSession"`
+	PreserveModTimes          bool      `json:"preserveModTimes"`
+	PreferredInterface        string    `json:"preferredInterface"`
+	VisibilityMode            string    `json:"visibilityMode"`
+	VisibilityPreviousMode    string    `json:"visibilityPreviousMode"`
+	VisibilityExpiresAt       time.Time `json:"visibilityExpiresAt,omitempty"`
+	MinimizeToTray            bool      `json:"minimizeToTray"`
+	LaunchOnLogin             bool      `json:"launchOnLogin"`
+	NotificationsEnabled      bool      `json:"notificationsEnabled"`
+	QuietMode                 bool      `json:"quietMode"`
+	HideNotificationFilenames bool      `json:"hideNotificationFilenames"`
+	NotifyIncomingTransfers   bool      `json:"notifyIncomingTransfers"`
+	NotifyCompletedTransfers  bool      `json:"notifyCompletedTransfers"`
+	NotifyFailedTransfers     bool      `json:"notifyFailedTransfers"`
+	NotifyQuickText           bool      `json:"notifyQuickText"`
+	NotifyPairingRequests     bool      `json:"notifyPairingRequests"`
+	NotifyGuestRequests       bool      `json:"notifyGuestRequests"`
+	HistoryRetentionDays      int       `json:"historyRetentionDays"`
+	HistoryMaxRecords         int       `json:"historyMaxRecords"`
+	UpdatedAt                 time.Time `json:"updatedAt"`
 }
 
 // DefaultSettings returns the baseline configuration for Flitnix.
 func DefaultSettings() Settings {
 	return Settings{
-		Version:                CurrentSchemaVersion,
-		Theme:                  ThemeSystem,
-		Locale:                 "system",
-		DownloadDir:            "", // empty indicates default (~/Downloads/Flitnix)
-		AutoStartSession:       false,
-		PreserveModTimes:       true,
-		PreferredInterface:     "",
-		VisibilityMode:         VisibilityTrustedOnly,
-		VisibilityPreviousMode: VisibilityTrustedOnly,
-		UpdatedAt:              time.Now().UTC(),
+		Version:                   CurrentSchemaVersion,
+		Theme:                     ThemeSystem,
+		Locale:                    "system",
+		DownloadDir:               "", // empty indicates default (~/Downloads/Flitnix)
+		AutoStartSession:          false,
+		PreserveModTimes:          true,
+		PreferredInterface:        "",
+		VisibilityMode:            VisibilityTrustedOnly,
+		VisibilityPreviousMode:    VisibilityTrustedOnly,
+		MinimizeToTray:            true,
+		LaunchOnLogin:             false,
+		NotificationsEnabled:      true,
+		QuietMode:                 false,
+		HideNotificationFilenames: false,
+		NotifyIncomingTransfers:   true,
+		NotifyCompletedTransfers:  true,
+		NotifyFailedTransfers:     true,
+		NotifyQuickText:           true,
+		NotifyPairingRequests:     true,
+		NotifyGuestRequests:       true,
+		HistoryRetentionDays:      DefaultHistoryRetentionDays,
+		HistoryMaxRecords:         DefaultHistoryMaxRecords,
+		UpdatedAt:                 time.Now().UTC(),
 	}
 }
 
@@ -170,6 +201,17 @@ func ValidateAndNormalize(s Settings) Settings {
 		s.VisibilityExpiresAt = time.Time{}
 	}
 
+	if s.HistoryRetentionDays < 0 {
+		s.HistoryRetentionDays = 0
+	} else if s.HistoryRetentionDays > MaxHistoryRetentionDays {
+		s.HistoryRetentionDays = MaxHistoryRetentionDays
+	}
+	if s.HistoryMaxRecords < 0 {
+		s.HistoryMaxRecords = 0
+	} else if s.HistoryMaxRecords > MaxHistoryMaxRecords {
+		s.HistoryMaxRecords = MaxHistoryMaxRecords
+	}
+
 	return s
 }
 
@@ -182,6 +224,32 @@ func migrateSettings(old Settings) Settings {
 		}
 		if migrated.VisibilityPreviousMode == "" {
 			migrated.VisibilityPreviousMode = VisibilityTrustedOnly
+		}
+	}
+	if old.Version < 4 {
+		// NewStore seeds loaded from DefaultSettings(), so MinimizeToTray defaults to true
+		// when upgrading from v3 unless explicitly saved false.
+		if old.Version < 3 {
+			migrated.MinimizeToTray = true
+		}
+	}
+	if old.Version < 5 {
+		if old.Version < 4 {
+			migrated.NotificationsEnabled = true
+			migrated.NotifyIncomingTransfers = true
+			migrated.NotifyCompletedTransfers = true
+			migrated.NotifyFailedTransfers = true
+			migrated.NotifyQuickText = true
+			migrated.NotifyPairingRequests = true
+			migrated.NotifyGuestRequests = true
+		}
+	}
+	if old.Version < 6 {
+		if migrated.HistoryRetentionDays < 0 {
+			migrated.HistoryRetentionDays = DefaultHistoryRetentionDays
+		}
+		if migrated.HistoryMaxRecords < 0 {
+			migrated.HistoryMaxRecords = DefaultHistoryMaxRecords
 		}
 	}
 	migrated.Version = CurrentSchemaVersion

@@ -51,6 +51,21 @@ func TestHandleCLIVersion(t *testing.T) {
 	}
 }
 
+func TestHandleCLIBackgroundFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	stripped, hidden := stripBackgroundFlag([]string{"flitnix", "--background"})
+	if !hidden || len(stripped) != 1 {
+		t.Fatalf("expected hidden=true and only binary name left, got hidden=%v stripped=%v", hidden, stripped)
+	}
+	handled, code, shares := handleCLI([]string{"flitnix", "--background"}, &stdout, &stderr)
+	if handled || code != 0 || len(shares) != 0 {
+		t.Fatalf("expected GUI fallthrough without shares, got handled=%v code=%d shares=%v", handled, code, shares)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected no stderr warnings for --background flag, got %q", stderr.String())
+	}
+}
+
 func TestHandleCLIHelp(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	handled, code, _ := handleCLI([]string{"flitnix", "--help"}, &stdout, &stderr)
@@ -178,7 +193,7 @@ func TestRunServeApprovalLoopApprove(t *testing.T) {
 	in := strings.NewReader("y\n")
 
 	ctx := context.Background()
-	runServeApprovalLoop(ctx, pendingChan, transfers, coord, in, &stdout)
+	runServeApprovalLoop(ctx, pendingChan, transfers, coord, nil, in, &stdout)
 
 	// Verify batch is approved
 	updated, err := coord.GetBatch(sessionKey, view.ID)
@@ -227,7 +242,7 @@ func TestRunServeApprovalLoopDecline(t *testing.T) {
 	in := strings.NewReader("\n")
 
 	ctx := context.Background()
-	runServeApprovalLoop(ctx, pendingChan, transfers, coord, in, &stdout)
+	runServeApprovalLoop(ctx, pendingChan, transfers, coord, nil, in, &stdout)
 
 	// Verify batch is rejected
 	updated, err := coord.GetBatch(sessionKey, view.ID)
@@ -273,7 +288,7 @@ func TestRunServeApprovalLoopStaleBatch(t *testing.T) {
 
 	var stdout bytes.Buffer
 	in := strings.NewReader("y\n")
-	runServeApprovalLoop(context.Background(), pendingChan, transfers, coord, in, &stdout)
+	runServeApprovalLoop(context.Background(), pendingChan, transfers, coord, nil, in, &stdout)
 
 	if stdout.String() != "" {
 		t.Fatalf("expected already-canceled batch to be skipped without prompt, got stdout:\n%s", stdout.String())
@@ -298,7 +313,7 @@ func TestRunServeApprovalLoopStaleBatch(t *testing.T) {
 	loopDone := make(chan struct{})
 	go func() {
 		defer close(loopDone)
-		runServeApprovalLoop(context.Background(), pendingChan2, transfers, coord, r, &safeStdout)
+		runServeApprovalLoop(context.Background(), pendingChan2, transfers, coord, nil, r, &safeStdout)
 	}()
 
 	// Wait briefly for the prompt to be displayed

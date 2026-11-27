@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/itsyamin/flitnix/internal/audit"
+	"github.com/itsyamin/flitnix/internal/events"
 	"github.com/itsyamin/flitnix/internal/guest"
 	"github.com/itsyamin/flitnix/internal/transfer"
 )
@@ -28,8 +29,9 @@ func guestTokenFromRequest(r *http.Request) string {
 	return ""
 }
 
-func newGuestAPIMux(services *Services, stall time.Duration) http.Handler {
+func newGuestAPIMux(services *Services, stall time.Duration, shutdownCh <-chan struct{}) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /guest-api/events", handleGuestEvents(services, shutdownCh))
 	mux.HandleFunc("GET /guest-api/ping", handleDiagnosticsPing(services))
 	mux.HandleFunc("POST /guest-api/ping", handleDiagnosticsPing(services))
 	mux.HandleFunc("GET /guest-api/room-info", handleGuestRoomInfo(services))
@@ -196,6 +198,14 @@ func handleGuestJoin(svcs *Services) http.HandlerFunc {
 			MaxAge: maxAge,
 		})
 
+		svcs.EmitGuest(room.ID, g.ID, events.TypeGuestRoomUpdated, map[string]any{
+			"action":   "guest_joined",
+			"roomId":   room.ID,
+			"guestId":  g.ID,
+			"nickname": g.Nickname,
+			"state":    string(g.State),
+		})
+
 		writeJSON(w, http.StatusCreated, guestJoinResponse{
 			GuestID:  g.ID,
 			Nickname: g.Nickname,
@@ -348,13 +358,15 @@ func handleGuestUploadDeclare(svcs *Services) http.HandlerFunc {
 			})
 		}
 
-		writeJSON(w, http.StatusCreated, guestUploadResponse{
+		resp := guestUploadResponse{
 			ID:       up.ID,
 			Name:     up.FileName,
 			Size:     up.Size,
 			State:    string(up.State),
 			Metadata: up.FormValues,
-		})
+		}
+		svcs.EmitGuest(room.ID, g.ID, events.TypeGuestUploadUpdated, resp)
+		writeJSON(w, http.StatusCreated, resp)
 	}
 }
 
@@ -460,6 +472,16 @@ func handleGuestUploadContent(svcs *Services, stall time.Duration) http.HandlerF
 					Details:   fmt.Sprintf("Upload failed: %v", err),
 				})
 			}
+			if curUp, uErr := room.GetUpload(uploadID); uErr == nil {
+				svcs.EmitGuest(room.ID, g.ID, events.TypeGuestUploadUpdated, guestUploadResponse{
+					ID:       curUp.ID,
+					Name:     curUp.FileName,
+					Size:     curUp.Size,
+					State:    string(curUp.State),
+					Uploaded: curUp.Transferred,
+					Error:    curUp.Error,
+				})
+			}
 			if errors.Is(err, transfer.ErrInsufficientStorage) {
 				writeInsufficientStorage(w)
 				return
@@ -481,6 +503,15 @@ func handleGuestUploadContent(svcs *Services, stall time.Duration) http.HandlerF
 				Details:   fmt.Sprintf("Upload completed: %s (%d bytes)", up.FileName, res.Written),
 			})
 		}
+
+		svcs.EmitGuest(room.ID, g.ID, events.TypeGuestUploadUpdated, guestUploadResponse{
+			ID:       up.ID,
+			Name:     up.FileName,
+			Size:     up.Size,
+			State:    string(guest.UploadCompleted),
+			Uploaded: res.Written,
+			SHA256:   res.SHA256,
+		})
 
 		writeJSON(w, http.StatusOK, uploadResultJSON{
 			Written: res.Written,

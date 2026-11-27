@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -30,14 +31,20 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/itsyamin/flitnix/internal/audit"
+	"github.com/itsyamin/flitnix/internal/autostart"
+	"github.com/itsyamin/flitnix/internal/client"
 	"github.com/itsyamin/flitnix/internal/devices"
 	"github.com/itsyamin/flitnix/internal/discovery"
 	"github.com/itsyamin/flitnix/internal/doctor"
+	"github.com/itsyamin/flitnix/internal/events"
 	"github.com/itsyamin/flitnix/internal/guest"
+	"github.com/itsyamin/flitnix/internal/history"
 	"github.com/itsyamin/flitnix/internal/netenv"
+	"github.com/itsyamin/flitnix/internal/notify"
 	"github.com/itsyamin/flitnix/internal/power"
 	"github.com/itsyamin/flitnix/internal/qr"
 	"github.com/itsyamin/flitnix/internal/server"
@@ -45,6 +52,7 @@ import (
 	"github.com/itsyamin/flitnix/internal/settings"
 	"github.com/itsyamin/flitnix/internal/textmsg"
 	"github.com/itsyamin/flitnix/internal/transfer"
+	"github.com/itsyamin/flitnix/internal/tray"
 	"github.com/itsyamin/flitnix/internal/update"
 	"github.com/itsyamin/flitnix/internal/version"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -250,18 +258,34 @@ type BatchView struct {
 
 // SettingsView is the UI projection of persistent user settings.
 type SettingsView struct {
-	Version                int    `json:"version"`
-	Theme                  string `json:"theme"`
-	Locale                 string `json:"locale"`
-	DownloadDir            string `json:"downloadDir"`
-	EffectiveDir           string `json:"effectiveDir"`
-	AutoStartSession       bool   `json:"autoStartSession"`
-	PreserveModTimes       bool   `json:"preserveModTimes"`
-	PreferredInterface     string `json:"preferredInterface"`
-	VisibilityMode         string `json:"visibilityMode,omitempty"`
-	VisibilityPreviousMode string `json:"visibilityPreviousMode,omitempty"`
-	VisibilityExpiresAt    string `json:"visibilityExpiresAt,omitempty"`
-	QRSharingPaused        bool   `json:"qrSharingPaused,omitempty"`
+	Version                   int    `json:"version"`
+	Theme                     string `json:"theme"`
+	Locale                    string `json:"locale"`
+	DownloadDir               string `json:"downloadDir"`
+	EffectiveDir              string `json:"effectiveDir"`
+	AutoStartSession          bool   `json:"autoStartSession"`
+	PreserveModTimes          bool   `json:"preserveModTimes"`
+	PreferredInterface        string `json:"preferredInterface"`
+	VisibilityMode            string `json:"visibilityMode,omitempty"`
+	VisibilityPreviousMode    string `json:"visibilityPreviousMode,omitempty"`
+	VisibilityExpiresAt       string `json:"visibilityExpiresAt,omitempty"`
+	QRSharingPaused           bool   `json:"qrSharingPaused,omitempty"`
+	MinimizeToTray            bool   `json:"minimizeToTray"`
+	LaunchOnLogin             bool   `json:"launchOnLogin"`
+	TraySupported             bool   `json:"traySupported,omitempty"`
+	AutostartSupported        bool   `json:"autostartSupported,omitempty"`
+	NotificationsEnabled      bool   `json:"notificationsEnabled"`
+	QuietMode                 bool   `json:"quietMode"`
+	HideNotificationFilenames bool   `json:"hideNotificationFilenames"`
+	NotifyIncomingTransfers   bool   `json:"notifyIncomingTransfers"`
+	NotifyCompletedTransfers  bool   `json:"notifyCompletedTransfers"`
+	NotifyFailedTransfers     bool   `json:"notifyFailedTransfers"`
+	NotifyQuickText           bool   `json:"notifyQuickText"`
+	NotifyPairingRequests     bool   `json:"notifyPairingRequests"`
+	NotifyGuestRequests       bool   `json:"notifyGuestRequests"`
+	NotificationsSupported    bool   `json:"notificationsSupported,omitempty"`
+	HistoryRetentionDays      int    `json:"historyRetentionDays"`
+	HistoryMaxRecords         int    `json:"historyMaxRecords"`
 }
 
 // App owns the Flitnix core instances and the desktop lifecycle.
@@ -273,6 +297,13 @@ type App struct {
 	dataDir       string
 	recoveryDir   string
 	settingsStore *settings.Store
+	autostart     *autostart.Manager
+	tray          *tray.Service
+	notify        *notify.Manager
+	trayIcon      []byte
+	startHidden   bool
+	windowHidden  atomic.Bool
+	quitRequested atomic.Bool
 	sessions      *session.Manager
 	shortCodes    *session.ShortCodeManager
 	transfers     *transfer.Service
@@ -282,6 +313,7 @@ type App struct {
 	guestMgr      *guest.Manager
 	textStore     *textmsg.Store
 	auditStore    *audit.Store
+	historyStore  *history.Store
 	templateStore *guest.TemplateStore
 	devicesStore  *devices.Store
 	hostIdentity  *devices.HostIdentity
@@ -289,6 +321,7 @@ type App struct {
 	visibility    *devices.VisibilityManager
 	discovery     *discovery.Service
 	peerMgr       *peerTransferManager
+	events        *events.Hub
 	inhibitor     power.Inhibitor
 	updater       *update.Service
 	startupMu     sync.Mutex
@@ -359,6 +392,10 @@ func NewApp() (*App, error) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "flitnix: audit store initialization warning: %v\n", err)
 	}
+	historyStore, err := history.NewStore(filepath.Join(dataDir, "history.jsonl"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "flitnix: history store initialization warning: %v\n", err)
+	}
 	templateStore, err := guest.NewTemplateStore(filepath.Join(dataDir, "templates.json"))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "flitnix: template store initialization warning: %v\n", err)
@@ -405,6 +442,7 @@ func NewApp() (*App, error) {
 		dataDir:       dataDir,
 		recoveryDir:   filepath.Join(dataDir, "recovery"),
 		settingsStore: settingsStore,
+		autostart:     autostart.NewManager(autostart.Config{Args: []string{"--background"}}),
 		shortCodes:    session.NewShortCodeManager(session.ShortCodeConfig{}),
 		transfers:     transfer.NewService(transfer.Config{Store: store, Quota: quota}),
 		coordinator:   transfer.NewCoordinator(transfer.CoordinatorConfig{}),
@@ -413,14 +451,36 @@ func NewApp() (*App, error) {
 		guestMgr:      guestMgr,
 		textStore:     textmsg.NewStore(),
 		auditStore:    auditStore,
+		historyStore:  historyStore,
 		templateStore: templateStore,
 		devicesStore:  devicesStore,
 		hostIdentity:  hostIdentity,
 		pairing:       pairingCoord,
 		visibility:    visMgr,
+		events:        events.NewHub(),
 		inhibitor:     power.New(),
 		source:        netenv.DefaultSource(),
 		updater:       update.New(update.Config{RepoOwner: "RobinMillford", RepoName: "flitnix"}),
+	}
+	a.downloads.SetEventHook(func(d transfer.Download, isProgress bool) {
+		if a.events == nil {
+			return
+		}
+		dv := downloadView(d)
+		if isProgress {
+			if a.events.AllowProgress("dl:"+d.ID, events.DefaultProgressInterval) {
+				a.events.PublishPersonal(d.Session, events.TypeDownloadProgress, dv)
+			}
+			return
+		}
+		a.events.PublishPersonal(d.Session, events.TypeDownloadUpdated, dv)
+	})
+	if a.pairing != nil {
+		a.pairing.OnPromptChanged = func(st devices.PairingStatusView) {
+			if a.events != nil {
+				a.events.PublishDesktop(events.TypePairingPrompt, st)
+			}
+		}
 	}
 	if settingsStore != nil {
 		// If a stale temporary_everyone expired while the app was closed,
@@ -447,6 +507,7 @@ func NewApp() (*App, error) {
 			if ctx != nil && ctx.Value("frontend") != nil {
 				runtime.EventsEmit(ctx, "visibility:changed", st)
 			}
+			a.updateTrayState()
 		},
 		func(st devices.VisibilityState) error {
 			if a.settingsStore == nil {
@@ -531,6 +592,9 @@ func (a *App) releaseSession(key string) {
 		}
 	}
 	a.textStore.Clear(key)
+	if a.events != nil {
+		a.events.CloseSession(key, "session_expired")
+	}
 }
 
 // startup records the Wails runtime context so bound methods can call the
@@ -540,10 +604,15 @@ func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	initial := a.initialShares
 	a.startupDone = true
+	a.windowHidden.Store(a.startHidden)
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	a.bgCancel = bgCancel
 	a.startupMu.Unlock()
 
+	if ctx != nil && ctx.Value("frontend") != nil {
+		a.initNotify()
+		a.initTray()
+	}
 	ensureLinuxNautilusScript()
 
 	if a.netMonitor != nil {
@@ -551,6 +620,13 @@ func (a *App) startup(ctx context.Context) {
 	}
 	if a.discovery != nil {
 		a.discovery.Start(bgCtx)
+	}
+	if a.events != nil {
+		a.bgWg.Add(1)
+		go func() {
+			defer a.bgWg.Done()
+			a.runEventsBridge(bgCtx)
+		}()
 	}
 
 	if a.visibility != nil {
@@ -565,6 +641,25 @@ func (a *App) startup(ctx context.Context) {
 					return
 				case <-ticker.C:
 					a.visibility.Evaluate()
+				}
+			}
+		}()
+	}
+
+	if a.historyStore != nil {
+		a.bgWg.Add(1)
+		go func() {
+			defer a.bgWg.Done()
+			// Non-blocking startup prune + periodic 6-hour background retention cleanup.
+			_, _ = a.ApplyHistoryRetentionNow()
+			ticker := time.NewTicker(6 * time.Hour)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-bgCtx.Done():
+					return
+				case <-ticker.C:
+					_, _ = a.ApplyHistoryRetentionNow()
 				}
 			}
 		}()
@@ -637,7 +732,8 @@ fi
 // relative to the second instance's working directory, queues them into the share
 // registry, and restores/shows the application window.
 func (a *App) onSecondInstanceLaunch(data options.SecondInstanceData) {
-	normPaths := ExtractSharePaths(data.Args, data.WorkingDirectory, func(raw string, err error) {
+	cleanedArgs, _ := stripBackgroundFlag(data.Args)
+	normPaths := ExtractSharePaths(cleanedArgs, data.WorkingDirectory, func(raw string, err error) {
 		fmt.Fprintf(os.Stderr, "flitnix: second-instance invalid path %q: %v\n", raw, err)
 	})
 
@@ -691,6 +787,183 @@ func (a *App) bringToFront() {
 	}
 }
 
+func (a *App) initTray() {
+	a.startupMu.Lock()
+	if a.tray != nil {
+		a.startupMu.Unlock()
+		return
+	}
+	t := tray.NewService(a.trayIcon, tray.Callbacks{
+		OnOpen:         func() { a.RestoreWindow() },
+		OnHide:         func() { a.HideWindow() },
+		OnToggleWindow: func() { a.ToggleWindow() },
+		OnSetVisibility: func(mode string) {
+			if _, err := a.SetVisibilityMode(mode); err == nil {
+				a.updateTrayState()
+			}
+		},
+		OnToggleQuietMode: func() {
+			a.ToggleQuietMode()
+		},
+		OnOpenSettings: func() {
+			a.RestoreWindow()
+			a.emitFrontendEvent("flitnix:navigate", map[string]string{"tab": "settings"})
+		},
+		OnQuit: func() { a.QuitApp() },
+	})
+	a.tray = t
+	a.startupMu.Unlock()
+
+	t.Start(a.buildTrayState())
+}
+
+// ToggleQuietMode toggles notification Do-Not-Disturb mode from the tray or UI.
+func (a *App) ToggleQuietMode() bool {
+	if a.settingsStore == nil {
+		return false
+	}
+	cur := a.settingsStore.Get()
+	cur.QuietMode = !cur.QuietMode
+	if err := a.settingsStore.Save(cur); err != nil {
+		return !cur.QuietMode
+	}
+	if a.notify != nil {
+		a.notify.SetPolicy(a.notifyPolicyFromSettings())
+	}
+	a.updateTrayState()
+	a.emitFrontendEvent("settings:changed", a.GetSettings())
+	return cur.QuietMode
+}
+
+func (a *App) buildTrayState() tray.State {
+	vis := a.GetVisibilityState()
+	sessCount := 0
+	if a.sessions != nil {
+		sessCount = a.sessions.Len()
+	}
+	pendingCount := 0
+	if a.transfers != nil {
+		pendingCount += a.transfers.Counts().Pending
+	}
+	if a.guestMgr != nil {
+		if gr := a.guestMgr.ActiveRoom(); gr != nil {
+			for _, g := range gr.ListGuests() {
+				if g.State == guest.GuestPending {
+					pendingCount++
+				}
+			}
+			for _, u := range gr.ListUploads() {
+				if u.State == guest.UploadPendingApproval {
+					pendingCount++
+				}
+			}
+		}
+	}
+
+	visLabel := "Trusted Devices"
+	switch vis.Mode {
+	case devices.VisibilityHidden:
+		visLabel = "Hidden (Offline)"
+	case devices.VisibilityTemporaryEveryone:
+		visLabel = "Open (10 min)"
+	case devices.VisibilityEveryone:
+		visLabel = "Everyone on LAN"
+	}
+
+	status := "Flitnix Ready · " + visLabel
+	if pendingCount > 0 {
+		status = fmt.Sprintf("Flitnix · %d pending approval", pendingCount)
+	} else if sessCount > 0 {
+		status = fmt.Sprintf("Flitnix Active (%d session) · %s", sessCount, visLabel)
+	}
+
+	quiet := a.settingsStore != nil && a.settingsStore.Get().QuietMode
+	return tray.State{
+		Tooltip:          status,
+		StatusLabel:      status,
+		Attention:        pendingCount > 0,
+		WindowVisible:    !a.windowHidden.Load(),
+		VisibilityMode:   string(vis.Mode),
+		QuietMode:        quiet,
+		HasActiveSession: sessCount > 0,
+		PendingCount:     pendingCount,
+	}
+}
+
+func (a *App) updateTrayState() {
+	a.startupMu.Lock()
+	t := a.tray
+	a.startupMu.Unlock()
+	if t != nil && t.Supported() {
+		t.Update(a.buildTrayState())
+	}
+}
+
+func (a *App) shouldMinimizeToTray() bool {
+	if a.tray == nil || !a.tray.Supported() {
+		return false
+	}
+	if a.settingsStore != nil && !a.settingsStore.Get().MinimizeToTray {
+		return false
+	}
+	return true
+}
+
+// beforeClose hides the window to tray when close-to-tray is active and tray is
+// available, unless an explicit Quit was requested. Returning true prevents exit.
+func (a *App) beforeClose(ctx context.Context) bool {
+	if a.quitRequested.Load() {
+		return false
+	}
+	if a.shouldMinimizeToTray() {
+		a.HideWindow()
+		return true
+	}
+	return false
+}
+
+// RestoreWindow unminimizes, shows, and brings the main Flitnix window to focus.
+func (a *App) RestoreWindow() {
+	a.windowHidden.Store(false)
+	a.bringToFront()
+	a.updateTrayState()
+}
+
+// HideWindow hides the main window to the background tray while keeping the
+// HTTP server, discovery, and active transfers running.
+func (a *App) HideWindow() {
+	a.windowHidden.Store(true)
+	a.startupMu.Lock()
+	ctx := a.ctx
+	a.startupMu.Unlock()
+	if ctx != nil && ctx.Value("frontend") != nil {
+		runtime.WindowHide(ctx)
+	}
+	a.updateTrayState()
+}
+
+// ToggleWindow alternates between showing and hiding the main desktop window.
+func (a *App) ToggleWindow() {
+	if a.windowHidden.Load() {
+		a.RestoreWindow()
+		return
+	}
+	a.HideWindow()
+}
+
+// QuitApp triggers a clean explicit shutdown bypassing close-to-tray interception.
+func (a *App) QuitApp() {
+	a.quitRequested.Store(true)
+	a.startupMu.Lock()
+	ctx := a.ctx
+	a.startupMu.Unlock()
+	if ctx != nil && ctx.Value("frontend") != nil {
+		runtime.Quit(ctx)
+		return
+	}
+	a.shutdown(context.Background())
+}
+
 // shortKey returns a bounded prefix of a session's non-secret key for log
 // lines. Full keys are 64 hex characters; eight identify which session a
 // line is about without resembling any secret (tokens are unrelated
@@ -710,6 +983,402 @@ func shortKey(key string) string {
 // tokens, pairing URLs, cookies or paths.
 func (a *App) logSessionEnd(ev session.EndEvent) {
 	fmt.Fprintf(os.Stderr, "flitnix: session %s ended: %s\n", shortKey(ev.Key), ev.Reason)
+	if a.events != nil {
+		reason := "session_revoked"
+		if ev.Reason == session.EndIdleExpiry {
+			reason = "session_expired"
+		}
+		a.events.CloseSession(ev.Key, reason)
+		a.events.PublishDesktop(events.TypeSessionEnded, map[string]string{
+			"key":    shortKey(ev.Key),
+			"reason": string(ev.Reason),
+		})
+	}
+}
+
+func (a *App) runEventsBridge(ctx context.Context) {
+	if a.events == nil {
+		return
+	}
+	sub, err := a.events.SubscribeDesktop()
+	if err != nil {
+		return
+	}
+	defer sub.Close()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-sub.Done():
+			return
+		case <-sub.Resync():
+			a.emitFrontendEvent("flitnix:event", map[string]any{
+				"type": "resync",
+			})
+		case ev := <-sub.C():
+			a.emitFrontendEvent("flitnix:event", map[string]any{
+				"id":      ev.ID,
+				"type":    ev.Type,
+				"ts":      ev.Timestamp,
+				"scope":   ev.Scope,
+				"payload": ev.RawPayload,
+			})
+			a.handleDesktopEvent(ev)
+		}
+	}
+}
+
+func (a *App) initNotify() {
+	a.startupMu.Lock()
+	if a.notify != nil {
+		a.startupMu.Unlock()
+		return
+	}
+	pol := a.notifyPolicyFromSettings()
+	mgr := notify.NewManager(pol, a.handleNotificationAction)
+	a.notify = mgr
+	a.startupMu.Unlock()
+}
+
+func (a *App) notifyPolicyFromSettings() notify.Policy {
+	if a.settingsStore == nil {
+		return notify.DefaultPolicy()
+	}
+	s := a.settingsStore.Get()
+	return notify.Policy{
+		Enabled:         s.NotificationsEnabled,
+		QuietMode:       s.QuietMode,
+		HideFilenames:   s.HideNotificationFilenames,
+		Incoming:        s.NotifyIncomingTransfers,
+		Completed:       s.NotifyCompletedTransfers,
+		Failed:          s.NotifyFailedTransfers,
+		QuickText:       s.NotifyQuickText,
+		PairingRequests: s.NotifyPairingRequests,
+		GuestRequests:   s.NotifyGuestRequests,
+	}
+}
+
+func decodeEventPayload[T any](raw any) (T, bool) {
+	var zero T
+	if raw == nil {
+		return zero, false
+	}
+	if direct, ok := raw.(T); ok {
+		return direct, true
+	}
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return zero, false
+	}
+	var out T
+	if err := json.Unmarshal(b, &out); err != nil {
+		return zero, false
+	}
+	return out, true
+}
+
+func (a *App) handleDesktopEvent(ev events.DesktopEvent) {
+	if ev.Type != events.TypeHistoryUpdated && !strings.HasSuffix(ev.Type, ".progress") && ev.Type != events.TypePeerTransfer {
+		a.updateTrayState()
+	}
+	if ev.Type != events.TypeHistoryUpdated {
+		a.recordHistoryFromEvent(ev)
+	}
+	a.startupMu.Lock()
+	n := a.notify
+	a.startupMu.Unlock()
+	if n == nil {
+		return
+	}
+	pol := n.Policy()
+
+	switch ev.Type {
+	case events.TypeBatchPending:
+		bv, ok := decodeEventPayload[BatchView](ev.RawPayload)
+		if !ok || bv.ApprovalState != string(transfer.ApprovalPending) {
+			return
+		}
+		name := bv.RootName
+		if name == "" && len(bv.Items) > 0 {
+			name = bv.Items[0].DisplayName
+		}
+		sender := bv.DeviceName
+		if sender == "" {
+			sender = "Connected mobile device"
+		}
+		title, body := notify.FormatIncomingSummary(pol.HideFilenames, sender, name, bv.TotalItemCount, client.FormatBytes(bv.DeclaredTotalBytes))
+		n.Notify(notify.Notification{
+			Key:           "batch:pending:" + bv.ID,
+			Category:      notify.CatIncomingTransfer,
+			Title:         title,
+			Body:          body,
+			DefaultAction: notify.Action{Kind: notify.ActionOpenWindow},
+			Actions: []notify.Action{
+				{Kind: notify.ActionApproveBatch, TargetID: bv.ID, Label: "Approve"},
+				{Kind: notify.ActionDeclineBatch, TargetID: bv.ID, Label: "Decline"},
+				{Kind: notify.ActionOpenWindow, Label: "Open"},
+			},
+		})
+
+	case events.TypeBatchUpdated:
+		bv, ok := decodeEventPayload[BatchView](ev.RawPayload)
+		if !ok {
+			return
+		}
+		name := bv.RootName
+		if name == "" && len(bv.Items) > 0 {
+			name = bv.Items[0].DisplayName
+		}
+		switch bv.State {
+		case string(transfer.BatchStateCompleted):
+			title, body := notify.FormatCompletedSummary(pol.HideFilenames, "upload", name, bv.TotalItemCount)
+			n.Notify(notify.Notification{
+				Key:           "batch:done:" + bv.ID,
+				Category:      notify.CatTransferCompleted,
+				Title:         title,
+				Body:          body,
+				DefaultAction: notify.Action{Kind: notify.ActionRevealTransfer, TargetID: bv.ID},
+				Actions: []notify.Action{
+					{Kind: notify.ActionRevealTransfer, TargetID: bv.ID, Label: "Open Folder"},
+				},
+			})
+		case string(transfer.BatchStateFailed):
+			body := "Transfer failed"
+			if !pol.HideFilenames && name != "" {
+				body = fmt.Sprintf("%s did not finish", notify.SanitizeText(name, 64))
+			}
+			n.Notify(notify.Notification{
+				Key:           "batch:fail:" + bv.ID,
+				Category:      notify.CatTransferFailed,
+				Title:         "Transfer failed",
+				Body:          body,
+				DefaultAction: notify.Action{Kind: notify.ActionOpenWindow},
+			})
+		}
+
+	case events.TypeUploadPending, events.TypeUploadUpdated:
+		uv, ok := decodeEventPayload[UploadView](ev.RawPayload)
+		if !ok || a.requireStandalone(uv.ID) != nil {
+			// Batch items are already summarized at the batch level to avoid notification flooding.
+			return
+		}
+		switch uv.State {
+		case string(transfer.StatePending):
+			title, body := notify.FormatIncomingSummary(pol.HideFilenames, uv.DeviceName, uv.Name, 1, client.FormatBytes(uv.Size))
+			n.Notify(notify.Notification{
+				Key:           "upload:pending:" + uv.ID,
+				Category:      notify.CatIncomingTransfer,
+				Title:         title,
+				Body:          body,
+				DefaultAction: notify.Action{Kind: notify.ActionOpenWindow},
+				Actions: []notify.Action{
+					{Kind: notify.ActionApproveUpload, TargetID: uv.ID, Label: "Approve"},
+					{Kind: notify.ActionDeclineUpload, TargetID: uv.ID, Label: "Decline"},
+				},
+			})
+		case string(transfer.StateCompleted):
+			title, body := notify.FormatCompletedSummary(pol.HideFilenames, "upload", uv.Name, 1)
+			n.Notify(notify.Notification{
+				Key:           "upload:done:" + uv.ID,
+				Category:      notify.CatTransferCompleted,
+				Title:         title,
+				Body:          body,
+				DefaultAction: notify.Action{Kind: notify.ActionRevealTransfer, TargetID: uv.ID},
+				Actions: []notify.Action{
+					{Kind: notify.ActionRevealTransfer, TargetID: uv.ID, Label: "Open Folder"},
+				},
+			})
+		case string(transfer.StateFailed):
+			body := "Incoming file transfer failed"
+			if !pol.HideFilenames && uv.Name != "" {
+				body = fmt.Sprintf("%s failed", notify.SanitizeText(uv.Name, 64))
+			}
+			n.Notify(notify.Notification{
+				Key:           "upload:fail:" + uv.ID,
+				Category:      notify.CatTransferFailed,
+				Title:         "Transfer failed",
+				Body:          body,
+				DefaultAction: notify.Action{Kind: notify.ActionOpenWindow},
+			})
+		}
+
+	case events.TypeDownloadUpdated:
+		dv, ok := decodeEventPayload[DownloadView](ev.RawPayload)
+		if !ok {
+			return
+		}
+		if dv.State == string(transfer.DownloadSent) {
+			title, body := notify.FormatCompletedSummary(pol.HideFilenames, "download", dv.Name, 1)
+			n.Notify(notify.Notification{
+				Key:           "download:done:" + dv.ID,
+				Category:      notify.CatTransferCompleted,
+				Title:         title,
+				Body:          body,
+				DefaultAction: notify.Action{Kind: notify.ActionOpenWindow},
+			})
+		} else if dv.State == string(transfer.DownloadFailed) {
+			body := "Phone download did not complete"
+			if !pol.HideFilenames && dv.Name != "" {
+				body = fmt.Sprintf("%s did not complete", notify.SanitizeText(dv.Name, 64))
+			}
+			n.Notify(notify.Notification{
+				Key:           "download:fail:" + dv.ID,
+				Category:      notify.CatTransferFailed,
+				Title:         "Download failed",
+				Body:          body,
+				DefaultAction: notify.Action{Kind: notify.ActionOpenWindow},
+			})
+		}
+
+	case events.TypePairingPrompt:
+		ps, ok := decodeEventPayload[devices.PairingStatusView](ev.RawPayload)
+		if !ok || !ps.Active || !ps.RequiresApproval {
+			return
+		}
+		body := "Verify the security code in Flitnix before approving"
+		if !pol.HideFilenames && ps.DeviceName != "" {
+			body = fmt.Sprintf("%s wants to pair — open Flitnix to verify code %s", notify.SanitizeText(ps.DeviceName, 40), notify.SanitizeText(ps.SAS, 16))
+		}
+		n.Notify(notify.Notification{
+			Key:           "pairing:" + ps.RequestID,
+			Category:      notify.CatPairingRequest,
+			Title:         "Device pairing request",
+			Body:          body,
+			DefaultAction: notify.Action{Kind: notify.ActionReviewPairing, TargetID: ps.RequestID},
+			Actions: []notify.Action{
+				{Kind: notify.ActionReviewPairing, TargetID: ps.RequestID, Label: "Review Pairing"},
+			},
+		})
+
+	case events.TypeTextMessage:
+		msg, ok := decodeEventPayload[TextMessageView](ev.RawPayload)
+		if !ok || msg.Sender != "phone" {
+			return
+		}
+		if !a.windowHidden.Load() {
+			return
+		}
+		body := "New Quick Text note from connected device"
+		if !pol.HideFilenames && msg.Content != "" {
+			body = msg.Content
+		}
+		n.Notify(notify.Notification{
+			Key:           "text:" + msg.ID,
+			Category:      notify.CatQuickText,
+			Title:         "Quick Text received",
+			Body:          body,
+			DefaultAction: notify.Action{Kind: notify.ActionOpenWindow},
+			Actions: []notify.Action{
+				{Kind: notify.ActionOpenWindow, Label: "Open"},
+			},
+		})
+
+	case events.TypeGuestRoomUpdated:
+		m, ok := decodeEventPayload[map[string]any](ev.RawPayload)
+		if !ok || m["action"] != "guest_joined" || m["state"] != string(guest.GuestPending) {
+			return
+		}
+		gid, _ := m["guestId"].(string)
+		nick, _ := m["nickname"].(string)
+		body := "A guest asked to join your Drop Box"
+		if !pol.HideFilenames && nick != "" {
+			body = fmt.Sprintf("%s wants to join your Guest Drop Box", notify.SanitizeText(nick, 40))
+		}
+		n.Notify(notify.Notification{
+			Key:           "guest:join:" + gid,
+			Category:      notify.CatGuestRequest,
+			Title:         "Guest join request",
+			Body:          body,
+			DefaultAction: notify.Action{Kind: notify.ActionOpenWindow},
+			Actions: []notify.Action{
+				{Kind: notify.ActionApproveGuest, TargetID: gid, Label: "Approve"},
+				{Kind: notify.ActionDeclineGuest, TargetID: gid, Label: "Decline"},
+			},
+		})
+
+	case events.TypeGuestUploadUpdated:
+		m, ok := decodeEventPayload[map[string]any](ev.RawPayload)
+		if !ok {
+			return
+		}
+		state, _ := m["state"].(string)
+		uid, _ := m["id"].(string)
+		name, _ := m["name"].(string)
+		if state == string(guest.UploadPendingApproval) && uid != "" {
+			body := "1 guest upload waiting for approval"
+			if !pol.HideFilenames && name != "" {
+				body = fmt.Sprintf("%s waiting in Guest Drop Box", notify.SanitizeText(name, 64))
+			}
+			n.Notify(notify.Notification{
+				Key:           "guest:up:" + uid,
+				Category:      notify.CatGuestRequest,
+				Title:         "Guest upload request",
+				Body:          body,
+				DefaultAction: notify.Action{Kind: notify.ActionOpenWindow},
+				Actions: []notify.Action{
+					{Kind: notify.ActionApproveGuestUpload, TargetID: uid, Label: "Approve"},
+					{Kind: notify.ActionDeclineGuestUpload, TargetID: uid, Label: "Decline"},
+				},
+			})
+		}
+	}
+}
+
+func (a *App) handleNotificationAction(inv notify.ActionInvocation) {
+	switch inv.Kind {
+	case notify.ActionOpenWindow:
+		a.RestoreWindow()
+	case notify.ActionReviewPairing:
+		// Never approve pairing from a notification without explicit SAS verification.
+		a.RestoreWindow()
+		a.emitFrontendEvent("flitnix:navigate", map[string]string{"tab": "devices"})
+	case notify.ActionRevealTransfer:
+		if err := a.revealTransferByTargetID(inv.TargetID); err != nil {
+			a.RestoreWindow()
+		}
+	case notify.ActionApproveBatch:
+		if a.GetVisibilityState().Mode == devices.VisibilityHidden {
+			a.RestoreWindow()
+			return
+		}
+		if _, err := a.ApproveBatch(inv.TargetID); err != nil {
+			a.RestoreWindow()
+		}
+	case notify.ActionDeclineBatch:
+		_, _ = a.RejectBatch(inv.TargetID)
+	case notify.ActionApproveUpload:
+		if a.GetVisibilityState().Mode == devices.VisibilityHidden {
+			a.RestoreWindow()
+			return
+		}
+		if _, err := a.ApproveUpload(inv.TargetID); err != nil {
+			a.RestoreWindow()
+		}
+	case notify.ActionDeclineUpload:
+		_, _ = a.RejectUpload(inv.TargetID)
+	case notify.ActionApproveGuest:
+		if err := a.ApproveGuest(inv.TargetID); err != nil {
+			a.RestoreWindow()
+		}
+	case notify.ActionDeclineGuest:
+		_ = a.RejectGuest(inv.TargetID)
+	case notify.ActionApproveGuestUpload:
+		if err := a.ApproveGuestUpload(inv.TargetID); err != nil {
+			a.RestoreWindow()
+		}
+	case notify.ActionDeclineGuestUpload:
+		_ = a.RejectGuestUpload(inv.TargetID)
+	}
+}
+
+func (a *App) emitFrontendEvent(name string, data any) {
+	a.startupMu.Lock()
+	ctx := a.ctx
+	a.startupMu.Unlock()
+	if ctx != nil && ctx.Value("frontend") != nil {
+		runtime.EventsEmit(ctx, name, data)
+	}
 }
 
 // logTransferDiagnostics is the server's Diagnose sink: the low-volume
@@ -751,11 +1420,23 @@ func (a *App) shutdown(ctx context.Context) {
 		a.sessions.Shutdown()
 		a.registry.Clear()
 		a.guestMgr.Close()
+		if a.events != nil {
+			a.events.Close()
+		}
+		if a.notify != nil {
+			a.notify.Close()
+		}
 		if a.auditStore != nil {
 			a.auditStore.Close()
 		}
+		if a.historyStore != nil {
+			_ = a.historyStore.Close()
+		}
 		if a.inhibitor != nil {
 			_ = a.inhibitor.Close()
+		}
+		if a.tray != nil {
+			a.tray.Stop()
 		}
 		a.stopServer()
 	})
@@ -841,6 +1522,7 @@ func (a *App) startServerLocked(listen string) error {
 			Pairing:        a.pairing,
 			Visibility:     a.visibility,
 			Inhibitor:      a.inhibitor,
+			Events:         a.events,
 			OnPhoneContact: a.recordPhoneContact,
 			Diagnose:       a.logTransferDiagnostics,
 		},
@@ -947,6 +1629,9 @@ func (a *App) StartSession(ip string) (SessionView, error) {
 		// No session was created: keep the no-session-without-server
 		// invariant unless another session is still active.
 		if a.sessions.Len() == 0 {
+			if a.tray != nil {
+				a.tray.Stop()
+			}
 			a.stopServer()
 		}
 		return SessionView{}, err
@@ -957,6 +1642,9 @@ func (a *App) StartSession(ip string) (SessionView, error) {
 	out := sessionView(s, s.Token())
 	out.InterfaceName = view.Name
 	out.Address = view.IP
+	if a.events != nil {
+		a.events.PublishDesktop(events.TypeSessionCreated, sessionView(s, ""))
+	}
 	return out, nil
 }
 
@@ -1276,6 +1964,9 @@ func (a *App) EndSession(key string) error {
 	if a.sessions.Len() == 0 {
 		a.registry.Clear()
 		if !a.isGuestRoomActive() {
+			if a.tray != nil {
+				a.tray.Stop()
+			}
 			a.stopServer()
 		}
 	}
@@ -1370,7 +2061,11 @@ func (a *App) ApproveUpload(id string) (UploadView, error) {
 	if err != nil {
 		return UploadView{}, err
 	}
-	return a.uploadViewWithStorage(up), nil
+	view := a.uploadViewWithStorage(up)
+	if a.events != nil {
+		a.events.PublishPersonal(up.Session, events.TypeUploadUpdated, view)
+	}
+	return view, nil
 }
 
 // RejectUpload refuses the pending upload with the given ID.
@@ -1382,7 +2077,11 @@ func (a *App) RejectUpload(id string) (UploadView, error) {
 	if err != nil {
 		return UploadView{}, err
 	}
-	return uploadView(up), nil
+	view := uploadView(up)
+	if a.events != nil {
+		a.events.PublishPersonal(up.Session, events.TypeUploadUpdated, view)
+	}
+	return view, nil
 }
 
 // CancelUpload aborts a pending, approved or streaming upload. A streaming
@@ -1391,7 +2090,13 @@ func (a *App) CancelUpload(id string) error {
 	if err := a.requireStandalone(id); err != nil {
 		return err
 	}
-	return a.transfers.Cancel(id)
+	err := a.transfers.Cancel(id)
+	if err == nil && a.events != nil {
+		if up, ok := a.transfers.Get(id); ok {
+			a.events.PublishPersonal(up.Session, events.TypeUploadUpdated, uploadView(up))
+		}
+	}
+	return err
 }
 
 // errBatchLinked refuses an individual decision on a batch item.
@@ -1562,7 +2267,11 @@ func (a *App) ApproveBatch(id string) (BatchView, error) {
 		return BatchView{}, err
 	}
 	v, err = a.coordinator.GetBatch(key, id)
-	return batchView(v), err
+	bv := batchView(v)
+	if err == nil && a.events != nil {
+		a.events.PublishPersonal(key, events.TypeBatchUpdated, bv)
+	}
+	return bv, err
 }
 
 // RejectBatch declines a batch. Rejecting an already rejected batch returns
@@ -1595,7 +2304,11 @@ func (a *App) RejectBatch(id string) (BatchView, error) {
 	// The root was reserved before the desktop decided; a rejected batch
 	// never publishes into it, so it must not stay on disk.
 	a.discardEmptyRoot(v)
-	return batchView(v), nil
+	bv := batchView(v)
+	if a.events != nil {
+		a.events.PublishPersonal(key, events.TypeBatchUpdated, bv)
+	}
+	return bv, nil
 }
 
 // CancelBatch cancels every unfinished item of a batch in both subsystems.
@@ -1633,6 +2346,9 @@ func (a *App) CancelBatch(id string) error {
 	// now empty and can be removed; one that published a file is non-empty
 	// and os.Remove refuses it.
 	a.discardEmptyRoot(v)
+	if a.events != nil {
+		a.events.PublishPersonal(key, events.TypeBatchUpdated, batchView(v))
+	}
 	return nil
 }
 
@@ -1652,7 +2368,11 @@ func (a *App) PauseBatch(id string) (BatchView, error) {
 	for _, cid := range contentIDs {
 		_ = a.transfers.Pause(cid)
 	}
-	return batchView(v), nil
+	bv := batchView(v)
+	if a.events != nil {
+		a.events.PublishPersonal(key, events.TypeBatchUpdated, bv)
+	}
+	return bv, nil
 }
 
 // ResumeBatch re-enables a paused or interrupted batch so clients can continue
@@ -1671,7 +2391,11 @@ func (a *App) ResumeBatch(id string) (BatchView, error) {
 	for _, cid := range contentIDs {
 		_ = a.transfers.Resume(cid)
 	}
-	return batchView(v), nil
+	bv := batchView(v)
+	if a.events != nil {
+		a.events.PublishPersonal(key, events.TypeBatchUpdated, bv)
+	}
+	return bv, nil
 }
 
 // DiscardBatch explicitly discards unfinished partial uploads in a batch,
@@ -1691,6 +2415,9 @@ func (a *App) DiscardBatch(id string) error {
 		_ = a.transfers.Discard(cid)
 	}
 	a.discardEmptyRoot(v)
+	if a.events != nil {
+		a.events.PublishPersonal(key, events.TypeBatchUpdated, batchView(v))
+	}
 	return nil
 }
 
@@ -1699,7 +2426,13 @@ func (a *App) DiscardUpload(id string) error {
 	if err := a.requireStandalone(id); err != nil {
 		return err
 	}
-	return a.transfers.Discard(id)
+	err := a.transfers.Discard(id)
+	if err == nil && a.events != nil {
+		if up, ok := a.transfers.Get(id); ok {
+			a.events.PublishPersonal(up.Session, events.TypeUploadUpdated, uploadView(up))
+		}
+	}
+	return err
 }
 
 // listBatches merges the coordinator's batch records over every session
@@ -1795,6 +2528,9 @@ func (a *App) PickFilesForSharing() ([]SharedFileView, error) {
 			Created: source.Created,
 		})
 	}
+	if len(views) > 0 && a.events != nil {
+		a.events.PublishPersonal("", events.TypeFilesUpdated, map[string]any{"count": len(views)})
+	}
 	return views, nil
 }
 
@@ -1812,7 +2548,11 @@ func (a *App) PickFolderForSharing() (SharedSourceView, error) {
 	if err != nil {
 		return SharedSourceView{}, err
 	}
-	return sharedSourceView(source), nil
+	sv := sharedSourceView(source)
+	if a.events != nil {
+		a.events.PublishPersonal("", events.TypeFilesUpdated, map[string]any{"sourceId": sv.ID})
+	}
+	return sv, nil
 }
 
 // AddDroppedSources registers native paths delivered by Wails file-drop
@@ -1838,6 +2578,9 @@ func (a *App) AddDroppedSources(paths []string) ([]SharedSourceView, error) {
 			continue
 		}
 		views = append(views, sharedSourceView(source))
+	}
+	if len(views) > 0 && a.events != nil {
+		a.events.PublishPersonal("", events.TypeFilesUpdated, map[string]any{"count": len(views)})
 	}
 	if len(failures) > 0 {
 		return views, fmt.Errorf("could not add dropped source(s): %s", strings.Join(failures, "; "))
@@ -1873,6 +2616,9 @@ func (a *App) RevokeSharedFile(id string) error {
 	if !a.registry.Remove(id) {
 		return errors.New("flitnix: that file is no longer shared")
 	}
+	if a.events != nil {
+		a.events.PublishPersonal("", events.TypeFilesUpdated, map[string]any{"removed": id})
+	}
 	return nil
 }
 
@@ -1880,6 +2626,9 @@ func (a *App) RevokeSharedFile(id string) error {
 func (a *App) RevokeSharedSource(id string) error {
 	if !a.registry.RemoveSource(id) {
 		return errors.New("flitnix: that source is no longer selected")
+	}
+	if a.events != nil {
+		a.events.PublishPersonal("", events.TypeFilesUpdated, map[string]any{"removed": id})
 	}
 	return nil
 }
@@ -1890,34 +2639,72 @@ func (a *App) ReceiveDirectory() string { return a.store.Dir() }
 
 // GetSettings returns the user settings and current effective download directory.
 func (a *App) GetSettings() SettingsView {
+	traySup := a.tray != nil && a.tray.Supported()
+	autoSup := a.autostart != nil && a.autostart.Supported()
+	notifySup := a.notify != nil && a.notify.Supported()
 	if a.settingsStore == nil {
 		return SettingsView{
-			Version:          settings.CurrentSchemaVersion,
-			Theme:            settings.ThemeSystem,
-			Locale:           "system",
-			EffectiveDir:     a.store.Dir(),
-			PreserveModTimes: true,
+			Version:                  settings.CurrentSchemaVersion,
+			Theme:                    settings.ThemeSystem,
+			Locale:                   "system",
+			EffectiveDir:             a.store.Dir(),
+			PreserveModTimes:         true,
+			MinimizeToTray:           true,
+			NotificationsEnabled:     true,
+			NotifyIncomingTransfers:  true,
+			NotifyCompletedTransfers: true,
+			NotifyFailedTransfers:    true,
+			NotifyQuickText:          true,
+			NotifyPairingRequests:    true,
+			NotifyGuestRequests:      true,
+			HistoryRetentionDays:     settings.DefaultHistoryRetentionDays,
+			HistoryMaxRecords:        settings.DefaultHistoryMaxRecords,
+			TraySupported:            traySup,
+			AutostartSupported:       autoSup,
+			NotificationsSupported:   notifySup,
 		}
 	}
 	s := a.settingsStore.Get()
+	launchEnabled := s.LaunchOnLogin
+	if a.autostart != nil && a.autostart.Supported() {
+		if osEnabled, err := a.autostart.IsEnabled(); err == nil {
+			launchEnabled = osEnabled
+		}
+	}
 	vis := a.GetVisibilityState()
 	expStr := ""
 	if !vis.TemporaryExpiresAt.IsZero() {
 		expStr = vis.TemporaryExpiresAt.UTC().Format(time.RFC3339Nano)
 	}
 	return SettingsView{
-		Version:                s.Version,
-		Theme:                  s.Theme,
-		Locale:                 s.Locale,
-		DownloadDir:            s.DownloadDir,
-		EffectiveDir:           a.store.Dir(),
-		AutoStartSession:       s.AutoStartSession,
-		PreserveModTimes:       s.PreserveModTimes,
-		PreferredInterface:     s.PreferredInterface,
-		VisibilityMode:         string(vis.Mode),
-		VisibilityPreviousMode: string(vis.PreviousRestrictiveMode),
-		VisibilityExpiresAt:    expStr,
-		QRSharingPaused:        vis.QRSharingPaused,
+		Version:                   s.Version,
+		Theme:                     s.Theme,
+		Locale:                    s.Locale,
+		DownloadDir:               s.DownloadDir,
+		EffectiveDir:              a.store.Dir(),
+		AutoStartSession:          s.AutoStartSession,
+		PreserveModTimes:          s.PreserveModTimes,
+		PreferredInterface:        s.PreferredInterface,
+		VisibilityMode:            string(vis.Mode),
+		VisibilityPreviousMode:    string(vis.PreviousRestrictiveMode),
+		VisibilityExpiresAt:       expStr,
+		QRSharingPaused:           vis.QRSharingPaused,
+		MinimizeToTray:            s.MinimizeToTray,
+		LaunchOnLogin:             launchEnabled,
+		TraySupported:             traySup,
+		AutostartSupported:        autoSup,
+		NotificationsEnabled:      s.NotificationsEnabled,
+		QuietMode:                 s.QuietMode,
+		HideNotificationFilenames: s.HideNotificationFilenames,
+		NotifyIncomingTransfers:   s.NotifyIncomingTransfers,
+		NotifyCompletedTransfers:  s.NotifyCompletedTransfers,
+		NotifyFailedTransfers:     s.NotifyFailedTransfers,
+		NotifyQuickText:           s.NotifyQuickText,
+		NotifyPairingRequests:     s.NotifyPairingRequests,
+		NotifyGuestRequests:       s.NotifyGuestRequests,
+		NotificationsSupported:    notifySup,
+		HistoryRetentionDays:      s.HistoryRetentionDays,
+		HistoryMaxRecords:         s.HistoryMaxRecords,
 	}
 }
 
@@ -1977,21 +2764,44 @@ func (a *App) SaveSettings(view SettingsView) error {
 		}
 	}
 	current := a.settingsStore.Get()
+	if view.LaunchOnLogin != current.LaunchOnLogin && a.autostart != nil {
+		if err := a.autostart.SetEnabled(view.LaunchOnLogin); err != nil {
+			return err
+		}
+	}
 	s := settings.Settings{
-		Version:                view.Version,
-		Theme:                  view.Theme,
-		Locale:                 view.Locale,
-		DownloadDir:            view.DownloadDir,
-		AutoStartSession:       view.AutoStartSession,
-		PreserveModTimes:       view.PreserveModTimes,
-		PreferredInterface:     view.PreferredInterface,
-		VisibilityMode:         current.VisibilityMode,
-		VisibilityPreviousMode: current.VisibilityPreviousMode,
-		VisibilityExpiresAt:    current.VisibilityExpiresAt,
+		Version:                   view.Version,
+		Theme:                     view.Theme,
+		Locale:                    view.Locale,
+		DownloadDir:               view.DownloadDir,
+		AutoStartSession:          view.AutoStartSession,
+		PreserveModTimes:          view.PreserveModTimes,
+		PreferredInterface:        view.PreferredInterface,
+		VisibilityMode:            current.VisibilityMode,
+		VisibilityPreviousMode:    current.VisibilityPreviousMode,
+		VisibilityExpiresAt:       current.VisibilityExpiresAt,
+		MinimizeToTray:            view.MinimizeToTray,
+		LaunchOnLogin:             view.LaunchOnLogin,
+		NotificationsEnabled:      view.NotificationsEnabled,
+		QuietMode:                 view.QuietMode,
+		HideNotificationFilenames: view.HideNotificationFilenames,
+		NotifyIncomingTransfers:   view.NotifyIncomingTransfers,
+		NotifyCompletedTransfers:  view.NotifyCompletedTransfers,
+		NotifyFailedTransfers:     view.NotifyFailedTransfers,
+		NotifyQuickText:           view.NotifyQuickText,
+		NotifyPairingRequests:     view.NotifyPairingRequests,
+		NotifyGuestRequests:       view.NotifyGuestRequests,
+		HistoryRetentionDays:      view.HistoryRetentionDays,
+		HistoryMaxRecords:         view.HistoryMaxRecords,
 	}
 	if err := a.settingsStore.Save(s); err != nil {
 		return err
 	}
+	if a.notify != nil {
+		a.notify.SetPolicy(a.notifyPolicyFromSettings())
+	}
+	_, _ = a.ApplyHistoryRetentionNow()
+	a.updateTrayState()
 	if a.store != nil {
 		a.store.SetPreserveModTimes(a.settingsStore.Get().PreserveModTimes)
 		if err := a.store.SetDir(s.DownloadDir); err != nil {
@@ -2017,9 +2827,17 @@ func (a *App) ResetSettings() (SettingsView, error) {
 			return SettingsView{}, errors.New("flitnix: cannot reset receive directory while transfers are active")
 		}
 	}
+	prevLaunch := a.settingsStore.Get().LaunchOnLogin
 	if _, err := a.settingsStore.Reset(); err != nil {
 		return SettingsView{}, err
 	}
+	if prevLaunch && a.autostart != nil {
+		_ = a.autostart.SetEnabled(false)
+	}
+	if a.notify != nil {
+		a.notify.SetPolicy(a.notifyPolicyFromSettings())
+	}
+	a.updateTrayState()
 	if a.store != nil {
 		a.store.SetPreserveModTimes(a.settingsStore.Get().PreserveModTimes)
 		_ = a.store.SetDir("")
@@ -2447,13 +3265,21 @@ func (a *App) ApproveGuest(guestID string) error {
 		return errors.New("flitnix: no active guest room")
 	}
 	err := room.ApproveGuest(guestID)
-	if err == nil && a.auditStore != nil {
-		a.auditStore.Record(audit.Entry{
-			EventType: audit.EventGuestApproved,
-			RoomID:    room.ID,
-			GuestID:   guestID,
-			Outcome:   audit.OutcomeSuccess,
-		})
+	if err == nil {
+		if a.auditStore != nil {
+			a.auditStore.Record(audit.Entry{
+				EventType: audit.EventGuestApproved,
+				RoomID:    room.ID,
+				GuestID:   guestID,
+				Outcome:   audit.OutcomeSuccess,
+			})
+		}
+		if a.events != nil {
+			a.events.PublishGuest(room.ID, guestID, events.TypeGuestStatus, map[string]any{
+				"guestId": guestID,
+				"state":   string(guest.GuestApproved),
+			})
+		}
 	}
 	return err
 }
@@ -2464,13 +3290,22 @@ func (a *App) RejectGuest(guestID string) error {
 		return errors.New("flitnix: no active guest room")
 	}
 	err := room.RejectGuest(guestID)
-	if err == nil && a.auditStore != nil {
-		a.auditStore.Record(audit.Entry{
-			EventType: audit.EventGuestRejected,
-			RoomID:    room.ID,
-			GuestID:   guestID,
-			Outcome:   audit.OutcomeRejected,
-		})
+	if err == nil {
+		if a.auditStore != nil {
+			a.auditStore.Record(audit.Entry{
+				EventType: audit.EventGuestRejected,
+				RoomID:    room.ID,
+				GuestID:   guestID,
+				Outcome:   audit.OutcomeRejected,
+			})
+		}
+		if a.events != nil {
+			a.events.PublishGuest(room.ID, guestID, events.TypeGuestStatus, map[string]any{
+				"guestId": guestID,
+				"state":   string(guest.GuestRejected),
+			})
+			a.events.CloseGuest(room.ID, guestID, "guest_rejected")
+		}
 	}
 	return err
 }
@@ -2481,13 +3316,22 @@ func (a *App) RevokeGuest(guestID string) error {
 		return errors.New("flitnix: no active guest room")
 	}
 	err := room.RevokeGuest(guestID)
-	if err == nil && a.auditStore != nil {
-		a.auditStore.Record(audit.Entry{
-			EventType: audit.EventGuestRevoked,
-			RoomID:    room.ID,
-			GuestID:   guestID,
-			Outcome:   audit.OutcomeCanceled,
-		})
+	if err == nil {
+		if a.auditStore != nil {
+			a.auditStore.Record(audit.Entry{
+				EventType: audit.EventGuestRevoked,
+				RoomID:    room.ID,
+				GuestID:   guestID,
+				Outcome:   audit.OutcomeCanceled,
+			})
+		}
+		if a.events != nil {
+			a.events.PublishGuest(room.ID, guestID, events.TypeGuestStatus, map[string]any{
+				"guestId": guestID,
+				"state":   string(guest.GuestRevoked),
+			})
+			a.events.CloseGuest(room.ID, guestID, "guest_revoked")
+		}
 	}
 	return err
 }
@@ -2498,13 +3342,25 @@ func (a *App) ApproveGuestUpload(uploadID string) error {
 		return errors.New("flitnix: no active guest room")
 	}
 	err := room.ApproveUpload(uploadID)
-	if err == nil && a.auditStore != nil {
-		a.auditStore.Record(audit.Entry{
-			EventType: audit.EventUploadApproved,
-			RoomID:    room.ID,
-			Details:   fmt.Sprintf("upload_id: %s", uploadID),
-			Outcome:   audit.OutcomeSuccess,
-		})
+	if err == nil {
+		if a.auditStore != nil {
+			a.auditStore.Record(audit.Entry{
+				EventType: audit.EventUploadApproved,
+				RoomID:    room.ID,
+				Details:   fmt.Sprintf("upload_id: %s", uploadID),
+				Outcome:   audit.OutcomeSuccess,
+			})
+		}
+		if a.events != nil {
+			if up, uErr := room.GetUpload(uploadID); uErr == nil {
+				a.events.PublishGuest(room.ID, up.GuestID, events.TypeGuestUploadUpdated, map[string]any{
+					"id":    up.ID,
+					"name":  up.FileName,
+					"size":  up.Size,
+					"state": string(up.State),
+				})
+			}
+		}
 	}
 	return err
 }
@@ -2515,13 +3371,25 @@ func (a *App) RejectGuestUpload(uploadID string) error {
 		return errors.New("flitnix: no active guest room")
 	}
 	err := room.RejectUpload(uploadID)
-	if err == nil && a.auditStore != nil {
-		a.auditStore.Record(audit.Entry{
-			EventType: audit.EventUploadRejected,
-			RoomID:    room.ID,
-			Details:   fmt.Sprintf("upload_id: %s", uploadID),
-			Outcome:   audit.OutcomeRejected,
-		})
+	if err == nil {
+		if a.auditStore != nil {
+			a.auditStore.Record(audit.Entry{
+				EventType: audit.EventUploadRejected,
+				RoomID:    room.ID,
+				Details:   fmt.Sprintf("upload_id: %s", uploadID),
+				Outcome:   audit.OutcomeRejected,
+			})
+		}
+		if a.events != nil {
+			if up, uErr := room.GetUpload(uploadID); uErr == nil {
+				a.events.PublishGuest(room.ID, up.GuestID, events.TypeGuestUploadUpdated, map[string]any{
+					"id":    up.ID,
+					"name":  up.FileName,
+					"size":  up.Size,
+					"state": string(up.State),
+				})
+			}
+		}
 	}
 	return err
 }
@@ -2546,7 +3414,17 @@ func (a *App) EndGuestRoom() error {
 		roomID = room.ID
 	}
 	err := a.guestMgr.EndRoom()
+	if err == nil && a.events != nil && roomID != "" {
+		a.events.PublishGuest(roomID, "", events.TypeGuestStatus, map[string]any{
+			"state": "ended",
+			"error": "room_ended",
+		})
+		a.events.CloseRoom(roomID, "room_ended")
+	}
 	if a.sessions.Len() == 0 {
+		if a.tray != nil {
+			a.tray.Stop()
+		}
 		a.stopServer()
 	}
 	if a.auditStore != nil && roomID != "" {
@@ -2854,6 +3732,9 @@ func (a *App) SendTextMessage(sessionKey, content string) (TextMessageView, erro
 	if err != nil {
 		return TextMessageView{}, err
 	}
+	if a.events != nil {
+		a.events.PublishPersonal(sessionKey, events.TypeTextMessage, msg)
+	}
 	return TextMessageView{
 		ID:        msg.ID,
 		Sender:    msg.Sender,
@@ -2908,6 +3789,9 @@ func (a *App) ClearTextMessages(sessionKey string) error {
 	}
 	if sessionKey != "" {
 		a.textStore.Clear(sessionKey)
+		if a.events != nil {
+			a.events.PublishPersonal(sessionKey, events.TypeTextCleared, map[string]any{})
+		}
 	}
 	return nil
 }
@@ -2935,6 +3819,9 @@ func (a *App) RemoveTrustedDevice(id string) error {
 		if a.sessions.Len() == 0 {
 			a.registry.Clear()
 			if !a.isGuestRoomActive() {
+				if a.tray != nil {
+					a.tray.Stop()
+				}
 				a.stopServer()
 			}
 		}
