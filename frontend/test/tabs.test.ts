@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 // Tab configuration model matching App.svelte
-const tabOrder = ['personal', 'guest', 'templates', 'devices', 'history', 'audit', 'settings'] as const
+const tabOrder = ['personal', 'computers', 'guest', 'templates', 'devices', 'history', 'audit', 'settings'] as const
 type TabId = typeof tabOrder[number]
 
 function getNextTab(currentTab: TabId, key: string): TabId {
@@ -30,15 +30,16 @@ function getRovingTabindex(tab: TabId, activeTab: TabId): number {
   return tab === activeTab ? 0 : -1
 }
 
-test('Tab navigation: order contains all 7 tabs including History and Settings', () => {
-  assert.equal(tabOrder.length, 7)
+test('Tab navigation: order contains all 8 tabs including Computer Sharing, History, and Settings', () => {
+  assert.equal(tabOrder.length, 8)
   assert.deepEqual(Array.from(tabOrder), [
-    'personal', 'guest', 'templates', 'devices', 'history', 'audit', 'settings'
+    'personal', 'computers', 'guest', 'templates', 'devices', 'history', 'audit', 'settings'
   ])
 })
 
 test('Tab navigation: ArrowRight advances and wraps in horizontal orientation', () => {
-  assert.equal(getNextTab('personal', 'ArrowRight'), 'guest')
+  assert.equal(getNextTab('personal', 'ArrowRight'), 'computers')
+  assert.equal(getNextTab('computers', 'ArrowRight'), 'guest')
   assert.equal(getNextTab('guest', 'ArrowRight'), 'templates')
   assert.equal(getNextTab('templates', 'ArrowRight'), 'devices')
   assert.equal(getNextTab('devices', 'ArrowRight'), 'history')
@@ -54,7 +55,8 @@ test('Tab navigation: ArrowLeft retreats and wraps in horizontal orientation', (
   assert.equal(getNextTab('history', 'ArrowLeft'), 'devices')
   assert.equal(getNextTab('devices', 'ArrowLeft'), 'templates')
   assert.equal(getNextTab('templates', 'ArrowLeft'), 'guest')
-  assert.equal(getNextTab('guest', 'ArrowLeft'), 'personal')
+  assert.equal(getNextTab('guest', 'ArrowLeft'), 'computers')
+  assert.equal(getNextTab('computers', 'ArrowLeft'), 'personal')
 })
 
 test('Tab navigation: ArrowUp and ArrowDown are not intercepted, preserving page scrolling', () => {
@@ -87,6 +89,7 @@ test('Tab navigation: Roving tabindex sets 0 on active tab and -1 on all others'
 test('Tab navigation: Panel and tab IDs have symmetric ARIA relationships', () => {
   const panelMap: Record<TabId, { tabId: string, panelId: string, role: string }> = {
     personal: { tabId: 'tab-personal', panelId: 'panel-personal', role: 'tabpanel' },
+    computers: { tabId: 'tab-computers', panelId: 'panel-computers', role: 'tabpanel' },
     guest: { tabId: 'tab-guest', panelId: 'panel-guest', role: 'tabpanel' },
     templates: { tabId: 'tab-templates', panelId: 'panel-templates', role: 'tabpanel' },
     devices: { tabId: 'tab-devices', panelId: 'panel-devices', role: 'tabpanel' },

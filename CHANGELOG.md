@@ -10,6 +10,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Desktop-to-Desktop GUI Sharing & Single-Port TLS 1.3 Multiplexing (Phase 2 — G9)**:
+  - Added single-port TLS 1.3 + HTTP connection multiplexing (`internal/server/tls_mux.go`) backed by each desktop host's Ed25519 self-signed identity certificate (`NewHostIdentityCertificate`), preserving zero-install HTTP QR browsing alongside TOFU-pinned TLS 1.3 desktop transfers (`internal/client/tls.go`).
+  - Added `POST /api/peer/challenge`, `POST /api/peer/connect`, `peer_transfer.go` orchestration, bidirectional file/folder staging, live job progress/cancellation, and the dedicated **Computer Sharing** tab (`frontend/src/views/ComputerSharingView.svelte`) across Windows, macOS, and Linux.
+- **Automatic Nearby LAN Discovery (Phase 2 — G3)**:
+  - Implemented `internal/discovery` combining standard `_flitnix._tcp.local.` mDNS announcements (`mdns_wire.go`) and UDP multicast (`239.255.43.82:43822`) bound strictly to `internal/netenv`'s active non-VPN interface.
+  - Added Ed25519-signed sanitized discovery frames, unlinkable HMAC trusted probes in `VisibilityTrustedOnly`, strict radio silence in `VisibilityHidden`, stale-peer eviction, and live `"discovery:peers"` desktop updates.
+- **Firewall Diagnostics & Connection Helper (Phase 2 — G27)**:
+  - Added `firewall_status` as the 8th Connection Doctor check (`internal/doctor/firewall.go`) supporting Windows (`netsh advfirewall`), Linux (`ufw`/`firewall-cmd`/`nft`/`iptables`), and macOS (`socketfilterfw`) with a 1.5s probe timeout, `affectedPort` metadata, copyable OS remediation commands in `ConnectionDoctorModal.svelte`, and mobile reachability tips.
+- **Mobile Browser Trusted-Device Pairing & One-Tap Reconnect (Phase 2 — G4)**:
+  - Vendored `nacl-fast.min.js` (`tweetnacl@1.0.3`) and implemented `internal/server/assets/device-crypto.js` using Ed25519 + X25519 + 271-byte SAS verification + IndexedDB storage so standard mobile browsers on plain HTTP LAN origins can pair and reconnect without installing an app or PWA.
+  - Added `POST /api/device-sessions/challenge` and `POST /api/device-sessions/verify` (`internal/server/device_sessions.go`), `#device=` one-tap reconnect URLs, and a global desktop SAS pairing approval modal in `App.svelte`.
+- **Six-Digit One-Time Connection Code (Phase 2 — G13)**:
+  - Added `internal/session/shortcode.go` (`ShortCodeManager`) issuing `crypto/rand` 6-digit single-use codes with a 3-minute TTL, constant-time HMAC validation, per-IP rate limiting, and `POST /api/connect-code`, paired with a `"Connect with 6-Digit Code"` form on the mobile browser landing page.
+- **Device Visibility & Conditional Auto-Approval (Phase 2 — G15)**:
+  - Added a persistent 4-mode visibility state machine (`hidden`, `trusted`, `temporary_everyone` with 10-minute auto-revert, `everyone`) in `internal/devices/visibility.go` and `internal/settings` (`CurrentSchemaVersion = 3`), plus independent QR pause/revoke controls (`SetQRPaused`, `RevokeByDeviceID`).
+  - Added per-device conditional auto-approval (`internal/devices/policy.go`) with configurable byte size limits and executable/script blocking (`AutoApproveMaxBytes`, `BlockExecutables`, `BlockScripts`), trust/reason badges, and policy controls in `TrustedDevicesView.svelte` and `PersonalTransferView.svelte`.
+- **QR-First Mobile Hardening (Phase 2 — Priority Zero)**:
+  - Fixed iOS Safari single-file download fallback, mobile `fmtBytes` reference error, and drag-and-drop styling on `#send-panel`.
 - **Original Modification Timestamp Preservation (Phase 1 — G22)**:
   - Propagated validated sender modification timestamps (`lastModifiedMs`) from the mobile browser (`File.lastModified`) and Go CLI (`client.BuildManifest`) through `POST /api/batches` and `POST /api/uploads`, persisting them in recovery journals and resumable `.meta` sidecars across pauses and restarts.
   - Applied `os.Chtimes` atomically to staged `.part` files prior to publication in both single-pass `PUT` and resumable `PATCH` commits so received files retain their original capture/edit dates immediately upon appearing on disk.

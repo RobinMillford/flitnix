@@ -9,17 +9,14 @@ import (
 
 // newTestApp builds a fully wired App whose runtime context is ready and
 // whose network source is injectable. tests re-point a.source at fakes.
-// This is the unchanged Linux/Windows implementation.
+//
+// Linux/Windows entry point. On these platforms the default receive directory
+// also comes from the home directory (HOME on Linux, USERPROFILE on Windows),
+// so construction goes through the shared isolation helper rather than the
+// original XDG_CONFIG_HOME/AppData-only setup.
 func newTestApp(t *testing.T) *App {
 	t.Helper()
-	cfgDir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", cfgDir)
-	t.Setenv("AppData", cfgDir)
-	a, err := NewApp()
-	if err != nil {
-		t.Fatalf("NewApp: %v", err)
-	}
+	a := newIsolatedApp(t)
 	a.startup(context.Background())
-	t.Cleanup(func() { a.shutdown(context.Background()) })
 	return a
 }

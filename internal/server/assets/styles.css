@@ -170,8 +170,19 @@ select:focus-visible,
   cursor: not-allowed;
   box-shadow: none;
 }
-  opacity: 1;
-  cursor: not-allowed;
+.offscreen-frame {
+  position: fixed;
+  left: -9999px;
+  top: -9999px;
+  width: 1px;
+  height: 1px;
+  border: 0;
+  opacity: 0.01;
+  pointer-events: none;
+}
+.panel--dragover {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(34, 211, 238, 0.2);
 }
 
 .queue { display: grid; gap: 0.6rem; margin: 0.85rem 0 0; padding: 0; list-style: none; }
@@ -497,6 +508,110 @@ select:focus-visible,
 
 .app__footer { margin-top: 1.5rem; text-align: center; }
 .app__footer p { margin: 0; color: var(--text-faint); font-size: 0.85rem; }
+
+.code-form {
+  margin-top: 1rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--line);
+}
+.code-label {
+  display: block;
+  font-size: 0.88rem;
+  font-weight: 600;
+  margin-bottom: 0.45rem;
+}
+.code-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+.code-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.65rem 0.75rem;
+  font-size: 1.2rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-align: center;
+  border-radius: 0.55rem;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.code-error {
+  margin: 0.5rem 0 0;
+  font-size: 0.85rem;
+  color: var(--danger, #dc2626);
+  font-weight: 500;
+}
+.code-hint {
+  margin: 0.45rem 0 0;
+  font-size: 0.78rem;
+}
+
+.reconnect-panel {
+  margin-top: 0.85rem;
+  padding: 0.85rem;
+  border-radius: 0.65rem;
+  border: 1px solid var(--line);
+  background: var(--bg);
+}
+.reconnect-label {
+  margin: 0 0 0.55rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.pair-controls {
+  margin-top: 0.65rem;
+}
+.sas-box {
+  margin-top: 0.85rem;
+  padding: 0.9rem;
+  border-radius: 0.65rem;
+  border: 1px solid var(--accent);
+  background: rgba(59, 130, 246, 0.08);
+  text-align: center;
+}
+.sas-label {
+  margin: 0 0 0.45rem;
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+.sas-digits {
+  font-size: 1.75rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  margin: 0.25rem 0 0.4rem;
+}
+.paired-info-box {
+  margin-top: 0.65rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+.paired-meta {
+  margin: 0;
+  font-size: 0.86rem;
+  color: var(--text-muted);
+}
+.helper-tips {
+  margin-top: 0.9rem;
+  font-size: 0.84rem;
+  color: var(--text-muted);
+}
+.helper-tips summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text);
+}
+.helper-tips ul {
+  margin: 0.45rem 0 0;
+  padding-left: 1.2rem;
+  line-height: 1.45;
+}
 
 @media (prefers-reduced-motion: reduce) {
   *,

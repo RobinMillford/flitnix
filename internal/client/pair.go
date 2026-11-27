@@ -36,6 +36,11 @@ type PairResult struct {
 
 // Pair executes the full mutual commitment pairing handshake against a remote Flitnix host.
 func Pair(ctx context.Context, target *Target, deviceName string, id *ClientIdentity, kh *KnownHosts, confirmSAS ConfirmSASFunc) (*PairResult, error) {
+	return PairWithHTTPClient(ctx, nil, target, deviceName, id, kh, confirmSAS)
+}
+
+// PairWithHTTPClient executes the full mutual commitment pairing handshake using an optional custom HTTP client (such as TLS 1.3).
+func PairWithHTTPClient(ctx context.Context, httpClient *http.Client, target *Target, deviceName string, id *ClientIdentity, kh *KnownHosts, confirmSAS ConfirmSASFunc) (*PairResult, error) {
 	if target == nil {
 		return nil, errors.New("client: target is required")
 	}
@@ -64,8 +69,10 @@ func Pair(ctx context.Context, target *Target, deviceName string, id *ClientIden
 		deviceName = hostname
 	}
 
-	httpClient := &http.Client{
-		Timeout: 30 * time.Second,
+	if httpClient == nil {
+		httpClient = &http.Client{
+			Timeout: 30 * time.Second,
+		}
 	}
 
 	// 1. Generate client ephemeral keypair (ec, Ec) and opening salt rc

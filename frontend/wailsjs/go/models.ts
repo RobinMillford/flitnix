@@ -100,6 +100,52 @@ export namespace audit {
 
 }
 
+export namespace client {
+
+	export class PairResult {
+	    hostId: string;
+	    deviceId: string;
+	    hostPublicKey: string;
+	    sasDisplay: string;
+	    hostName: string;
+
+	    static createFrom(source: any = {}) {
+	        return new PairResult(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.hostId = source["hostId"];
+	        this.deviceId = source["deviceId"];
+	        this.hostPublicKey = source["hostPublicKey"];
+	        this.sasDisplay = source["sasDisplay"];
+	        this.hostName = source["hostName"];
+	    }
+	}
+
+	export class PeerProbeInfo {
+	    address: string;
+	    hostId: string;
+	    publicKey: string;
+	    tlsActive: boolean;
+	    reachable: boolean;
+
+	    static createFrom(source: any = {}) {
+	        return new PeerProbeInfo(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.address = source["address"];
+	        this.hostId = source["hostId"];
+	        this.publicKey = source["publicKey"];
+	        this.tlsActive = source["tlsActive"];
+	        this.reachable = source["reachable"];
+	    }
+	}
+
+}
+
 export namespace devices {
 
 	export class Device {
@@ -111,6 +157,9 @@ export namespace devices {
 	    // Go type: time
 	    lastSeen: any;
 	    autoApprove: boolean;
+	    maxAutoApproveBytes: number;
+	    allowExecutables: boolean;
+	    allowScripts: boolean;
 
 	    static createFrom(source: any = {}) {
 	        return new Device(source);
@@ -124,6 +173,9 @@ export namespace devices {
 	        this.pairedAt = this.convertValues(source["pairedAt"], null);
 	        this.lastSeen = this.convertValues(source["lastSeen"], null);
 	        this.autoApprove = source["autoApprove"];
+	        this.maxAutoApproveBytes = source["maxAutoApproveBytes"];
+	        this.allowExecutables = source["allowExecutables"];
+	        this.allowScripts = source["allowScripts"];
 	    }
 
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -174,6 +226,90 @@ export namespace devices {
 	        this.failureCount = source["failureCount"];
 	    }
 	}
+	export class DevicePolicy {
+	    autoApprove: boolean;
+	    maxAutoApproveBytes: number;
+	    allowExecutables: boolean;
+	    allowScripts: boolean;
+
+	    static createFrom(source: any = {}) {
+	        return new DevicePolicy(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.autoApprove = source["autoApprove"];
+	        this.maxAutoApproveBytes = source["maxAutoApproveBytes"];
+	        this.allowExecutables = source["allowExecutables"];
+	        this.allowScripts = source["allowScripts"];
+	    }
+	}
+	export class VisibilityState {
+	    mode: string;
+	    previousRestrictiveMode: string;
+	    // Go type: time
+	    temporaryExpiresAt?: any;
+	    qrSharingPaused: boolean;
+	    remainingSeconds: number;
+	    // Go type: time
+	    updatedAt?: any;
+
+	    static createFrom(source: any = {}) {
+	        return new VisibilityState(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.mode = source["mode"];
+	        this.previousRestrictiveMode = source["previousRestrictiveMode"];
+	        this.temporaryExpiresAt = source["temporaryExpiresAt"];
+	        this.qrSharingPaused = source["qrSharingPaused"];
+	        this.remainingSeconds = source["remainingSeconds"];
+	        this.updatedAt = source["updatedAt"];
+	    }
+	}
+
+}
+
+export namespace discovery {
+
+	export class Peer {
+	    hostId: string;
+	    publicKey: string;
+	    deviceName: string;
+	    os: string;
+	    version: string;
+	    address: string;
+	    port: number;
+	    addresses?: string[];
+	    trusted: boolean;
+	    autoApprove: boolean;
+	    nameConflictWarning?: boolean;
+	    interfaceName?: string;
+	    // Go type: time
+	    lastSeen?: any;
+
+	    static createFrom(source: any = {}) {
+	        return new Peer(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.hostId = source["hostId"];
+	        this.publicKey = source["publicKey"];
+	        this.deviceName = source["deviceName"];
+	        this.os = source["os"];
+	        this.version = source["version"];
+	        this.address = source["address"];
+	        this.port = source["port"];
+	        this.addresses = source["addresses"];
+	        this.trusted = source["trusted"];
+	        this.autoApprove = source["autoApprove"];
+	        this.nameConflictWarning = source["nameConflictWarning"];
+	        this.interfaceName = source["interfaceName"];
+	        this.lastSeen = source["lastSeen"];
+	    }
+	}
 
 }
 
@@ -185,6 +321,9 @@ export namespace doctor {
 	    status: string;
 	    message: string;
 	    remediation?: string;
+	    firewallState?: string;
+	    affectedPort?: number;
+	    command?: string;
 
 	    static createFrom(source: any = {}) {
 	        return new DiagnosticItem(source);
@@ -197,6 +336,9 @@ export namespace doctor {
 	        this.status = source["status"];
 	        this.message = source["message"];
 	        this.remediation = source["remediation"];
+	        this.firewallState = source["firewallState"];
+	        this.affectedPort = source["affectedPort"];
+	        this.command = source["command"];
 	    }
 	}
 	export class DiagnosticReport {
@@ -423,6 +565,155 @@ export namespace guest {
 
 export namespace main {
 
+	export class LocalPeerInfo {
+	    hostId: string;
+	    publicKey: string;
+	    fingerprint: string;
+	    deviceName: string;
+	    os: string;
+	    version: string;
+	    address: string;
+	    port: number;
+
+	    static createFrom(source: any = {}) {
+	        return new LocalPeerInfo(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.hostId = source["hostId"];
+	        this.publicKey = source["publicKey"];
+	        this.fingerprint = source["fingerprint"];
+	        this.deviceName = source["deviceName"];
+	        this.os = source["os"];
+	        this.version = source["version"];
+	        this.address = source["address"];
+	        this.port = source["port"];
+	    }
+	}
+
+	export class PeerPairRequest {
+	    address: string;
+	    port?: number;
+	    expectedHostId?: string;
+	    expectedPubKey?: string;
+	    peerName?: string;
+	    shortCode?: string;
+	    pairingToken?: string;
+
+	    static createFrom(source: any = {}) {
+	        return new PeerPairRequest(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.address = source["address"];
+	        this.port = source["port"];
+	        this.expectedHostId = source["expectedHostId"];
+	        this.expectedPubKey = source["expectedPubKey"];
+	        this.peerName = source["peerName"];
+	        this.shortCode = source["shortCode"];
+	        this.pairingToken = source["pairingToken"];
+	    }
+	}
+
+	export class PeerPairSASPrompt {
+	    requestId: string;
+	    peerName: string;
+	    peerHostId: string;
+	    sas: string;
+	    isPinned: boolean;
+
+	    static createFrom(source: any = {}) {
+	        return new PeerPairSASPrompt(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.requestId = source["requestId"];
+	        this.peerName = source["peerName"];
+	        this.peerHostId = source["peerHostId"];
+	        this.sas = source["sas"];
+	        this.isPinned = source["isPinned"];
+	    }
+	}
+
+	export class PeerSendRequest {
+	    address: string;
+	    port?: number;
+	    expectedHostId?: string;
+	    expectedPubKey?: string;
+	    peerName?: string;
+	    shortCode?: string;
+	    pairingToken?: string;
+	    paths: string[];
+
+	    static createFrom(source: any = {}) {
+	        return new PeerSendRequest(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.address = source["address"];
+	        this.port = source["port"];
+	        this.expectedHostId = source["expectedHostId"];
+	        this.expectedPubKey = source["expectedPubKey"];
+	        this.peerName = source["peerName"];
+	        this.shortCode = source["shortCode"];
+	        this.pairingToken = source["pairingToken"];
+	        this.paths = source["paths"];
+	    }
+	}
+
+	export class PeerTransferJob {
+	    id: string;
+	    peerHostId?: string;
+	    peerName: string;
+	    peerAddress: string;
+	    kind: string;
+	    rootName?: string;
+	    totalItems: number;
+	    completedItems: number;
+	    totalBytes: number;
+	    sentBytes: number;
+	    speed: number;
+	    state: string;
+	    currentFile?: string;
+	    trustedPeer: boolean;
+	    verified: boolean;
+	    error?: string;
+	    // Go type: time
+	    createdAt?: any;
+	    // Go type: time
+	    completedAt?: any;
+
+	    static createFrom(source: any = {}) {
+	        return new PeerTransferJob(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.peerHostId = source["peerHostId"];
+	        this.peerName = source["peerName"];
+	        this.peerAddress = source["peerAddress"];
+	        this.kind = source["kind"];
+	        this.rootName = source["rootName"];
+	        this.totalItems = source["totalItems"];
+	        this.completedItems = source["completedItems"];
+	        this.totalBytes = source["totalBytes"];
+	        this.sentBytes = source["sentBytes"];
+	        this.speed = source["speed"];
+	        this.state = source["state"];
+	        this.currentFile = source["currentFile"];
+	        this.trustedPeer = source["trustedPeer"];
+	        this.verified = source["verified"];
+	        this.error = source["error"];
+	        this.createdAt = source["createdAt"];
+	        this.completedAt = source["completedAt"];
+	    }
+	}
+
 	export class AuditListResult {
 	    entries: audit.Entry[];
 	    total: number;
@@ -507,6 +798,10 @@ export namespace main {
 	    error?: string;
 	    storageFits: boolean;
 	    storageWarning?: string;
+	    deviceId?: string;
+	    deviceName?: string;
+	    trustedDevice?: boolean;
+	    approvalReason?: string;
 
 	    static createFrom(source: any = {}) {
 	        return new BatchView(source);
@@ -530,6 +825,10 @@ export namespace main {
 	        this.error = source["error"];
 	        this.storageFits = source["storageFits"];
 	        this.storageWarning = source["storageWarning"];
+	        this.deviceId = source["deviceId"];
+	        this.deviceName = source["deviceName"];
+	        this.trustedDevice = source["trustedDevice"];
+	        this.approvalReason = source["approvalReason"];
 	    }
 
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -911,6 +1210,10 @@ export namespace main {
 	    autoStartSession: boolean;
 	    preserveModTimes: boolean;
 	    preferredInterface: string;
+	    visibilityMode?: string;
+	    visibilityPreviousMode?: string;
+	    visibilityExpiresAt?: string;
+	    qrSharingPaused?: boolean;
 
 	    static createFrom(source: any = {}) {
 	        return new SettingsView(source);
@@ -926,6 +1229,10 @@ export namespace main {
 	        this.autoStartSession = source["autoStartSession"];
 	        this.preserveModTimes = source["preserveModTimes"] !== undefined ? source["preserveModTimes"] : true;
 	        this.preferredInterface = source["preferredInterface"];
+	        this.visibilityMode = source["visibilityMode"];
+	        this.visibilityPreviousMode = source["visibilityPreviousMode"];
+	        this.visibilityExpiresAt = source["visibilityExpiresAt"];
+	        this.qrSharingPaused = source["qrSharingPaused"];
 	    }
 	}
 	export class SharedFileView {
@@ -1064,6 +1371,10 @@ export namespace main {
 	    committedOffset?: number;
 	    storageFits: boolean;
 	    storageWarning?: string;
+	    deviceId?: string;
+	    deviceName?: string;
+	    trustedDevice?: boolean;
+	    approvalReason?: string;
 
 	    static createFrom(source: any = {}) {
 	        return new UploadView(source);
@@ -1084,6 +1395,10 @@ export namespace main {
 	        this.committedOffset = source["committedOffset"];
 	        this.storageFits = source["storageFits"];
 	        this.storageWarning = source["storageWarning"];
+	        this.deviceId = source["deviceId"];
+	        this.deviceName = source["deviceName"];
+	        this.trustedDevice = source["trustedDevice"];
+	        this.approvalReason = source["approvalReason"];
 	    }
 
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -1438,6 +1753,41 @@ export namespace version {
 	        this.architecture = source["architecture"];
 	        this.fullString = source["fullString"];
 	        this.isDev = source["isDev"];
+	    }
+	}
+
+}
+
+export namespace session {
+
+	export class ShortCodeView {
+	    code: string;
+	    formattedCode: string;
+	    sessionKey: string;
+	    // Go type: time
+	    createdAt?: any;
+	    // Go type: time
+	    expiresAt?: any;
+	    remainingSeconds: number;
+	    active: boolean;
+	    used: boolean;
+	    expired: boolean;
+
+	    static createFrom(source: any = {}) {
+	        return new ShortCodeView(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.code = source["code"];
+	        this.formattedCode = source["formattedCode"];
+	        this.sessionKey = source["sessionKey"];
+	        this.createdAt = source["createdAt"];
+	        this.expiresAt = source["expiresAt"];
+	        this.remainingSeconds = source["remainingSeconds"];
+	        this.active = source["active"];
+	        this.used = source["used"];
+	        this.expired = source["expired"];
 	    }
 	}
 

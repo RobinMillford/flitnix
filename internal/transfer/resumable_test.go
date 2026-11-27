@@ -297,3 +297,74 @@ func TestPauseResumeAndDiscardCleanupWithQuota(t *testing.T) {
 		t.Fatalf("DiscardBatch left files on disk: %+v", entries)
 	}
 }
+
+func TestSubmitChunkSpeedRemainsPositiveAfterFsyncAndSingleChunkSkipsMeta(t *testing.T) {
+	dir := t.TempDir()
+	st, err := NewStore(StoreConfig{Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(Config{Store: st})
+
+	// Exact 2 MiB payload (multiple of progressStep = 1 MiB) tests that
+	// post-fsync cleanup never overwrites speed with 0 or tail-bytes/fsync.
+	payload := deterministicPattern(2<<20, 0xA5)
+	u, err := svc.DeclareBatchItem("sess-spd", "", "", "two_meg.bin", int64(len(payload)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.DecideBatchItems([]string{u.ID}, true); err != nil {
+		t.Fatal(err)
+	}
+
+	var snapshots []Upload
+	res, err := svc.SubmitChunk(context.Background(), u.ID, "sess-spd", 0, int64(len(payload)), bytes.NewReader(payload), func(snap Upload) {
+		snapshots = append(snapshots, snap)
+	}, nil)
+	if err != nil {
+		t.Fatalf("SubmitChunk single: %v", err)
+	}
+	if !res.Completed || res.Written != int64(len(payload)) {
+		t.Fatalf("single chunk result = %+v, want Completed=true Written=%d", res, len(payload))
+	}
+	if len(snapshots) == 0 || snapshots[len(snapshots)-1].Speed <= 0 {
+		t.Fatalf("expected positive speed in final snapshot after fsync, got snapshots=%+v", snapshots)
+	}
+	entries, _ := os.ReadDir(dir)
+	var leftover int
+	for _, e := range entries {
+		if e.Name() != "two_meg.bin" {
+			leftover++
+		}
+	}
+	if leftover != 0 {
+		t.Fatalf("expected no leftover .part or .meta files, got %+v", entries)
+	}
+
+	// Multi-chunk path: chunk 1 writes .meta checkpoint; final chunk commits and cleans .meta.
+	multi := deterministicPattern(1<<20, 0x3C)
+	u2, err := svc.DeclareBatchItem("sess-spd", "", "", "two_step.bin", int64(len(multi)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.DecideBatchItems([]string{u2.ID}, true); err != nil {
+		t.Fatal(err)
+	}
+	half := int64(len(multi)) / 2
+	r1, err := svc.SubmitChunk(context.Background(), u2.ID, "sess-spd", 0, half, bytes.NewReader(multi[:half]), nil, nil)
+	if err != nil || r1.Completed || r1.CommittedOffset != half {
+		t.Fatalf("chunk 1 = %+v, err=%v", r1, err)
+	}
+	metaMatches, _ := filepath.Glob(filepath.Join(dir, "*"+MetaSuffix))
+	if len(metaMatches) != 1 {
+		t.Fatalf("expected 1 intermediate .meta checkpoint, got %v", metaMatches)
+	}
+	r2, err := svc.SubmitChunk(context.Background(), u2.ID, "sess-spd", half, half, bytes.NewReader(multi[half:]), nil, nil)
+	if err != nil || !r2.Completed {
+		t.Fatalf("chunk 2 = %+v, err=%v", r2, err)
+	}
+	metaAfter, _ := filepath.Glob(filepath.Join(dir, "*"+MetaSuffix))
+	if len(metaAfter) != 0 {
+		t.Fatalf("expected .meta removed after completion, got %v", metaAfter)
+	}
+}

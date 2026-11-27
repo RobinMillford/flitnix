@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/itsyamin/flitnix/internal/transfer"
@@ -67,21 +68,29 @@ type Client struct {
 
 // NewClient constructs an outbound transfer client for the given target.
 func NewClient(target *Target) *Client {
-	transport := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		ResponseHeaderTimeout: 30 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
+	return NewClientWithHTTPClient(target, nil)
+}
+
+// NewClientWithHTTPClient constructs an outbound transfer client using a caller-supplied HTTP client (such as TLS 1.3 pinned transport).
+func NewClientWithHTTPClient(target *Target, httpClient *http.Client) *Client {
+	if httpClient == nil {
+		transport := &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   10 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			ResponseHeaderTimeout: 30 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		}
+		httpClient = &http.Client{
+			Transport: transport,
+			Timeout:   0, // Streaming requests use context deadlines rather than a blanket client timeout
+		}
 	}
 
 	return &Client{
-		target: target,
-		httpClient: &http.Client{
-			Transport: transport,
-			Timeout:   0, // Streaming requests use context deadlines rather than a blanket client timeout
-		},
+		target:      target,
+		httpClient:  httpClient,
 		retryPolicy: DefaultRetryPolicy(),
 	}
 }
@@ -311,6 +320,13 @@ func (c *Client) WaitForApproval(ctx context.Context, batchID string, pollInterv
 // the endpoint does not advertise HEAD/PATCH support.
 // SHA-256 is verified over the complete local file against the server's digest.
 func (c *Client) StreamItem(ctx context.Context, batchID, itemID, localPath string, onProgress func(written, total int64)) (ItemResult, error) {
+	return c.StreamItemWithHint(ctx, batchID, itemID, localPath, 0, 0, onProgress)
+}
+
+// StreamItemWithHint streams one item using caller-known offset/chunk hints to
+// skip the initial HEAD roundtrip when starting a fresh resumable batch item,
+// falling back automatically to PUT on 404/405 or HEAD on 409 offset mismatch.
+func (c *Client) StreamItemWithHint(ctx context.Context, batchID, itemID, localPath string, initialOffset, chunkSizeHint int64, onProgress func(written, total int64)) (ItemResult, error) {
 	f, err := os.Open(localPath)
 	if err != nil {
 		return ItemResult{}, fmt.Errorf("client: cannot open local file %s: %w", localPath, err)
@@ -326,6 +342,9 @@ func (c *Client) StreamItem(ctx context.Context, batchID, itemID, localPath stri
 	reqURL := fmt.Sprintf("%s/api/batches/%s/items/%s/content", c.target.BaseURL, url.PathEscape(batchID), url.PathEscape(itemID))
 	policy := c.retryPolicy.normalized()
 	for attempt := 0; ; attempt++ {
+		if attempt == 0 && initialOffset == 0 && chunkSizeHint > 0 {
+			return c.streamItemChunks(ctx, f, localPath, reqURL, declaredSize, 0, chunkSizeHint, onProgress)
+		}
 		offset, chunkSize, supportsResumable, headErr := c.probeHead(ctx, reqURL, declaredSize)
 		if headErr != nil {
 			if !IsRetryableError(headErr) || attempt >= policy.MaxRetries {
@@ -389,11 +408,10 @@ func (c *Client) probeHead(ctx context.Context, reqURL string, declaredSize int6
 
 func computeFilePrefixHash(f *os.File, offset int64) (h io.Writer, sumFunc func() []byte, err error) {
 	hasher := sha256.New()
-	if _, serr := f.Seek(0, io.SeekStart); serr != nil {
-		return nil, nil, serr
-	}
+	// SectionReader reads through ReadAt, so hashing a prefix never moves the
+	// shared *os.File offset that another in-flight request body may be using.
 	if offset > 0 {
-		if _, cerr := io.CopyN(hasher, f, offset); cerr != nil {
+		if _, cerr := io.Copy(hasher, io.NewSectionReader(f, 0, offset)); cerr != nil {
 			return nil, nil, cerr
 		}
 	}
@@ -462,19 +480,23 @@ func (c *Client) streamItemChunks(ctx context.Context, f *os.File, localPath, re
 		if declaredSize-offset < lenChunk {
 			lenChunk = declaredSize - offset
 		}
-		if _, err := f.Seek(offset, io.SeekStart); err != nil {
-			return ItemResult{}, err
+		// Each attempt owns an independent section of the file. SectionReader
+		// reads through ReadAt and never moves the shared *os.File offset, so
+		// a response that arrives before the transport finishes draining this
+		// body cannot disturb a subsequent PUT (or another retry).
+		chunkReader := io.NewSectionReader(f, offset, lenChunk)
+		pr := io.TeeReader(chunkReader, hasher)
+		patchBody := &chunkProgressReader{
+			r:          pr,
+			base:       offset,
+			chunkLen:   lenChunk,
+			total:      declaredSize,
+			lastEmitAt: time.Now(),
+			onProgress: onProgress,
 		}
 		// Compute chunk into request without mutating file prefix hasher on failed partial send:
 		// we hash only committed bytes once accepted (or hash prefix cleanly on retry).
-		chunkReader := io.LimitReader(f, lenChunk)
-		pr := io.TeeReader(chunkReader, hasher)
-		req, err := http.NewRequestWithContext(ctx, http.MethodPatch, reqURL, &chunkProgressReader{
-			r:          pr,
-			base:       offset,
-			total:      declaredSize,
-			onProgress: onProgress,
-		})
+		req, err := http.NewRequestWithContext(ctx, http.MethodPatch, reqURL, patchBody)
 		if err != nil {
 			return ItemResult{}, err
 		}
@@ -482,9 +504,14 @@ func (c *Client) streamItemChunks(ctx context.Context, f *os.File, localPath, re
 		req.Header.Set("Host", c.target.Host)
 		req.Header.Set("Content-Type", "application/offset+octet-stream")
 		req.Header.Set("Upload-Offset", strconv.FormatInt(offset, 10))
+		req.Header.Set("X-Flitnix-Compact-Ack", "1")
 		req.ContentLength = lenChunk
 
 		resp, err := c.httpClient.Do(req)
+		// A response can arrive before the transport has finished reading the
+		// request body. Stop stale progress callbacks now; the body itself is
+		// owned and closed by net/http.
+		patchBody.stop()
 		if err != nil {
 			cont, rerr := retryWithHead(fmt.Errorf("client: chunk streaming failed for %s at offset %d: %w", filepath.Base(localPath), offset, err))
 			if cont {
@@ -501,6 +528,9 @@ func (c *Client) streamItemChunks(ctx context.Context, f *os.File, localPath, re
 
 		if resp.StatusCode == http.StatusUnauthorized {
 			return ItemResult{}, ErrUnauthorized
+		}
+		if offset == 0 && (resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed) {
+			return c.streamItemPut(ctx, f, localPath, reqURL, declaredSize, onProgress)
 		}
 		if resp.StatusCode == http.StatusNoContent {
 			consecutiveRetries = 0
@@ -575,29 +605,69 @@ func (c *Client) streamItemChunks(ctx context.Context, f *os.File, localPath, re
 }
 
 type chunkProgressReader struct {
-	r          io.Reader
-	base       int64
-	read       int64
-	total      int64
-	onProgress func(written, total int64)
+	r             io.Reader
+	base          int64
+	read          int64
+	chunkLen      int64
+	total         int64
+	lastEmitBytes int64
+	lastEmitAt    time.Time
+	calls         uint32
+	mu            sync.Mutex
+	wg            sync.WaitGroup
+	stopped       bool
+	onProgress    func(written, total int64)
+}
+
+// stop permanently retires an abandoned request body. It returns only after
+// any in-flight read and progress callback have completed, so a PATCH callback
+// cannot finish after PUT progress has started, and the body cannot read from
+// the transfer file after its handle is closed.
+func (c *chunkProgressReader) stop() {
+	c.mu.Lock()
+	c.stopped = true
+	c.mu.Unlock()
+	c.wg.Wait()
 }
 
 func (c *chunkProgressReader) Read(p []byte) (int, error) {
+	c.mu.Lock()
+	if c.stopped {
+		c.mu.Unlock()
+		return 0, io.EOF
+	}
+	// Register under the same lock that stop uses, so stop's Wait cannot
+	// race past a Read that is about to touch the underlying file.
+	c.wg.Add(1)
+	c.mu.Unlock()
+	defer c.wg.Done()
+
 	n, err := c.r.Read(p)
-	if n > 0 {
-		c.read += int64(n)
-		if c.onProgress != nil {
-			c.onProgress(c.base+c.read, c.total)
+	if n > 0 && c.onProgress != nil {
+		c.mu.Lock()
+		if !c.stopped {
+			c.read += int64(n)
+			c.calls++
+			emit := c.read >= c.chunkLen || c.read-c.lastEmitBytes >= 256*1024
+			if !emit && (c.calls&7) == 0 && time.Since(c.lastEmitAt) >= 100*time.Millisecond {
+				emit = true
+			}
+			if emit {
+				c.lastEmitBytes = c.read
+				c.lastEmitAt = time.Now()
+				c.onProgress(c.base+c.read, c.total)
+			}
 		}
+		c.mu.Unlock()
 	}
 	return n, err
 }
 
 func (c *Client) streamItemPut(ctx context.Context, f *os.File, localPath, reqURL string, declaredSize int64, onProgress func(written, total int64)) (ItemResult, error) {
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return ItemResult{}, err
-	}
-	hashingReader := NewHashingReader(f, declaredSize, onProgress)
+	// As with PATCH, the fallback owns its own section reader. It neither
+	// depends on nor mutates the file offset, even if the rejected PATCH body
+	// is still being drained by the HTTP transport.
+	hashingReader := NewHashingReader(io.NewSectionReader(f, 0, declaredSize), declaredSize, onProgress)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, reqURL, hashingReader)
 	if err != nil {
@@ -606,6 +676,7 @@ func (c *Client) streamItemPut(ctx context.Context, f *os.File, localPath, reqUR
 	req.Header.Set("Authorization", "Bearer "+c.target.Token())
 	req.Header.Set("Host", c.target.Host)
 	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("X-Flitnix-Compact-Ack", "1")
 	req.ContentLength = declaredSize
 
 	resp, err := c.httpClient.Do(req)

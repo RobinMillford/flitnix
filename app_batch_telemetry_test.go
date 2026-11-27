@@ -156,6 +156,11 @@ func (g *gateReader) Read(p []byte) (int, error) {
 	<-g.gate
 	g.mu.Lock()
 	n := len(p)
+	// Consume at most one release() grant (64 KiB) per token even when the reader passes
+	// a larger copy buffer (e.g., 256 KiB pooled buffer), keeping tokens 1:1 with reads.
+	if n > 65536 {
+		n = 65536
+	}
 	if int64(n) > g.outstanding {
 		n = int(g.outstanding)
 	}

@@ -38,7 +38,7 @@ func TestAppResumablePauseResumeAndDiscard(t *testing.T) {
 	decReq.Host = "127.0.0.1"
 	decReq.Header.Set("Authorization", "Bearer "+s.Token())
 	decRec := httptest.NewRecorder()
-	a.srv.Handler().ServeHTTP(decRec, decReq)
+	testAppHandler(t, a).ServeHTTP(decRec, decReq)
 	if decRec.Code != http.StatusCreated {
 		t.Fatalf("declare batch = %d %s", decRec.Code, decRec.Body.String())
 	}
@@ -57,7 +57,7 @@ func TestAppResumablePauseResumeAndDiscard(t *testing.T) {
 	pReq.Header.Set("Upload-Offset", "0")
 	pReq.ContentLength = split
 	pRec := httptest.NewRecorder()
-	a.srv.Handler().ServeHTTP(pRec, pReq)
+	testAppHandler(t, a).ServeHTTP(pRec, pReq)
 	if pRec.Code != http.StatusNoContent {
 		t.Fatalf("chunk 1 = %d %s", pRec.Code, pRec.Body.String())
 	}
@@ -73,7 +73,7 @@ func TestAppResumablePauseResumeAndDiscard(t *testing.T) {
 	pRefuse.Header.Set("Upload-Offset", fmt.Sprintf("%d", split))
 	pRefuse.ContentLength = 1024
 	rRefuse := httptest.NewRecorder()
-	a.srv.Handler().ServeHTTP(rRefuse, pRefuse)
+	testAppHandler(t, a).ServeHTTP(rRefuse, pRefuse)
 	if rRefuse.Code != http.StatusConflict {
 		t.Fatalf("PATCH while paused = %d, want 409", rRefuse.Code)
 	}
@@ -86,7 +86,7 @@ func TestAppResumablePauseResumeAndDiscard(t *testing.T) {
 
 	srcFile := filepath.Join(t.TempDir(), "pause-test.bin")
 	_ = os.WriteFile(srcFile, payload, 0o600)
-	target, err := client.ParseTarget(a.srv.URL()+"/#"+s.Token(), "")
+	target, err := client.ParseTarget(testAppServerURL(t, a)+"/#"+s.Token(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestAppResumablePauseResumeAndDiscard(t *testing.T) {
 	b2Req.Host = "127.0.0.1"
 	b2Req.Header.Set("Authorization", "Bearer "+s.Token())
 	b2Rec := httptest.NewRecorder()
-	a.srv.Handler().ServeHTTP(b2Rec, b2Req)
+	testAppHandler(t, a).ServeHTTP(b2Rec, b2Req)
 	var b2 BatchView
 	_ = json.Unmarshal(b2Rec.Body.Bytes(), &b2)
 	_, _ = a.ApproveBatch(b2.ID)
@@ -112,7 +112,7 @@ func TestAppResumablePauseResumeAndDiscard(t *testing.T) {
 	p2Req.Header.Set("Upload-Offset", "0")
 	p2Req.ContentLength = 512 * 1024
 	p2Rec := httptest.NewRecorder()
-	a.srv.Handler().ServeHTTP(p2Rec, p2Req)
+	testAppHandler(t, a).ServeHTTP(p2Rec, p2Req)
 	if p2Rec.Code != http.StatusNoContent {
 		t.Fatalf("b2 chunk 1 = %d", p2Rec.Code)
 	}

@@ -142,6 +142,16 @@ func createDownloadGrant(svcs *Services, grants *DownloadGrantStore) http.Handle
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
+		if svcs.Visibility != nil {
+			vis := svcs.Visibility.Evaluate()
+			if vis.QRSharingPaused && sess.DeviceID() == "" {
+				writeJSON(w, http.StatusForbidden, map[string]string{
+					"code":  "qr_sharing_paused",
+					"error": "QR sharing is paused on the desktop",
+				})
+				return
+			}
+		}
 		var req createGrantRequest
 		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 512*1024)).Decode(&req) != nil {
 			writeError(w, http.StatusBadRequest, "invalid source selection")

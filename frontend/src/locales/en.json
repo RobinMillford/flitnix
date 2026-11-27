@@ -10,6 +10,7 @@
   "nav": {
     "tabsLabel": "Main Navigation Tabs",
     "personal": "Personal Transfer",
+    "computers": "Computer Sharing",
     "guest": "Guest Drop Box",
     "templates": "Templates",
     "devices": "Trusted Devices",
@@ -252,6 +253,7 @@
   },
   "header": {
     "personalDesc": "Peer-to-peer file transfer over your local network",
+    "computersDesc": "Direct desktop-to-desktop LAN discovery and encrypted file sharing",
     "guestDesc": "Collect files from any phone browser without app installation",
     "templatesDesc": "Preconfigured room templates and collection workflows",
     "devicesDesc": "Manage cryptographically authenticated devices and pairing",

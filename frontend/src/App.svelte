@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { t, setLocale, tFn } from './i18n'
-  import type { main, netenv, doctor, guest, audit, devices, power, version, update, transfer } from '../wailsjs/go/models'
+  import type { main, netenv, doctor, guest, audit, devices, power, version, update, transfer, session, discovery, client } from '../wailsjs/go/models'
   import { OnFileDrop, OnFileDropOff, EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
   import logoUrl from './assets/images/logo-universal.png'
   import { createRefreshScheduler } from './refreshScheduler'
@@ -12,6 +12,7 @@
 
   // Dedicated Views
   import PersonalTransferView from './views/PersonalTransferView.svelte'
+  import ComputerSharingView from './views/ComputerSharingView.svelte'
   import GuestDropBoxView from './views/GuestDropBoxView.svelte'
   import TemplatesView from './views/TemplatesView.svelte'
   import TrustedDevicesView from './views/TrustedDevicesView.svelte'
@@ -27,19 +28,25 @@
     PickFilesForSharing, PickFolderForSharing, AddDroppedSources,
     ListSharedFiles, ListSharedSources, RevokeSharedFile, RevokeSharedSource, ReceiveDirectory,
     ListNetworkInterfaces, SessionQR, ServerAddress, GetNetworkState, RefreshNetwork,
+    GetSessionShortCode, RegenerateSessionShortCode,
     StartGuestRoomWithConfig, GetGuestRoomState, ApproveGuest, RejectGuest, RevokeGuest,
     ApproveGuestUpload, RejectGuestUpload, EndGuestRoom, PickGuestDestination, OpenGuestFolder,
     PickExportDestination, ExportGuestCollection,
     ListGuestPresets, ListGuestTemplates, SaveGuestTemplate, DeleteGuestTemplate, DuplicateGuestTemplate, StartGuestRoomFromTemplate,
     ListAuditEvents, ClearAuditHistory,
     RunConnectionDiagnostics, SendTextMessage, ListTextMessages, ClearTextMessages,
-    ListTrustedDevices, RemoveTrustedDevice, SetDeviceAutoApprove,
+    ListTrustedDevices, RemoveTrustedDevice, SetDeviceAutoApprove, SetDevicePolicy,
     ApprovePairing, DenyPairing, GetPairingStatus, ReArmPairing,
+    GetVisibilityState, SetVisibilityMode, SetQRSharingPaused, RevokeAllSessions,
+    GetLocalPeerInfo, EnsurePeerServer, EnsurePeerSessionShortCode, ListNearbyPeers, TriggerNearbyScan,
+    PickFilesForPeer, PickFolderForPeer, ConnectAndSendToPeer, PairWithPeer,
+    InspectPeerTarget, ListPeerTransfers, CancelPeerTransfer, ClearCompletedPeerTransfers,
+    ResolvePeerPairingSAS,
     GetSettings, SaveSettings, ResetSettings, SelectDownloadDirectory, OpenDownloadFolder,
     GetStorageStatus, SleepInhibition, GetAppVersion, CheckForUpdates
   } from '../wailsjs/go/main/App.js'
 
-  const validTabs = ['personal', 'guest', 'templates', 'devices', 'history', 'audit', 'settings'] as const
+  const validTabs = ['personal', 'computers', 'guest', 'templates', 'devices', 'history', 'audit', 'settings'] as const
   type TabName = typeof validTabs[number]
 
   function getInitialTab(): TabName {
@@ -80,6 +87,17 @@
   let rearmingLoading = false
   let sleepInhibition: power.Status | null = null
   let storageStatus: transfer.StorageStatus | null = null
+  let visibilityState: devices.VisibilityState | null = null
+  let shortCode: session.ShortCodeView | null = null
+
+  // Desktop-to-Desktop (Computer Sharing) state
+  let localPeerInfo: main.LocalPeerInfo | null = null
+  let nearbyPeers: discovery.Peer[] = []
+  let peerTransfers: main.PeerTransferJob[] = []
+  let peerStagedPaths: string[] = []
+  let scanningPeers = false
+  let sendingToPeer = false
+  let pairingSasPrompt: main.PeerPairSASPrompt | null = null
 
   // Persistent Settings state
   let settingsState: main.SettingsView = {
@@ -119,11 +137,11 @@
   let liveAnnouncement = ''
   let previousPendingTotal = -1
 
-  const tabOrder: Array<'personal' | 'guest' | 'templates' | 'devices' | 'history' | 'audit' | 'settings'> = [
-    'personal', 'guest', 'templates', 'devices', 'history', 'audit', 'settings'
+  const tabOrder: TabName[] = [
+    'personal', 'computers', 'guest', 'templates', 'devices', 'history', 'audit', 'settings'
   ]
 
-  function switchTab(target: 'personal' | 'guest' | 'templates' | 'devices' | 'history' | 'audit' | 'settings'): void {
+  function switchTab(target: TabName): void {
     activeTab = target
     if (target === 'templates') loadTemplates()
     else if (target === 'audit') loadAuditLogs()
@@ -251,9 +269,10 @@
       ListSessions(), ListPendingUploads(), RecentUploads(), RecentDownloads(),
       ListSharedFiles(), ListSharedSources(), ReceiveDirectory(), ServerAddress(),
       ListPendingBatches(), ListBatches(), GetGuestRoomState(), GetPairingStatus(),
-      SleepInhibition(), GetStorageStatus()
+      SleepInhibition(), GetStorageStatus(), GetVisibilityState(),
+      ListNearbyPeers(), ListPeerTransfers(), GetLocalPeerInfo()
     ]),
-    ([s, p, u, d, f, sourceList, dir, addr, b, allBatches, grState, pStatus, sleepStatus, stStatus]) => {
+    ([s, p, u, d, f, sourceList, dir, addr, b, allBatches, grState, pStatus, sleepStatus, stStatus, visState, peersList, peerJobs, localPeer]) => {
       sessions = s ?? []; pending = p ?? []; uploads = u ?? []; downloads = d ?? []
       files = f ?? []; sources = sourceList ?? []; pendingBatches = b ?? []
       batches = allBatches ?? []
@@ -262,6 +281,10 @@
       pairingStatus = pStatus ?? null
       sleepInhibition = sleepStatus ?? null
       storageStatus = stStatus ?? null
+      visibilityState = visState ?? null
+      nearbyPeers = peersList ?? []
+      peerTransfers = peerJobs ?? []
+      localPeerInfo = localPeer ?? null
       if (!guestDestDir && dir) guestDestDir = dir
 
       const currentPendingTotal = (pending?.length ?? 0) + (pendingBatches?.length ?? 0) + (guestRoomState?.pendingUploads?.length ?? 0)
@@ -270,8 +293,14 @@
       }
       previousPendingTotal = currentPendingTotal
 
-      if (!sessions.length) { qrKey = ''; qrUrl = ''; qrError = '' }
+      if (!sessions.length) { qrKey = ''; qrUrl = ''; qrError = ''; shortCode = null }
       else if (!sessions.some((x) => x.key === qrKey)) fetchQR(sessions[0].key)
+
+      if (sessions.length > 0 && qrKey) {
+        GetSessionShortCode(qrKey).then((sc) => {
+          if (!disposed) shortCode = sc ?? null
+        }).catch(() => {})
+      }
 
       if (sessions.length > 0) {
         ListTextMessages(sessions[0].key).then(msgs => {
@@ -506,6 +535,12 @@
 
   function handleDrop(_x: number, _y: number, paths: string[]): void {
     if (!paths.length) return
+    if (activeTab === 'computers') {
+      const merged = new Set([...peerStagedPaths, ...paths])
+      peerStagedPaths = Array.from(merged)
+      showToast(`Staged ${paths.length} item(s) for Computer Sharing`, 'info')
+      return
+    }
     AddDroppedSources(paths).then(() => {
       liveAnnouncement = tFn('announcements.itemsAdded', { count: paths.length })
       refresh()
@@ -828,6 +863,164 @@
     }
   }
 
+  async function updateDevicePolicyAction(id: string, policy: devices.DevicePolicy): Promise<void> {
+    try {
+      await SetDevicePolicy(id, policy)
+      await loadTrustedDevices()
+      showToast('Updated device acceptance policy', 'success')
+    } catch (err) {
+      report(err)
+    }
+  }
+
+  async function setVisibilityModeAction(mode: string): Promise<void> {
+    try {
+      visibilityState = await SetVisibilityMode(mode)
+      showToast(
+        mode === 'hidden'
+          ? 'Visibility set to Hidden (QR sharing stays independent)'
+          : mode === 'trusted'
+            ? 'Visibility set to Trusted Devices Only'
+            : mode === 'temporary_everyone'
+              ? 'Visible to Everyone for 10 minutes'
+              : 'Visible to Everyone',
+        'info'
+      )
+    } catch (err) {
+      report(err)
+    }
+  }
+
+  async function setQRSharingPausedAction(paused: boolean): Promise<void> {
+    try {
+      visibilityState = await SetQRSharingPaused(paused)
+      showToast(paused ? 'QR sharing paused' : 'QR sharing resumed', 'info')
+    } catch (err) {
+      report(err)
+    }
+  }
+
+  async function revokeAllSessionsAction(): Promise<void> {
+    try {
+      await RevokeAllSessions()
+      refresh()
+      showToast('Revoked all active sessions', 'info')
+    } catch (err) {
+      report(err)
+    }
+  }
+
+  async function regenerateShortCodeAction(key: string): Promise<void> {
+    if (!key) return
+    try {
+      shortCode = await RegenerateSessionShortCode(key)
+      showToast('Generated new 6-digit connection code', 'success')
+    } catch (err) {
+      report(err)
+    }
+  }
+
+  async function ensurePeerServerAction(): Promise<void> {
+    try {
+      await EnsurePeerServer()
+      refresh()
+    } catch {
+      // Non-fatal if network interface is unavailable yet
+    }
+  }
+
+  async function ensurePeerShortCodeAction(): Promise<void> {
+    try {
+      shortCode = await EnsurePeerSessionShortCode()
+      refresh()
+    } catch (err) {
+      report(err)
+    }
+  }
+
+  async function triggerPeerScanAction(): Promise<void> {
+    scanningPeers = true
+    try {
+      nearbyPeers = (await TriggerNearbyScan()) ?? []
+    } catch (err) {
+      report(err)
+    } finally {
+      scanningPeers = false
+    }
+  }
+
+  async function pickPeerFilesAction(): Promise<void> {
+    try {
+      const picked = await PickFilesForPeer()
+      if (picked && picked.length) {
+        const merged = new Set([...peerStagedPaths, ...picked])
+        peerStagedPaths = Array.from(merged)
+      }
+    } catch (err) {
+      report(err)
+    }
+  }
+
+  async function pickPeerFolderAction(): Promise<void> {
+    try {
+      const picked = await PickFolderForPeer()
+      if (picked) {
+        peerStagedPaths = [picked]
+      }
+    } catch (err) {
+      report(err)
+    }
+  }
+
+  async function sendToPeerAction(req: main.PeerSendRequest): Promise<void> {
+    sendingToPeer = true
+    try {
+      const job = await ConnectAndSendToPeer(req)
+      peerTransfers = [job, ...peerTransfers.filter((j) => j.id !== job.id)]
+      peerStagedPaths = []
+      showToast(`Sending to ${job.peerName}…`, 'info')
+    } catch (err) {
+      report(err)
+    } finally {
+      sendingToPeer = false
+    }
+  }
+
+  async function pairWithPeerAction(req: main.PeerPairRequest): Promise<void> {
+    try {
+      const res = await PairWithPeer(req)
+      await loadTrustedDevices()
+      showToast(`Paired with ${req.peerName || res.hostId}`, 'success')
+    } catch (err) {
+      report(err)
+    } finally {
+      pairingSasPrompt = null
+    }
+  }
+
+  async function inspectPeerTargetAction(address: string, port: number): Promise<client.PeerProbeInfo | null> {
+    return await InspectPeerTarget(address, port)
+  }
+
+  async function cancelPeerTransferAction(jobId: string): Promise<void> {
+    try {
+      await CancelPeerTransfer(jobId)
+      refresh()
+    } catch (err) {
+      report(err)
+    }
+  }
+
+  async function clearCompletedPeerTransfersAction(): Promise<void> {
+    await ClearCompletedPeerTransfers()
+    refresh()
+  }
+
+  async function resolvePairSasAction(requestId: string, approved: boolean): Promise<void> {
+    pairingSasPrompt = null
+    await ResolvePeerPairingSAS(requestId, approved)
+  }
+
   async function removeDeviceAction(id: string): Promise<void> {
     try {
       await RemoveTrustedDevice(id)
@@ -841,6 +1034,7 @@
   function pageTitle(tab: string): string {
     switch (tab) {
       case 'personal': return tFn('nav.personal')
+      case 'computers': return tFn('nav.computers')
       case 'guest': return tFn('nav.guest')
       case 'templates': return tFn('nav.templates')
       case 'devices': return tFn('nav.devices')
@@ -854,6 +1048,7 @@
   function pageDescription(tab: string): string {
     switch (tab) {
       case 'personal': return tFn('header.personalDesc')
+      case 'computers': return tFn('header.computersDesc')
       case 'guest': return tFn('header.guestDesc')
       case 'templates': return tFn('header.templatesDesc')
       case 'devices': return tFn('header.devicesDesc')
@@ -1074,6 +1269,25 @@
     EventsOn('network:changed', (st: netenv.NetworkState) => {
       handleNetworkStateUpdate(st)
     })
+    EventsOn('visibility:changed', (st: devices.VisibilityState) => {
+      visibilityState = st
+    })
+    EventsOn('discovery:peers', (peersList: discovery.Peer[]) => {
+      if (!disposed) nearbyPeers = peersList ?? []
+    })
+    EventsOn('peer-transfer:updated', (job: main.PeerTransferJob) => {
+      if (!disposed && job) {
+        const idx = peerTransfers.findIndex((x) => x.id === job.id)
+        if (idx >= 0) {
+          peerTransfers = [...peerTransfers.slice(0, idx), job, ...peerTransfers.slice(idx + 1)]
+        } else {
+          peerTransfers = [job, ...peerTransfers]
+        }
+      }
+    })
+    EventsOn('peer-pair:sas', (prompt: main.PeerPairSASPrompt) => {
+      if (!disposed) pairingSasPrompt = prompt
+    })
     GetAppVersion().then((v) => {
       appVersionInfo = v
     }).catch(report)
@@ -1090,6 +1304,10 @@
       clearInterval(id)
       OnFileDropOff()
       EventsOff('network:changed')
+      EventsOff('visibility:changed')
+      EventsOff('discovery:peers')
+      EventsOff('peer-transfer:updated')
+      EventsOff('peer-pair:sas')
     }
   })
 </script>
@@ -1135,6 +1353,30 @@
             <span class="tab-badge pulse-green">{pending.length + pendingBatches.length}</span>
           {:else if sessions.length > 0}
             <span class="tab-dot-online" title="Session active"></span>
+          {/if}
+        </button>
+
+        <button
+          type="button"
+          id="tab-computers"
+          role="tab"
+          aria-selected={activeTab === 'computers'}
+          aria-controls="panel-computers"
+          tabindex={activeTab === 'computers' ? 0 : -1}
+          class="nav-tab-btn"
+          class:active={activeTab === 'computers'}
+          on:click={() => switchTab('computers')}
+        >
+          <span class="nav-tab-icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+              <line x1="8" y1="21" x2="16" y2="21"></line>
+              <line x1="12" y1="17" x2="12" y2="21"></line>
+            </svg>
+          </span>
+          <span class="nav-tab-label">{$t('nav.computers')}</span>
+          {#if nearbyPeers.length > 0}
+            <span class="tab-badge">{nearbyPeers.length}</span>
           {/if}
         </button>
 
@@ -1423,7 +1665,48 @@
               {copyTextToClipboard}
               {showToast}
               {handleOpenDownloadFolder}
+              {visibilityState}
+              {shortCode}
+              {setVisibilityModeAction}
+              {setQRSharingPausedAction}
+              {revokeAllSessionsAction}
+              {regenerateShortCodeAction}
               goToHistory={() => switchTab('history')}
+            />
+          </div>
+        {:else if activeTab === 'computers'}
+          <div id="panel-computers" role="tabpanel" aria-labelledby="tab-computers" tabindex="0">
+            <ComputerSharingView
+              {localPeerInfo}
+              {nearbyPeers}
+              {peerTransfers}
+              stagedPaths={peerStagedPaths}
+              {visibilityState}
+              {shortCode}
+              {pending}
+              {pendingBatches}
+              {serverAddress}
+              scanning={scanningPeers}
+              sending={sendingToPeer}
+              {pairingSasPrompt}
+              ensurePeerServerAction={ensurePeerServerAction}
+              {ensurePeerShortCodeAction}
+              {regenerateShortCodeAction}
+              triggerScanAction={triggerPeerScanAction}
+              {setVisibilityModeAction}
+              pickFilesAction={pickPeerFilesAction}
+              pickFolderAction={pickPeerFolderAction}
+              clearStagedAction={() => { peerStagedPaths = [] }}
+              {sendToPeerAction}
+              {pairWithPeerAction}
+              {inspectPeerTargetAction}
+              {cancelPeerTransferAction}
+              clearCompletedAction={clearCompletedPeerTransfersAction}
+              {resolvePairSasAction}
+              {decide}
+              {decideBatch}
+              {handleOpenDownloadFolder}
+              {isBusy}
             />
           </div>
         {:else if activeTab === 'guest'}
@@ -1479,6 +1762,7 @@
               loadTrustedDevices={loadTrustedDevices}
               removeDeviceAction={removeDeviceAction}
               setDeviceAutoApproveAction={toggleDeviceAutoApprove}
+              setDevicePolicyAction={updateDevicePolicyAction}
               approvePairingAction={handleApprovePairing}
               denyPairingAction={handleDenyPairing}
               reArmPairingAction={handleReArmPairing}
@@ -1553,6 +1837,36 @@
     currentVersion={appVersionInfo?.version || '0.2.7.4'}
     onClose={() => { updateModalOpen = false }}
   />
+
+  <!-- Global Trusted Device Pairing Prompt (shown regardless of active tab) -->
+  {#if pairingStatus?.requiresApproval}
+    <div class="global-pairing-overlay" role="dialog" aria-modal="true" aria-label="Device pairing verification">
+      <div class="global-pairing-modal">
+        <div class="global-pairing-badge">🔐 Trusted Device Pairing Request</div>
+        <h3>{pairingStatus.deviceName || pairingStatus.clientId || 'Remote Device'} wants to pair</h3>
+        <p>Confirm the 6-digit verification code matches on the remote screen before approving:</p>
+        <div class="global-pairing-sas tabular">{pairingStatus.sas || '---'}</div>
+        <div class="global-pairing-actions">
+          <button
+            type="button"
+            class="button success"
+            on:click={() => handleApprovePairing(pairingStatus?.requestId || '')}
+            disabled={pairingActionLoading}
+          >
+            {pairingActionLoading ? 'Approving…' : 'Approve & Trust Device'}
+          </button>
+          <button
+            type="button"
+            class="button danger"
+            on:click={() => handleDenyPairing(pairingStatus?.requestId || '')}
+            disabled={pairingActionLoading}
+          >
+            Deny
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
 
   <!-- Global Toast Notification -->
   <div class="toast-fixed-container">

@@ -36,12 +36,25 @@ type TransferChallenge struct {
 
 // Device represents a cryptographically paired personal device.
 type Device struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	PublicKey   string    `json:"publicKey"` // hex-encoded Ed25519 public key
-	PairedAt    time.Time `json:"pairedAt"`
-	LastSeen    time.Time `json:"lastSeen"`
-	AutoApprove bool      `json:"autoApprove"`
+	ID                  string    `json:"id"`
+	Name                string    `json:"name"`
+	PublicKey           string    `json:"publicKey"` // hex-encoded Ed25519 public key
+	PairedAt            time.Time `json:"pairedAt"`
+	LastSeen            time.Time `json:"lastSeen"`
+	AutoApprove         bool      `json:"autoApprove"`
+	MaxAutoApproveBytes int64     `json:"maxAutoApproveBytes"` // 0 = default 100 MiB, <0 = unlimited
+	AllowExecutables    bool      `json:"allowExecutables"`
+	AllowScripts        bool      `json:"allowScripts"`
+}
+
+// EffectivePolicy returns the normalized per-device conditional auto-approval policy.
+func (d Device) EffectivePolicy() DevicePolicy {
+	return DevicePolicy{
+		AutoApprove:         d.AutoApprove,
+		MaxAutoApproveBytes: d.MaxAutoApproveBytes,
+		AllowExecutables:    d.AllowExecutables,
+		AllowScripts:        d.AllowScripts,
+	}
 }
 
 // Store manages persistent trusted devices.
@@ -180,6 +193,23 @@ func (s *Store) SetAutoApprove(id string, autoApprove bool) error {
 	return s.saveLocked()
 }
 
+// SetDevicePolicy updates the granular conditional auto-approval policy for a device.
+func (s *Store) SetDevicePolicy(id string, policy DevicePolicy) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	d, ok := s.devices[id]
+	if !ok {
+		return ErrDeviceNotFound
+	}
+	d.AutoApprove = policy.AutoApprove
+	d.MaxAutoApproveBytes = policy.MaxAutoApproveBytes
+	d.AllowExecutables = policy.AllowExecutables
+	d.AllowScripts = policy.AllowScripts
+	s.devices[id] = d
+	return s.saveLocked()
+}
+
 // VerifySignature verifies that signatureHex over message was signed by deviceID's public key.
 func (s *Store) VerifySignature(deviceID string, message []byte, signatureHex string) (bool, error) {
 	s.mu.RLock()
@@ -303,6 +333,12 @@ func BuildSrvChalPayload(hostID, clientID, transferNonce string, timestampUnix i
 // flitnix-auth-v2:<hostId>:<deviceId>:<timestampUnix>:<transferNonce>:<manifestSha256Hex>
 func BuildAuthV2Payload(hostID, deviceID string, timestampUnix int64, transferNonce, manifestSha256Hex string) []byte {
 	return []byte(fmt.Sprintf("flitnix-auth-v2:%s:%s:%d:%s:%s", hostID, deviceID, timestampUnix, transferNonce, manifestSha256Hex))
+}
+
+// BuildDeviceSessionAuthPayload builds the signed challenge payload used by a paired
+// device to bootstrap a fresh Bearer session without scanning a QR code.
+func BuildDeviceSessionAuthPayload(hostID, deviceID string, timestampUnix int64, nonce string) []byte {
+	return []byte(fmt.Sprintf("flitnix-session-auth-v1:%s:%s:%d:%s", hostID, deviceID, timestampUnix, nonce))
 }
 
 // CreateTransferChallenge generates a 32-byte secure random nonce, records it, and returns the nonce and timestamp.

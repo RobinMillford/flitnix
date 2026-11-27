@@ -13,12 +13,18 @@ import (
 
 const (
 	// CurrentSchemaVersion is the current version of the settings file schema.
-	CurrentSchemaVersion = 2
+	CurrentSchemaVersion = 3
 
 	// Allowed themes
 	ThemeSystem = "system"
 	ThemeDark   = "dark"
 	ThemeLight  = "light"
+
+	// Allowed visibility modes (matching devices.VisibilityMode)
+	VisibilityHidden            = "hidden"
+	VisibilityTrustedOnly       = "trusted"
+	VisibilityTemporaryEveryone = "temporary_everyone"
+	VisibilityEveryone          = "everyone"
 )
 
 var (
@@ -27,27 +33,32 @@ var (
 
 // Settings represents persistent user preferences.
 type Settings struct {
-	Version            int       `json:"version"`
-	Theme              string    `json:"theme"`
-	Locale             string    `json:"locale"`
-	DownloadDir        string    `json:"downloadDir"`
-	AutoStartSession   bool      `json:"autoStartSession"`
-	PreserveModTimes   bool      `json:"preserveModTimes"`
-	PreferredInterface string    `json:"preferredInterface"`
-	UpdatedAt          time.Time `json:"updatedAt"`
+	Version                int       `json:"version"`
+	Theme                  string    `json:"theme"`
+	Locale                 string    `json:"locale"`
+	DownloadDir            string    `json:"downloadDir"`
+	AutoStartSession       bool      `json:"autoStartSession"`
+	PreserveModTimes       bool      `json:"preserveModTimes"`
+	PreferredInterface     string    `json:"preferredInterface"`
+	VisibilityMode         string    `json:"visibilityMode"`
+	VisibilityPreviousMode string    `json:"visibilityPreviousMode"`
+	VisibilityExpiresAt    time.Time `json:"visibilityExpiresAt,omitempty"`
+	UpdatedAt              time.Time `json:"updatedAt"`
 }
 
 // DefaultSettings returns the baseline configuration for Flitnix.
 func DefaultSettings() Settings {
 	return Settings{
-		Version:            CurrentSchemaVersion,
-		Theme:              ThemeSystem,
-		Locale:             "system",
-		DownloadDir:        "", // empty indicates default (~/Downloads/Flitnix)
-		AutoStartSession:   false,
-		PreserveModTimes:   true,
-		PreferredInterface: "",
-		UpdatedAt:          time.Now().UTC(),
+		Version:                CurrentSchemaVersion,
+		Theme:                  ThemeSystem,
+		Locale:                 "system",
+		DownloadDir:            "", // empty indicates default (~/Downloads/Flitnix)
+		AutoStartSession:       false,
+		PreserveModTimes:       true,
+		PreferredInterface:     "",
+		VisibilityMode:         VisibilityTrustedOnly,
+		VisibilityPreviousMode: VisibilityTrustedOnly,
+		UpdatedAt:              time.Now().UTC(),
 	}
 }
 
@@ -128,12 +139,51 @@ func ValidateAndNormalize(s Settings) Settings {
 	}
 
 	s.PreferredInterface = strings.TrimSpace(s.PreferredInterface)
+
+	prevVis := strings.ToLower(strings.TrimSpace(s.VisibilityPreviousMode))
+	switch prevVis {
+	case VisibilityHidden, VisibilityTrustedOnly:
+		s.VisibilityPreviousMode = prevVis
+	default:
+		s.VisibilityPreviousMode = VisibilityTrustedOnly
+	}
+
+	vis := strings.ToLower(strings.TrimSpace(s.VisibilityMode))
+	switch vis {
+	case VisibilityHidden, VisibilityTrustedOnly:
+		s.VisibilityMode = vis
+		s.VisibilityPreviousMode = vis
+		s.VisibilityExpiresAt = time.Time{}
+	case VisibilityEveryone:
+		s.VisibilityMode = vis
+		s.VisibilityExpiresAt = time.Time{}
+	case VisibilityTemporaryEveryone:
+		if s.VisibilityExpiresAt.IsZero() || !s.VisibilityExpiresAt.After(time.Now().UTC()) {
+			// Expired temporary open session must never become active again after restart.
+			s.VisibilityMode = s.VisibilityPreviousMode
+			s.VisibilityExpiresAt = time.Time{}
+		} else {
+			s.VisibilityMode = vis
+		}
+	default:
+		s.VisibilityMode = VisibilityTrustedOnly
+		s.VisibilityExpiresAt = time.Time{}
+	}
+
 	return s
 }
 
 // migrateSettings migrates older configuration schemas to current schema.
 func migrateSettings(old Settings) Settings {
 	migrated := old
+	if old.Version < 3 {
+		if migrated.VisibilityMode == "" {
+			migrated.VisibilityMode = VisibilityTrustedOnly
+		}
+		if migrated.VisibilityPreviousMode == "" {
+			migrated.VisibilityPreviousMode = VisibilityTrustedOnly
+		}
+	}
 	migrated.Version = CurrentSchemaVersion
 	return migrated
 }

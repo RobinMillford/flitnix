@@ -12,6 +12,7 @@
   export let loadTrustedDevices: () => void = () => {}
   export let removeDeviceAction: (id: string) => void = () => {}
   export let setDeviceAutoApproveAction: (id: string, auto: boolean) => void = () => {}
+  export let setDevicePolicyAction: (id: string, policy: devices.DevicePolicy) => void = () => {}
   export let approvePairingAction: (ip: string) => void = () => {}
   export let denyPairingAction: (ip: string) => void = () => {}
   export let reArmPairingAction: () => void = () => {}
@@ -36,6 +37,22 @@
   function formatKeyFingerprint(pk: string): string {
     if (!pk) return 'Ed25519'
     return `ed25519:${pk.slice(0, 8)}…${pk.slice(-4)}`
+  }
+
+  function effectiveMaxBytes(d: devices.Device): number {
+    if (d.maxAutoApproveBytes === undefined || d.maxAutoApproveBytes === 0) {
+      return 100 * 1024 * 1024
+    }
+    return d.maxAutoApproveBytes
+  }
+
+  function updatePolicy(d: devices.Device, patch: Partial<devices.DevicePolicy>) {
+    setDevicePolicyAction(d.id, {
+      autoApprove: patch.autoApprove ?? d.autoApprove,
+      maxAutoApproveBytes: patch.maxAutoApproveBytes ?? (d.maxAutoApproveBytes ?? 0),
+      allowExecutables: patch.allowExecutables ?? !!d.allowExecutables,
+      allowScripts: patch.allowScripts ?? !!d.allowScripts
+    })
   }
 </script>
 
@@ -141,9 +158,46 @@
               />
               <span class="toggle-text">
                 <strong>Automatic Approval</strong>
-                <small>Allow this phone to send files without requiring desktop prompt</small>
+                <small>Allow safe files within limits from this trusted device without a manual prompt</small>
               </span>
             </label>
+
+            {#if dev.autoApprove}
+              <div class="device-policy-rules">
+                <label class="policy-field">
+                  <span>Max auto-approve batch size</span>
+                  <select
+                    class="text-input compact"
+                    value={String(effectiveMaxBytes(dev))}
+                    on:change={(e) => updatePolicy(dev, { maxAutoApproveBytes: Number(e.currentTarget.value) })}
+                  >
+                    <option value={String(10 * 1024 * 1024)}>10 MiB</option>
+                    <option value={String(50 * 1024 * 1024)}>50 MiB</option>
+                    <option value={String(100 * 1024 * 1024)}>100 MiB (Default)</option>
+                    <option value={String(500 * 1024 * 1024)}>500 MiB</option>
+                    <option value="-1">Unlimited</option>
+                  </select>
+                </label>
+
+                <label class="policy-check">
+                  <input
+                    type="checkbox"
+                    checked={!!dev.allowExecutables}
+                    on:change={(e) => updatePolicy(dev, { allowExecutables: e.currentTarget.checked })}
+                  />
+                  <span>Allow auto-approving executables (e.g. .exe, .dmg, .apk)</span>
+                </label>
+
+                <label class="policy-check">
+                  <input
+                    type="checkbox"
+                    checked={!!dev.allowScripts}
+                    on:change={(e) => updatePolicy(dev, { allowScripts: e.currentTarget.checked })}
+                  />
+                  <span>Allow auto-approving scripts (e.g. .sh, .ps1, .bat)</span>
+                </label>
+              </div>
+            {/if}
           </div>
         </div>
       {/each}
@@ -356,6 +410,37 @@
   .auto-approve-toggle-box {
     border-top: 1px solid var(--border-subtle);
     padding-top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .device-policy-rules {
+    background: var(--bg-surface-elevated);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm, 8px);
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .policy-field {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .policy-check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11.5px;
+    color: var(--text-secondary);
+    cursor: pointer;
   }
 
   .toggle-label {
