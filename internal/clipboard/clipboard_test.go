@@ -10,10 +10,10 @@ import (
 )
 
 type memoryBackend struct {
-	mu      sync.Mutex
-	snap    Snapshot
-	writes  []string
-	caps    Capabilities
+	mu     sync.Mutex
+	snap   Snapshot
+	writes []string
+	caps   Capabilities
 }
 
 func newMemoryBackend() *memoryBackend {
