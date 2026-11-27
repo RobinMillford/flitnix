@@ -65,11 +65,12 @@ func fileMatchesSnapshot(f *os.File, snap fileSnapshot) bool {
 // session validity, context cancellation, progress accounting, and mid-stream
 // file mutation detection.
 type guardedRangeSeeker struct {
-	f          *os.File
-	snap       fileSnapshot
-	ctx        context.Context
-	sess       *session.Session
-	p          *archiveProgress
+	f           *os.File
+	snap        fileSnapshot
+	ctx         context.Context
+	sess        *session.Session
+	activeCheck func() bool
+	p           *archiveProgress
 	downloads  *transfer.DownloadRegistry
 	downloadID string
 
@@ -90,6 +91,9 @@ func (s *guardedRangeSeeker) checkMutableAndSession() error {
 		return errDownloadCanceled
 	}
 	if s.sess != nil && s.sess.Status() == session.StatusRevoked {
+		return errDownloadSession
+	}
+	if s.activeCheck != nil && !s.activeCheck() {
 		return errDownloadSession
 	}
 	if !s.checked || s.sinceCheck >= progressFlushBytes || time.Since(s.lastCheck) >= progressFlushEvery {

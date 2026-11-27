@@ -130,7 +130,7 @@ func newRouterWithOptions(services *Services, stall, downloadStall time.Duration
 		mux.HandleFunc("HEAD /api/archive-downloads/{id}", downloadHandler)
 
 		if services.GuestManager != nil {
-			guestAPI := newGuestAPIMux(services, stall, shutdownCh)
+			guestAPI := newGuestAPIMux(services, stall, downloadStall, grants, shutdownCh)
 			mux.Handle("/guest-api/", guestAPI)
 		} else {
 			mux.HandleFunc("/guest-api/", serveNotFound)

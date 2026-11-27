@@ -10,6 +10,10 @@ export function AddExpectedParticipant(arg1, arg2, arg3) {
   return window['go']['main']['App']['AddExpectedParticipant'](arg1, arg2, arg3);
 }
 
+export function AddGuestSharedPaths(arg1) {
+  return window['go']['main']['App']['AddGuestSharedPaths'](arg1);
+}
+
 export function ApplyHistoryRetentionNow() {
   return window['go']['main']['App']['ApplyHistoryRetentionNow']();
 }
@@ -282,6 +286,10 @@ export function PickGuestDestination() {
   return window['go']['main']['App']['PickGuestDestination']();
 }
 
+export function PickGuestSharePaths(arg1) {
+  return window['go']['main']['App']['PickGuestSharePaths'](arg1);
+}
+
 export function QueryTransferHistory(arg1) {
   return window['go']['main']['App']['QueryTransferHistory'](arg1);
 }
@@ -332,6 +340,10 @@ export function RejectUpload(arg1) {
 
 export function RemoveExpectedParticipant(arg1) {
   return window['go']['main']['App']['RemoveExpectedParticipant'](arg1);
+}
+
+export function RemoveGuestSharedSource(arg1) {
+  return window['go']['main']['App']['RemoveGuestSharedSource'](arg1);
 }
 
 export function RemoveKnownHost(arg1) {

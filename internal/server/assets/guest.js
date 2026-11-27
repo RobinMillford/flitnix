@@ -49,10 +49,31 @@
   var rejectedTitle = document.getElementById("rejected-title");
   var rejectedMsg = document.getElementById("rejected-msg");
   var uploadView = document.getElementById("upload-view");
+  var guestUploadPanel = document.getElementById("guest-upload-panel");
+  var roomModeTagline = document.getElementById("room-mode-tagline");
+  var guestModeFootnote = document.getElementById("guest-mode-footnote");
+  var sharedFilesPanel = document.getElementById("shared-files-panel");
+  var sharedFilesList = document.getElementById("shared-files-list");
+  var sharedFolderBar = document.getElementById("shared-folder-bar");
+  var sharedFolderCrumb = document.getElementById("shared-folder-crumb");
+  var sharedFolderBackBtn = document.getElementById("shared-folder-back-btn");
+  var sharedFolderDlBtn = document.getElementById("shared-folder-dl-btn");
+  var refreshSharedBtn = document.getElementById("guest-refresh-shared-btn");
+  var downloadSelectedBtn = document.getElementById("guest-download-selected-btn");
+  var downloadStatusEl = document.getElementById("guest-download-status");
+  var downloadStatusText = document.getElementById("guest-download-status-text");
+  var downloadDigestText = document.getElementById("guest-download-digest");
   var guestBadge = document.getElementById("guest-badge");
   var dropZone = document.getElementById("drop-zone");
   var fileSelector = document.getElementById("file-selector");
   var queueEl = document.getElementById("upload-queue");
+  var currentRoomMode = "upload_only";
+  var currentAllowsUpload = true;
+  var currentAllowsDownload = false;
+  var sharedSourcesCache = [];
+  var selectedSourceIds = {};
+  var activeFolderBrowse = null;
+  var activeDownloadPoll = null;
 
   // Event & Collection metadata DOM elements
   var roomHeaderCard = document.getElementById("room-header-card");
@@ -418,6 +439,9 @@
           });
         }
 
+        if (info.mode) {
+          applyRoomModeUI(info.mode, info.allowsUpload !== false, !!info.allowsDownload);
+        }
         if (info.formSchema) {
           renderFormFields(info.formSchema);
         }
@@ -586,6 +610,12 @@
       return;
     }
     if (envType === "guest.status" || envType === "guest.room.updated") {
+      if (payload && payload.action === "shared_sources_updated") {
+        if (currentAllowsDownload) {
+          loadGuestSharedSources();
+        }
+        return;
+      }
       if (payload && payload.state) {
         handleStatusResponse(payload);
       } else {
@@ -712,15 +742,352 @@
     poll();
   }
 
+  function applyRoomModeUI(mode, allowsUpload, allowsDownload) {
+    currentRoomMode = mode || "upload_only";
+    currentAllowsUpload = allowsUpload !== false;
+    currentAllowsDownload = !!allowsDownload;
+    if (roomModeTagline) {
+      if (currentRoomMode === "download_only") {
+        roomModeTagline.textContent = "Download-only room · Broadcast files from host";
+      } else if (currentRoomMode === "two_way") {
+        roomModeTagline.textContent = "Two-way room · Send & download files over local Wi-Fi";
+      } else {
+        roomModeTagline.textContent = "Upload-only file drop to host desktop";
+      }
+    }
+    if (guestModeFootnote) {
+      if (currentRoomMode === "download_only") {
+        guestModeFootnote.textContent = "Guest room is download-only. Files transfer directly over your local Wi-Fi or LAN.";
+      } else if (currentRoomMode === "two_way") {
+        guestModeFootnote.textContent = "Two-way room: uploaded files still require host approval before saving.";
+      } else {
+        guestModeFootnote.textContent = "Guest Drop Box is upload-only. Files are transferred directly over your local Wi-Fi or LAN.";
+      }
+    }
+    if (guestUploadPanel) {
+      guestUploadPanel.hidden = !currentAllowsUpload;
+    }
+    if (sharedFilesPanel) {
+      sharedFilesPanel.hidden = !currentAllowsDownload;
+    }
+  }
+
+  function updateDownloadSelectionUI() {
+    if (!downloadSelectedBtn) return;
+    var count = 0;
+    for (var k in selectedSourceIds) {
+      if (Object.prototype.hasOwnProperty.call(selectedSourceIds, k) && selectedSourceIds[k]) count++;
+    }
+    downloadSelectedBtn.hidden = count === 0;
+    downloadSelectedBtn.textContent = count > 0 ? ("Download Selected (" + count + ")") : "Download Selected (ZIP)";
+  }
+
+  function pollGuestDownloadProgress(progressId, filename) {
+    if (activeDownloadPoll) {
+      clearTimeout(activeDownloadPoll);
+      activeDownloadPoll = null;
+    }
+    if (downloadStatusEl) downloadStatusEl.hidden = false;
+    if (downloadStatusText) downloadStatusText.textContent = "Starting " + (filename || "download") + "…";
+    if (downloadDigestText) downloadDigestText.textContent = "";
+
+    function tick() {
+      fetch("/guest-api/download-progress/" + encodeURIComponent(progressId), {
+        credentials: "same-origin",
+        cache: "no-store"
+      }).then(function (res) {
+        if (!res.ok) return null;
+        return res.json();
+      }).then(function (p) {
+        if (!p) return;
+        if (p.state === "completed") {
+          if (downloadStatusText) downloadStatusText.textContent = "Completed: " + (filename || "download");
+          if (downloadDigestText && p.sha256) downloadDigestText.textContent = "SHA-256: " + p.sha256.slice(0, 12) + "…";
+          return;
+        }
+        if (p.state === "failed" || p.state === "expired") {
+          if (downloadStatusText) downloadStatusText.textContent = "Download " + p.state + (p.error ? ": " + p.error : "");
+          return;
+        }
+        if (downloadStatusText) {
+          var pct = p.totalBytes > 0 ? Math.min(100, Math.round((p.processedBytes / p.totalBytes) * 100)) : 0;
+          downloadStatusText.textContent = "Downloading " + (filename || "file") + " (" + pct + "%)…";
+        }
+        activeDownloadPoll = setTimeout(tick, 600);
+      }).catch(function () {
+        activeDownloadPoll = setTimeout(tick, 1200);
+      });
+    }
+    tick();
+  }
+
+  function startGuestDownload(reqPayload) {
+    if (downloadStatusEl) downloadStatusEl.hidden = false;
+    if (downloadStatusText) downloadStatusText.textContent = "Preparing download grant…";
+    if (downloadDigestText) downloadDigestText.textContent = "";
+
+    fetch("/guest-api/download-grants", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(reqPayload)
+    }).then(function (res) {
+      if (!res.ok) {
+        return res.json().catch(function () { return {}; }).then(function (e) {
+          throw new Error((e && e.error) || ("Download unavailable (" + res.status + ")"));
+        });
+      }
+      return res.json();
+    }).then(function (grant) {
+      if (grant.progressId) {
+        pollGuestDownloadProgress(grant.progressId, grant.filename);
+      }
+      var link = document.createElement("a");
+      link.href = grant.downloadUrl;
+      link.download = grant.filename || "";
+      link.style.display = "none";
+      document.body.appendChild(link);
+      link.click();
+      setTimeout(function () {
+        if (link.parentNode) link.parentNode.removeChild(link);
+      }, 100);
+    }).catch(function (err) {
+      if (downloadStatusEl) downloadStatusEl.hidden = false;
+      if (downloadStatusText) downloadStatusText.textContent = err.message || "Download failed";
+    });
+  }
+
+  function renderSharedSources(sources) {
+    sharedSourcesCache = Array.isArray(sources) ? sources : [];
+    activeFolderBrowse = null;
+    if (sharedFolderBar) sharedFolderBar.hidden = true;
+    if (!sharedFilesList) return;
+    sharedFilesList.innerHTML = "";
+    if (sharedSourcesCache.length === 0) {
+      var empty = document.createElement("li");
+      empty.className = "queue-item muted";
+      empty.textContent = "No host files are currently shared in this room.";
+      sharedFilesList.appendChild(empty);
+      updateDownloadSelectionUI();
+      return;
+    }
+    for (var i = 0; i < sharedSourcesCache.length; i++) {
+      (function (src) {
+        var li = document.createElement("li");
+        li.className = "queue-item";
+        var row = document.createElement("div");
+        row.style.display = "flex";
+        row.style.justifyContent = "space-between";
+        row.style.alignItems = "center";
+        row.style.gap = "0.6rem";
+
+        var left = document.createElement("label");
+        left.style.display = "flex";
+        left.style.alignItems = "center";
+        left.style.gap = "0.55rem";
+        left.style.flex = "1";
+        left.style.minWidth = "0";
+        left.style.cursor = "pointer";
+
+        var cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.checked = !!selectedSourceIds[src.id];
+        cb.addEventListener("change", function () {
+          if (cb.checked) selectedSourceIds[src.id] = true;
+          else delete selectedSourceIds[src.id];
+          updateDownloadSelectionUI();
+        });
+
+        var info = document.createElement("div");
+        info.style.minWidth = "0";
+        var title = document.createElement("div");
+        title.style.fontWeight = "500";
+        title.style.wordBreak = "break-word";
+        title.textContent = (src.kind === "folder" ? "📁 " : "📄 ") + src.name;
+        var sub = document.createElement("div");
+        sub.className = "muted";
+        sub.style.fontSize = "0.78rem";
+        sub.textContent = src.kind === "folder"
+          ? (src.itemCount + " items · " + formatBytes(src.totalBytes || 0))
+          : formatBytes(src.totalBytes || 0);
+        info.appendChild(title);
+        info.appendChild(sub);
+        left.appendChild(cb);
+        left.appendChild(info);
+
+        var actions = document.createElement("div");
+        actions.style.display = "flex";
+        actions.style.gap = "0.35rem";
+        if (src.kind === "folder") {
+          var openBtn = document.createElement("button");
+          openBtn.type = "button";
+          openBtn.className = "badge badge--waiting";
+          openBtn.style.cursor = "pointer";
+          openBtn.style.border = "1px solid var(--border)";
+          openBtn.textContent = "Browse";
+          openBtn.addEventListener("click", function () {
+            browseGuestFolder(src, "");
+          });
+          actions.appendChild(openBtn);
+        }
+        var dlBtn = document.createElement("button");
+        dlBtn.type = "button";
+        dlBtn.className = "badge badge--approved";
+        dlBtn.style.cursor = "pointer";
+        dlBtn.style.border = "1px solid var(--border)";
+        dlBtn.textContent = src.kind === "folder" ? "ZIP" : "Download";
+        dlBtn.addEventListener("click", function () {
+          startGuestDownload({ sourceIds: [src.id] });
+        });
+        actions.appendChild(dlBtn);
+
+        row.appendChild(left);
+        row.appendChild(actions);
+        li.appendChild(row);
+        sharedFilesList.appendChild(li);
+      })(sharedSourcesCache[i]);
+    }
+    updateDownloadSelectionUI();
+  }
+
+  function browseGuestFolder(src, prefix) {
+    activeFolderBrowse = { source: src, prefix: prefix || "" };
+    if (downloadSelectedBtn) downloadSelectedBtn.hidden = true;
+    fetch("/guest-api/sources/" + encodeURIComponent(src.id) + "/items?prefix=" + encodeURIComponent(prefix || ""), {
+      credentials: "same-origin",
+      cache: "no-store"
+    }).then(function (res) {
+      if (!res.ok) throw new Error("Could not browse folder");
+      return res.json();
+    }).then(function (page) {
+      if (sharedFolderBar) sharedFolderBar.hidden = false;
+      if (sharedFolderCrumb) sharedFolderCrumb.textContent = src.name + (prefix ? " / " + prefix : "");
+      if (!sharedFilesList) return;
+      sharedFilesList.innerHTML = "";
+      var dirs = page.directories || [];
+      var items = page.items || [];
+      for (var d = 0; d < dirs.length; d++) {
+        (function (dirName) {
+          var li = document.createElement("li");
+          li.className = "queue-item";
+          var btn = document.createElement("button");
+          btn.type = "button";
+          btn.style.background = "transparent";
+          btn.style.border = "none";
+          btn.style.color = "var(--text)";
+          btn.style.cursor = "pointer";
+          btn.style.fontWeight = "500";
+          btn.textContent = "📁 " + dirName;
+          btn.addEventListener("click", function () {
+            browseGuestFolder(src, dirName);
+          });
+          li.appendChild(btn);
+          sharedFilesList.appendChild(li);
+        })(dirs[d]);
+      }
+      for (var j = 0; j < items.length; j++) {
+        (function (item) {
+          var li = document.createElement("li");
+          li.className = "queue-item";
+          li.style.display = "flex";
+          li.style.justifyContent = "space-between";
+          li.style.alignItems = "center";
+          var label = document.createElement("span");
+          label.textContent = "📄 " + item.name + " (" + formatBytes(item.size || 0) + ")";
+          var dlBtn = document.createElement("button");
+          dlBtn.type = "button";
+          dlBtn.className = "badge badge--approved";
+          dlBtn.style.cursor = "pointer";
+          dlBtn.style.border = "1px solid var(--border)";
+          dlBtn.textContent = "Download";
+          dlBtn.addEventListener("click", function () {
+            startGuestDownload({ sourceId: src.id, itemIds: [item.id] });
+          });
+          li.appendChild(label);
+          li.appendChild(dlBtn);
+          sharedFilesList.appendChild(li);
+        })(items[j]);
+      }
+      if (dirs.length === 0 && items.length === 0) {
+        var empty = document.createElement("li");
+        empty.className = "queue-item muted";
+        empty.textContent = "This folder is empty.";
+        sharedFilesList.appendChild(empty);
+      }
+    }).catch(function () {
+      renderSharedSources(sharedSourcesCache);
+    });
+  }
+
+  function loadGuestSharedSources() {
+    if (!currentAllowsDownload) return;
+    fetch("/guest-api/sources", { credentials: "same-origin", cache: "no-store" })
+      .then(function (res) {
+        if (!res.ok) return [];
+        return res.json();
+      })
+      .then(function (sources) {
+        renderSharedSources(sources);
+      })
+      .catch(function () {});
+  }
+
+  if (refreshSharedBtn) {
+    refreshSharedBtn.addEventListener("click", function () {
+      loadGuestSharedSources();
+    });
+  }
+  if (sharedFolderBackBtn) {
+    sharedFolderBackBtn.addEventListener("click", function () {
+      if (!activeFolderBrowse || !activeFolderBrowse.prefix) {
+        renderSharedSources(sharedSourcesCache);
+        return;
+      }
+      var parts = activeFolderBrowse.prefix.replace(/\/+$/, "").split("/");
+      parts.pop();
+      var parentPrefix = parts.length > 0 ? parts.join("/") + "/" : "";
+      if (!parentPrefix) renderSharedSources(sharedSourcesCache);
+      else browseGuestFolder(activeFolderBrowse.source, parentPrefix);
+    });
+  }
+  if (sharedFolderDlBtn) {
+    sharedFolderDlBtn.addEventListener("click", function () {
+      if (activeFolderBrowse && activeFolderBrowse.source) {
+        startGuestDownload({ sourceIds: [activeFolderBrowse.source.id] });
+      }
+    });
+  }
+  if (downloadSelectedBtn) {
+    downloadSelectedBtn.addEventListener("click", function () {
+      var ids = [];
+      for (var k in selectedSourceIds) {
+        if (Object.prototype.hasOwnProperty.call(selectedSourceIds, k) && selectedSourceIds[k]) {
+          ids.push(k);
+        }
+      }
+      if (ids.length > 0) {
+        startGuestDownload({ sourceIds: ids });
+      }
+    });
+  }
+
   function handleStatusResponse(data) {
+    if (data.mode || typeof data.allowsDownload === "boolean") {
+      applyRoomModeUI(data.mode || currentRoomMode, data.allowsUpload !== false, !!data.allowsDownload);
+    }
     if (data.state === "approved") {
       guestEnded = false;
       hideAllViews();
       if (uploadView) uploadView.hidden = false;
       updateAwarenessUI();
       if (guestBadge) guestBadge.textContent = "Connected: " + (data.nickname || "Guest");
-      setStatus("ready", "Connected to Guest Drop Box");
-      pumpQueue();
+      setStatus("ready", currentAllowsDownload && !currentAllowsUpload ? "Connected to Share Room" : "Connected to Guest Drop Box");
+      if (currentAllowsDownload && sharedSourcesCache.length === 0 && !activeFolderBrowse) {
+        loadGuestSharedSources();
+      }
+      if (currentAllowsUpload) {
+        pumpQueue();
+      }
     } else if (data.state === "pending") {
       guestEnded = false;
       hideAllViews();
@@ -821,6 +1188,10 @@
   }
 
   function enqueueFiles(fileList) {
+    if (!currentAllowsUpload) {
+      showAwarenessBanner("Uploads are disabled in this download-only room.");
+      return;
+    }
     if (!validateFormSchema()) return;
     var currentValues = getFormValues();
 

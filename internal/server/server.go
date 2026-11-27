@@ -529,3 +529,11 @@ func (s *Server) LocalHTTPSSANs() []string {
 	copy(out, s.localHTTPSSANs)
 	return out
 }
+
+// RevokeRoomGrants revokes any unredeemed grants or continuation tickets for a guest room.
+func (s *Server) RevokeRoomGrants(roomID string) {
+	if s == nil || s.grants == nil || roomID == "" {
+		return
+	}
+	s.grants.RevokeRoom(roomID)
+}
