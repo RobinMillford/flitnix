@@ -14,13 +14,13 @@ import (
 )
 
 const (
-	MaxTitleBytes     = 96
-	MaxBodyBytes      = 240
-	DefaultQueueSize  = 64
-	actionTokenTTL    = 15 * time.Minute
-	maxActionTokens   = 256
-	defaultCooldown   = 400 * time.Millisecond
-	maxDedupEntries   = 512
+	MaxTitleBytes    = 96
+	MaxBodyBytes     = 240
+	DefaultQueueSize = 64
+	actionTokenTTL   = 15 * time.Minute
+	maxActionTokens  = 256
+	defaultCooldown  = 400 * time.Millisecond
+	maxDedupEntries  = 512
 )
 
 // Category classifies notifications for per-category settings filtering.
@@ -122,11 +122,11 @@ type dispatchedAction struct {
 }
 
 type dispatchedNotification struct {
-	Key           string
-	Title         string
-	Body          string
-	DefaultToken  string
-	Actions       []dispatchedAction
+	Key          string
+	Title        string
+	Body         string
+	DefaultToken string
+	Actions      []dispatchedAction
 }
 
 // Manager serializes notification delivery over a bounded queue and validates

@@ -258,18 +258,18 @@ type BatchView struct {
 
 // SettingsView is the UI projection of persistent user settings.
 type SettingsView struct {
-	Version                int    `json:"version"`
-	Theme                  string `json:"theme"`
-	Locale                 string `json:"locale"`
-	DownloadDir            string `json:"downloadDir"`
-	EffectiveDir           string `json:"effectiveDir"`
-	AutoStartSession       bool   `json:"autoStartSession"`
-	PreserveModTimes       bool   `json:"preserveModTimes"`
-	PreferredInterface     string `json:"preferredInterface"`
-	VisibilityMode         string `json:"visibilityMode,omitempty"`
-	VisibilityPreviousMode string `json:"visibilityPreviousMode,omitempty"`
-	VisibilityExpiresAt    string `json:"visibilityExpiresAt,omitempty"`
-	QRSharingPaused        bool   `json:"qrSharingPaused,omitempty"`
+	Version                   int    `json:"version"`
+	Theme                     string `json:"theme"`
+	Locale                    string `json:"locale"`
+	DownloadDir               string `json:"downloadDir"`
+	EffectiveDir              string `json:"effectiveDir"`
+	AutoStartSession          bool   `json:"autoStartSession"`
+	PreserveModTimes          bool   `json:"preserveModTimes"`
+	PreferredInterface        string `json:"preferredInterface"`
+	VisibilityMode            string `json:"visibilityMode,omitempty"`
+	VisibilityPreviousMode    string `json:"visibilityPreviousMode,omitempty"`
+	VisibilityExpiresAt       string `json:"visibilityExpiresAt,omitempty"`
+	QRSharingPaused           bool   `json:"qrSharingPaused,omitempty"`
 	MinimizeToTray            bool   `json:"minimizeToTray"`
 	LaunchOnLogin             bool   `json:"launchOnLogin"`
 	TraySupported             bool   `json:"traySupported,omitempty"`
@@ -1630,9 +1630,9 @@ func (a *App) StartSession(ip string) (SessionView, error) {
 		// invariant unless another session is still active.
 		if a.sessions.Len() == 0 {
 			if a.tray != nil {
-			a.tray.Stop()
-		}
-		a.stopServer()
+				a.tray.Stop()
+			}
+			a.stopServer()
 		}
 		return SessionView{}, err
 	}
@@ -1965,9 +1965,9 @@ func (a *App) EndSession(key string) error {
 		a.registry.Clear()
 		if !a.isGuestRoomActive() {
 			if a.tray != nil {
-			a.tray.Stop()
-		}
-		a.stopServer()
+				a.tray.Stop()
+			}
+			a.stopServer()
 		}
 	}
 	return nil
@@ -3820,9 +3820,9 @@ func (a *App) RemoveTrustedDevice(id string) error {
 			a.registry.Clear()
 			if !a.isGuestRoomActive() {
 				if a.tray != nil {
-			a.tray.Stop()
-		}
-		a.stopServer()
+					a.tray.Stop()
+				}
+				a.stopServer()
 			}
 		}
 	}

@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Persistent Transfer History & Configurable Retention (Phase 3 — G6 & G26)**:
+  - Added durable, privacy-preserving personal transfer history (`internal/history`, `<dataDir>/history.jsonl`) surviving restarts across incoming, batch, phone download, and computer-sharing transfers, upgraded `TransferHistoryView.svelte` with search, direction/status/date/device filters, summary metrics, pagination, `Open`/`Reveal`/`Reshare` (with strict receive-directory symlink confinement), and safe `Clear History`.
+  - Completed deferred G26 history retention (`CurrentSchemaVersion = 6`): configurable age/count limits (`HistoryRetentionDays = 90`, `HistoryMaxRecords = 5000`), non-blocking startup and periodic pruning, and Settings Storage UI controls that prune only metadata without touching transferred files.
+- **Native OS Notifications & Interactive Approval (Phase 3 — G8)**:
+  - Implemented `internal/notify` supporting D-Bus `org.freedesktop.Notifications` (Linux), `go-toast/v2` (Windows), and argument-safe macOS notifications, backed by sanitized Pango/BIDI-safe text, single-use 128-bit action tokens, state/visibility/quota revalidation, SAS-only pairing focus protection, privacy filename masking, quiet mode, and per-category settings.
+- **System Tray, Background Receiving & Login Autostart (Phase 3 — G5)**:
+  - Implemented `internal/tray` (Linux D-Bus SNI + DBusMenu, Windows Win32 tray, macOS Cocoa `NSStatusBar`, safe headless fallback) and `internal/autostart` (`flitnix.desktop`, Windows HKCU `Run`, macOS `LaunchAgent` plist) with `--background` startup, close/minimize-to-tray preserving active sessions and transfers, live visibility/DND tray controls, and explicit `Quit Flitnix`.
+- **Real-Time WebSockets/SSE Event Infrastructure (Phase 3 — G10)**:
+  - Added `internal/events` pub/sub Hub, `docs/ADR-001-realtime-events.md`, authenticated fetch-stream SSE endpoints (`GET /api/events` & `GET /guest-api/events`), desktop `events.Hub` -> Wails `"flitnix:event"` coalescer (`frontend/src/realtimeEvents.ts`), and mobile SSE clients (`app.js`, `guest.js`) with Origin validation, TTL/revocation enforcement, queue backpressure shedding, and seamless polling fallback.
 - **Desktop-to-Desktop GUI Sharing & Single-Port TLS 1.3 Multiplexing (Phase 2 — G9)**:
   - Added single-port TLS 1.3 + HTTP connection multiplexing (`internal/server/tls_mux.go`) backed by each desktop host's Ed25519 self-signed identity certificate (`NewHostIdentityCertificate`), preserving zero-install HTTP QR browsing alongside TOFU-pinned TLS 1.3 desktop transfers (`internal/client/tls.go`).
   - Added `POST /api/peer/challenge`, `POST /api/peer/connect`, `peer_transfer.go` orchestration, bidirectional file/folder staging, live job progress/cancellation, and the dedicated **Computer Sharing** tab (`frontend/src/views/ComputerSharingView.svelte`) across Windows, macOS, and Linux.

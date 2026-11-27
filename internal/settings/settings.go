@@ -38,16 +38,16 @@ var (
 
 // Settings represents persistent user preferences.
 type Settings struct {
-	Version                int       `json:"version"`
-	Theme                  string    `json:"theme"`
-	Locale                 string    `json:"locale"`
-	DownloadDir            string    `json:"downloadDir"`
-	AutoStartSession       bool      `json:"autoStartSession"`
-	PreserveModTimes       bool      `json:"preserveModTimes"`
-	PreferredInterface     string    `json:"preferredInterface"`
-	VisibilityMode         string    `json:"visibilityMode"`
-	VisibilityPreviousMode string    `json:"visibilityPreviousMode"`
-	VisibilityExpiresAt    time.Time `json:"visibilityExpiresAt,omitempty"`
+	Version                   int       `json:"version"`
+	Theme                     string    `json:"theme"`
+	Locale                    string    `json:"locale"`
+	DownloadDir               string    `json:"downloadDir"`
+	AutoStartSession          bool      `json:"autoStartSession"`
+	PreserveModTimes          bool      `json:"preserveModTimes"`
+	PreferredInterface        string    `json:"preferredInterface"`
+	VisibilityMode            string    `json:"visibilityMode"`
+	VisibilityPreviousMode    string    `json:"visibilityPreviousMode"`
+	VisibilityExpiresAt       time.Time `json:"visibilityExpiresAt,omitempty"`
 	MinimizeToTray            bool      `json:"minimizeToTray"`
 	LaunchOnLogin             bool      `json:"launchOnLogin"`
 	NotificationsEnabled      bool      `json:"notificationsEnabled"`
