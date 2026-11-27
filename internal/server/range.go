@@ -71,8 +71,8 @@ type guardedRangeSeeker struct {
 	sess        *session.Session
 	activeCheck func() bool
 	p           *archiveProgress
-	downloads  *transfer.DownloadRegistry
-	downloadID string
+	downloads   *transfer.DownloadRegistry
+	downloadID  string
 
 	pending    int64
 	sinceCheck int64

@@ -108,19 +108,19 @@ type Coordinator struct {
 	onRemoteSync func(item SyncItem)
 	onState      func(status StatusView)
 
-	enabled          bool
-	paused           bool
-	hasActivePeer    bool
-	watchCancel      context.CancelFunc
-	watchDone        chan struct{}
-	lastLocalHash    string
-	suppressedHash   string
-	suppressedUntil  time.Time
-	latest           *SyncItem
-	lastSyncAt       time.Time
-	lastOrigin       string
-	lastSizeBytes    int
-	lastSkipped      string
+	enabled         bool
+	paused          bool
+	hasActivePeer   bool
+	watchCancel     context.CancelFunc
+	watchDone       chan struct{}
+	lastLocalHash   string
+	suppressedHash  string
+	suppressedUntil time.Time
+	latest          *SyncItem
+	lastSyncAt      time.Time
+	lastOrigin      string
+	lastSizeBytes   int
+	lastSkipped     string
 }
 
 // NewCoordinator initializes a clipboard coordinator. By default, opt-in sync
