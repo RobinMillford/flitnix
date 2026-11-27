@@ -271,13 +271,13 @@ func TestEnsureServerBindsExplicitAddress(t *testing.T) {
 	if err := a.ensureServer(listen); err != nil {
 		t.Fatalf("ensureServer(%s): %v", listen, err)
 	}
-	if a.srv == nil {
+	if testAppServerOrNil(a) == nil {
 		t.Fatal("server not running")
 	}
-	if got := a.srv.Addr().String(); got != listen {
+	if got := testAppServer(t, a).Addr().String(); got != listen {
 		t.Fatalf("Addr() = %s, want %s (no silent rebind)", got, listen)
 	}
-	if got, want := a.srv.URL(), "http://"+listen; got != want {
+	if got, want := testAppServerURL(t, a), "http://"+listen; got != want {
 		t.Fatalf("URL() = %q, want %q", got, want)
 	}
 }
@@ -290,7 +290,7 @@ func TestEnsureServerReusesSameAddress(t *testing.T) {
 	if err := a.ensureServer(listen); err != nil {
 		t.Fatalf("first ensureServer: %v", err)
 	}
-	first := a.srv
+	first := testAppServer(t, a)
 
 	s, err := a.sessions.Create()
 	if err != nil {
@@ -300,7 +300,7 @@ func TestEnsureServerReusesSameAddress(t *testing.T) {
 	if err := a.ensureServer(listen); err != nil {
 		t.Fatalf("second ensureServer: %v", err)
 	}
-	if a.srv != first {
+	if testAppServer(t, a) != first {
 		t.Fatal("running server on the same address must be reused, not restarted")
 	}
 	// The earlier session must survive: its URL is still valid.
@@ -336,8 +336,8 @@ func TestEnsureServerDifferentAddressEndsSessions(t *testing.T) {
 	if err := a.ensureServer(second); err != nil {
 		t.Fatalf("rebind to %s: %v", second, err)
 	}
-	if a.srv.Addr().String() != second {
-		t.Fatalf("Addr() = %s, want the rebound %s", a.srv.Addr(), second)
+	if testAppServer(t, a).Addr().String() != second {
+		t.Fatalf("Addr() = %s, want the rebound %s", testAppServer(t, a).Addr(), second)
 	}
 	if a.sessions.Len() != 0 {
 		t.Fatalf("Len = %d, want 0: the old address's sessions are unreachable", a.sessions.Len())
@@ -371,7 +371,7 @@ func TestEnsureServerPortOccupied(t *testing.T) {
 	if want := "could not start on " + listen; !strings.Contains(err.Error(), want) {
 		t.Errorf("error %q does not mention %q", err, want)
 	}
-	if a.srv != nil {
+	if testAppServerOrNil(a) != nil {
 		t.Fatal("failed start must not leave a server behind")
 	}
 }
@@ -380,7 +380,7 @@ func TestStopServerIdleSafe(t *testing.T) {
 	a := newTestApp(t)
 	a.stopServer() // never started: must be a no-op
 	a.stopServer() // twice: still a no-op
-	if a.srv != nil {
+	if testAppServerOrNil(a) != nil {
 		t.Fatal("stopServer must keep the server unset")
 	}
 }
@@ -432,7 +432,7 @@ func TestStartSessionEndToEnd(t *testing.T) {
 		t.Fatalf("StartSession: %v", err)
 	}
 	wantListen := net.JoinHostPort(lip, "43821")
-	if got := a.srv.Addr().String(); got != wantListen {
+	if got := testAppServer(t, a).Addr().String(); got != wantListen {
 		t.Fatalf("server bound to %s, want %s", got, wantListen)
 	}
 	if view.InterfaceName != "flitbr0" || view.Address != lip {
@@ -471,12 +471,12 @@ func TestStartSessionSecondCallIsTheSameAddress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first StartSession: %v", err)
 	}
-	srvFirst := a.srv
+	srvFirst := testAppServer(t, a)
 	second, err := a.StartSession(lip)
 	if err != nil {
 		t.Fatalf("second StartSession on the live address: %v", err)
 	}
-	if a.srv != srvFirst {
+	if testAppServer(t, a) != srvFirst {
 		t.Fatal("same-address second session must not restart the server")
 	}
 	if a.sessions.Len() != 2 {
@@ -550,7 +550,7 @@ func TestEndSessionStopsServerWhenLastLeaves(t *testing.T) {
 		t.Fatalf("EndSession: %v", err)
 	}
 	// One session remains, so the server stays up for it.
-	if a.srv == nil {
+	if testAppServerOrNil(a) == nil {
 		t.Fatal("server must stay up while a session is active")
 	}
 	// The revoked session can no longer validate, the survivor can.
@@ -561,7 +561,7 @@ func TestEndSessionStopsServerWhenLastLeaves(t *testing.T) {
 	if err := a.EndSession(s2.Key()); err != nil {
 		t.Fatalf("EndSession: %v", err)
 	}
-	if a.srv != nil {
+	if testAppServerOrNil(a) != nil {
 		t.Fatal("last session gone: the server must stop")
 	}
 	if a.sessions.Len() != 0 {

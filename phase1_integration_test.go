@@ -179,7 +179,7 @@ func TestPhase1ScenarioB_Quota507AndDiscardFreesHeadroom(t *testing.T) {
 	d1Req.Host = "127.0.0.1"
 	d1Req.Header.Set("Authorization", "Bearer "+s.Token())
 	d1Rec := httptest.NewRecorder()
-	a.srv.Handler().ServeHTTP(d1Rec, d1Req)
+	testAppHandler(t, a).ServeHTTP(d1Rec, d1Req)
 	if d1Rec.Code != http.StatusCreated {
 		t.Fatalf("declare b1 = %d", d1Rec.Code)
 	}
@@ -194,7 +194,7 @@ func TestPhase1ScenarioB_Quota507AndDiscardFreesHeadroom(t *testing.T) {
 	p1.Header.Set("Authorization", "Bearer "+s.Token())
 	p1.Header.Set("Upload-Offset", "0")
 	p1Rec := httptest.NewRecorder()
-	a.srv.Handler().ServeHTTP(p1Rec, p1)
+	testAppHandler(t, a).ServeHTTP(p1Rec, p1)
 	if p1Rec.Code != http.StatusNoContent {
 		t.Fatalf("partial patch = %d", p1Rec.Code)
 	}
@@ -209,7 +209,7 @@ func TestPhase1ScenarioB_Quota507AndDiscardFreesHeadroom(t *testing.T) {
 	d2Req.Host = "127.0.0.1"
 	d2Req.Header.Set("Authorization", "Bearer "+s.Token())
 	d2Rec := httptest.NewRecorder()
-	a.srv.Handler().ServeHTTP(d2Rec, d2Req)
+	testAppHandler(t, a).ServeHTTP(d2Rec, d2Req)
 	if d2Rec.Code != http.StatusInsufficientStorage {
 		t.Fatalf("expected 507 Insufficient Storage, got %d: %s", d2Rec.Code, d2Rec.Body.String())
 	}
@@ -222,7 +222,7 @@ func TestPhase1ScenarioB_Quota507AndDiscardFreesHeadroom(t *testing.T) {
 	d3Req.Host = "127.0.0.1"
 	d3Req.Header.Set("Authorization", "Bearer "+s.Token())
 	d3Rec := httptest.NewRecorder()
-	a.srv.Handler().ServeHTTP(d3Rec, d3Req)
+	testAppHandler(t, a).ServeHTTP(d3Rec, d3Req)
 	if d3Rec.Code != http.StatusCreated {
 		t.Fatalf("after discard declare = %d: %s", d3Rec.Code, d3Rec.Body.String())
 	}
@@ -252,7 +252,7 @@ func TestPhase1ScenarioC_RoamingPreservesMultiFileBatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	mBody, _ := json.Marshal(lm.Manifest)
-	decReq, _ := http.NewRequest(http.MethodPost, a.srv.URL()+"/api/batches", bytes.NewReader(mBody))
+	decReq, _ := http.NewRequest(http.MethodPost, testAppServerURL(t, a)+"/api/batches", bytes.NewReader(mBody))
 	decReq.Header.Set("Authorization", "Bearer "+sess.Token())
 	decRes, err := http.DefaultClient.Do(decReq)
 	if err != nil || decRes.StatusCode != http.StatusCreated {
@@ -267,7 +267,7 @@ func TestPhase1ScenarioC_RoamingPreservesMultiFileBatch(t *testing.T) {
 	}
 
 	// Partial upload of item 0, then simulate Wi-Fi drop & recovery
-	u0 := fmt.Sprintf("%s/api/batches/%s/items/%s/content", a.srv.URL(), batch.ID, batch.Items[0].ID)
+	u0 := fmt.Sprintf("%s/api/batches/%s/items/%s/content", testAppServerURL(t, a), batch.ID, batch.Items[0].ID)
 	partReq, _ := http.NewRequest(http.MethodPatch, u0, bytes.NewReader(d1[:64*1024]))
 	partReq.Header.Set("Authorization", "Bearer "+sess.Token())
 	partReq.Header.Set("Upload-Offset", "0")
@@ -321,7 +321,7 @@ func TestPhase1ScenarioD_DownloadRangeResumeAndMutationFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dlURL := a.srv.URL() + "/api/files/" + sf.ID + "/download"
+	dlURL := testAppServerURL(t, a) + "/api/files/" + sf.ID + "/download"
 	r1, _ := http.NewRequest(http.MethodGet, dlURL, nil)
 	r1.Header.Set("Authorization", "Bearer "+sess.Token())
 	r1.Header.Set("Range", "bytes=0-4095")
@@ -389,7 +389,7 @@ func TestPhase1ScenarioE_FolderExplorerAndSelectiveRangeDownload(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	bReq, _ := http.NewRequest(http.MethodGet, a.srv.URL()+"/api/sources/"+src.ID+"/items?prefix=sub", nil)
+	bReq, _ := http.NewRequest(http.MethodGet, testAppServerURL(t, a)+"/api/sources/"+src.ID+"/items?prefix=sub", nil)
 	bReq.Header.Set("Authorization", "Bearer "+sess.Token())
 	bRes, err := http.DefaultClient.Do(bReq)
 	if err != nil || bRes.StatusCode != http.StatusOK {
@@ -399,7 +399,7 @@ func TestPhase1ScenarioE_FolderExplorerAndSelectiveRangeDownload(t *testing.T) {
 	_ = json.NewDecoder(bRes.Body).Decode(&subPage)
 	bRes.Body.Close()
 
-	rReq, _ := http.NewRequest(http.MethodGet, a.srv.URL()+"/api/sources/"+src.ID+"/items", nil)
+	rReq, _ := http.NewRequest(http.MethodGet, testAppServerURL(t, a)+"/api/sources/"+src.ID+"/items", nil)
 	rReq.Header.Set("Authorization", "Bearer "+sess.Token())
 	rRes, _ := http.DefaultClient.Do(rReq)
 	var rootPage transfer.SourceBrowsePage
@@ -418,7 +418,7 @@ func TestPhase1ScenarioE_FolderExplorerAndSelectiveRangeDownload(t *testing.T) {
 		"sourceId": src.ID,
 		"itemIds":  []string{subPage.Items[0].ID, alsoID},
 	})
-	gReq, _ := http.NewRequest(http.MethodPost, a.srv.URL()+"/api/download-grants", bytes.NewReader(grantBody))
+	gReq, _ := http.NewRequest(http.MethodPost, testAppServerURL(t, a)+"/api/download-grants", bytes.NewReader(grantBody))
 	gReq.Header.Set("Authorization", "Bearer "+sess.Token())
 	gRes, err := http.DefaultClient.Do(gReq)
 	if err != nil || gRes.StatusCode != http.StatusCreated {
@@ -436,7 +436,7 @@ func TestPhase1ScenarioE_FolderExplorerAndSelectiveRangeDownload(t *testing.T) {
 	}
 	gRes.Body.Close()
 
-	dlReq, _ := http.NewRequest(http.MethodGet, a.srv.URL()+grant.DownloadURL, nil)
+	dlReq, _ := http.NewRequest(http.MethodGet, testAppServerURL(t, a)+grant.DownloadURL, nil)
 	dlReq.AddCookie(gCookie)
 	dlRes, err := http.DefaultClient.Do(dlReq)
 	if err != nil || dlRes.StatusCode != http.StatusOK {
@@ -482,7 +482,7 @@ func TestPhase1ScenarioF_ModTimeSettingToggle(t *testing.T) {
 	declReq.Host = "127.0.0.1"
 	declReq.Header.Set("Authorization", "Bearer "+s.Token())
 	declRec := httptest.NewRecorder()
-	a.srv.Handler().ServeHTTP(declRec, declReq)
+	testAppHandler(t, a).ServeHTTP(declRec, declReq)
 	var upRes struct {
 		ID string `json:"id"`
 	}
@@ -493,7 +493,7 @@ func TestPhase1ScenarioF_ModTimeSettingToggle(t *testing.T) {
 	putReq.Host = "127.0.0.1"
 	putReq.Header.Set("Authorization", "Bearer "+s.Token())
 	putRec := httptest.NewRecorder()
-	a.srv.Handler().ServeHTTP(putRec, putReq)
+	testAppHandler(t, a).ServeHTTP(putRec, putReq)
 	if putRec.Code != http.StatusOK {
 		t.Fatalf("PUT = %d", putRec.Code)
 	}
@@ -516,7 +516,7 @@ func TestPhase1ScenarioF_ModTimeSettingToggle(t *testing.T) {
 	declReq2.Host = "127.0.0.1"
 	declReq2.Header.Set("Authorization", "Bearer "+s.Token())
 	declRec2 := httptest.NewRecorder()
-	a.srv.Handler().ServeHTTP(declRec2, declReq2)
+	testAppHandler(t, a).ServeHTTP(declRec2, declReq2)
 	var upRes2 struct {
 		ID string `json:"id"`
 	}
@@ -526,7 +526,7 @@ func TestPhase1ScenarioF_ModTimeSettingToggle(t *testing.T) {
 	putReq2.Host = "127.0.0.1"
 	putReq2.Header.Set("Authorization", "Bearer "+s.Token())
 	putRec2 := httptest.NewRecorder()
-	a.srv.Handler().ServeHTTP(putRec2, putReq2)
+	testAppHandler(t, a).ServeHTTP(putRec2, putReq2)
 	if putRec2.Code != http.StatusOK {
 		t.Fatalf("PUT 2 = %d", putRec2.Code)
 	}

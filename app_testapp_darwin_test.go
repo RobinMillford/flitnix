@@ -19,6 +19,5 @@ func newTestApp(t *testing.T) *App {
 	t.Helper()
 	a := newIsolatedApp(t)
 	a.startup(context.Background())
-	t.Cleanup(func() { a.shutdown(context.Background()) })
 	return a
 }
