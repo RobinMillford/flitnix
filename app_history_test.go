@@ -140,3 +140,54 @@ func TestRecordHistoryFromEvent(t *testing.T) {
 		t.Fatalf("unexpected download history record: %+v", res)
 	}
 }
+
+func TestAppHistoryRetentionPolicyIntegration(t *testing.T) {
+	a := newIsolatedApp(t)
+	recvDir := a.store.Dir()
+	if err := os.MkdirAll(recvDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	keepFile := filepath.Join(recvDir, "archive.zip")
+	if err := os.WriteFile(keepFile, []byte("zipdata"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	oldTime := time.Now().UTC().Add(-120 * 24 * time.Hour)
+	a.historyStore.Record(history.Record{
+		DedupKey:    "upload:u-old",
+		TransferID:  "u-old",
+		Timestamp:   oldTime,
+		Direction:   history.DirectionIncoming,
+		DisplayName: "archive.zip",
+		Status:      history.StatusCompleted,
+		LocalPath:   keepFile,
+	})
+	a.historyStore.Record(history.Record{
+		DedupKey:    "upload:u-new",
+		TransferID:  "u-new",
+		Timestamp:   time.Now().UTC(),
+		Direction:   history.DirectionIncoming,
+		DisplayName: "fresh.txt",
+		Status:      history.StatusCompleted,
+	})
+
+	cfg := a.GetSettings()
+	cfg.HistoryRetentionDays = 30
+	cfg.HistoryMaxRecords = 100
+	if err := a.SaveSettings(cfg); err != nil {
+		t.Fatalf("SaveSettings: %v", err)
+	}
+
+	res, err := a.QueryTransferHistory(HistoryFilterView{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Total != 1 || res.Records[0].DisplayName != "fresh.txt" {
+		t.Fatalf("expected old record pruned by 30-day policy, got %+v", res.Records)
+	}
+	// Real file on disk MUST never be deleted by metadata retention pruning.
+	if _, err := os.Stat(keepFile); err != nil {
+		t.Fatalf("history retention must never delete actual transferred file: %v", err)
+	}
+}
+

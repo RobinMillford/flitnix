@@ -10,6 +10,10 @@ export function AddExpectedParticipant(arg1, arg2, arg3) {
   return window['go']['main']['App']['AddExpectedParticipant'](arg1, arg2, arg3);
 }
 
+export function ApplyHistoryRetentionNow() {
+  return window['go']['main']['App']['ApplyHistoryRetentionNow']();
+}
+
 export function ApplyUpdate() {
   return window['go']['main']['App']['ApplyUpdate']();
 }

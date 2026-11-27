@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { main, netenv, version, power, transfer } from '../../wailsjs/go/models'
+  import { ApplyHistoryRetentionNow, QueryTransferHistory } from '../../wailsjs/go/main/App.js'
   import { openExternalURL, formatBytes } from '../utils'
   import logoUrl from '../assets/images/logo-universal.png'
 
@@ -25,6 +26,39 @@
   export let openUpdateModal: () => void = () => {}
 
   let activeSection: 'general' | 'storage' | 'network' | 'appearance' | 'about' = 'general'
+  let historyStoreSizeBytes: number = 0
+  let historyTotalRecords: number = 0
+  let pruningHistory: boolean = false
+  let pruneMessage: string = ''
+
+  async function refreshHistoryStorageInfo(): Promise<void> {
+    try {
+      const res = await QueryTransferHistory({ limit: 1, offset: 0 } as main.HistoryFilterView)
+      historyTotalRecords = res?.stats?.totalRecords ?? 0
+      historyStoreSizeBytes = res?.storeSizeBytes ?? 0
+    } catch {
+      // ignore in environments without Wails runtime
+    }
+  }
+
+  async function handlePruneHistoryNow(): Promise<void> {
+    pruningHistory = true
+    pruneMessage = ''
+    try {
+      await handleSaveSettings()
+      const removed = await ApplyHistoryRetentionNow()
+      await refreshHistoryStorageInfo()
+      pruneMessage = removed > 0 ? `Pruned ${removed} expired metadata entries (files on disk kept).` : 'History index is already within retention limits.'
+    } catch (err: any) {
+      pruneMessage = err?.message || String(err)
+    } finally {
+      pruningHistory = false
+    }
+  }
+
+  $: if (activeSection === 'storage') {
+    void refreshHistoryStorageInfo()
+  }
 
   $: uniqueInterfaces = interfaces.filter((item, index, self) =>
     index === self.findIndex((t) => t.name === item.name)
@@ -364,6 +398,48 @@
         {:else}
           <span class="setting-hint">Checking disk headroom…</span>
         {/if}
+      </div>
+
+      <div class="card-section-head" style="margin-top: 22px;">
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+          <div>
+            <h4>Transfer History Retention</h4>
+            <p>Automatically prune old transfer history metadata to keep storage bounded. Your actual received and shared files are never deleted.</p>
+          </div>
+          <button type="button" class="button secondary small" disabled={pruningHistory} on:click={handlePruneHistoryNow}>
+            {pruningHistory ? 'Pruning…' : 'Prune Now'}
+          </button>
+        </div>
+      </div>
+
+      <div class="setting-row" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px;">
+        <div>
+          <label for="retention-days" class="info-label" style="display: block; margin-bottom: 6px;">Keep history records for</label>
+          <select id="retention-days" class="text-input" bind:value={settingsState.historyRetentionDays}>
+            <option value={30}>30 days</option>
+            <option value={90}>90 days (Default)</option>
+            <option value={180}>180 days</option>
+            <option value={365}>1 year</option>
+            <option value={0}>Forever (unlimited age)</option>
+          </select>
+        </div>
+
+        <div>
+          <label for="retention-max" class="info-label" style="display: block; margin-bottom: 6px;">Maximum stored records</label>
+          <select id="retention-max" class="text-input" bind:value={settingsState.historyMaxRecords}>
+            <option value={1000}>1,000 records</option>
+            <option value={5000}>5,000 records (Default)</option>
+            <option value={10000}>10,000 records</option>
+            <option value={25000}>25,000 records</option>
+            <option value={0}>Unlimited</option>
+          </select>
+        </div>
+      </div>
+      <div class="setting-row" style="margin-top: 8px;">
+        <span class="setting-hint">
+          Currently tracking {historyTotalRecords} record(s) ({formatBytes(historyStoreSizeBytes)}).
+          {#if pruneMessage} · <strong>{pruneMessage}</strong>{/if}
+        </span>
       </div>
     </div>
 

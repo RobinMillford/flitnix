@@ -284,6 +284,8 @@ type SettingsView struct {
 	NotifyPairingRequests     bool   `json:"notifyPairingRequests"`
 	NotifyGuestRequests       bool   `json:"notifyGuestRequests"`
 	NotificationsSupported    bool   `json:"notificationsSupported,omitempty"`
+	HistoryRetentionDays      int    `json:"historyRetentionDays"`
+	HistoryMaxRecords         int    `json:"historyMaxRecords"`
 }
 
 // App owns the Flitnix core instances and the desktop lifecycle.
@@ -639,6 +641,25 @@ func (a *App) startup(ctx context.Context) {
 					return
 				case <-ticker.C:
 					a.visibility.Evaluate()
+				}
+			}
+		}()
+	}
+
+	if a.historyStore != nil {
+		a.bgWg.Add(1)
+		go func() {
+			defer a.bgWg.Done()
+			// Non-blocking startup prune + periodic 6-hour background retention cleanup.
+			_, _ = a.ApplyHistoryRetentionNow()
+			ticker := time.NewTicker(6 * time.Hour)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-bgCtx.Done():
+					return
+				case <-ticker.C:
+					_, _ = a.ApplyHistoryRetentionNow()
 				}
 			}
 		}()
@@ -2636,6 +2657,8 @@ func (a *App) GetSettings() SettingsView {
 			NotifyQuickText:          true,
 			NotifyPairingRequests:    true,
 			NotifyGuestRequests:      true,
+			HistoryRetentionDays:     settings.DefaultHistoryRetentionDays,
+			HistoryMaxRecords:        settings.DefaultHistoryMaxRecords,
 			TraySupported:            traySup,
 			AutostartSupported:       autoSup,
 			NotificationsSupported:   notifySup,
@@ -2680,6 +2703,8 @@ func (a *App) GetSettings() SettingsView {
 		NotifyPairingRequests:     s.NotifyPairingRequests,
 		NotifyGuestRequests:       s.NotifyGuestRequests,
 		NotificationsSupported:    notifySup,
+		HistoryRetentionDays:      s.HistoryRetentionDays,
+		HistoryMaxRecords:         s.HistoryMaxRecords,
 	}
 }
 
@@ -2766,6 +2791,8 @@ func (a *App) SaveSettings(view SettingsView) error {
 		NotifyQuickText:           view.NotifyQuickText,
 		NotifyPairingRequests:     view.NotifyPairingRequests,
 		NotifyGuestRequests:       view.NotifyGuestRequests,
+		HistoryRetentionDays:      view.HistoryRetentionDays,
+		HistoryMaxRecords:         view.HistoryMaxRecords,
 	}
 	if err := a.settingsStore.Save(s); err != nil {
 		return err
@@ -2773,6 +2800,7 @@ func (a *App) SaveSettings(view SettingsView) error {
 	if a.notify != nil {
 		a.notify.SetPolicy(a.notifyPolicyFromSettings())
 	}
+	_, _ = a.ApplyHistoryRetentionNow()
 	a.updateTrayState()
 	if a.store != nil {
 		a.store.SetPreserveModTimes(a.settingsStore.Get().PreserveModTimes)

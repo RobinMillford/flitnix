@@ -18,6 +18,8 @@ export function AddDroppedSources(arg1:Array<string>):Promise<Array<main.SharedS
 
 export function AddExpectedParticipant(arg1:string,arg2:string,arg3:string):Promise<void>;
 
+export function ApplyHistoryRetentionNow():Promise<number>;
+
 export function ApplyUpdate():Promise<void>;
 
 export function ApproveBatch(arg1:string):Promise<main.BatchView>;

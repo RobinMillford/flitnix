@@ -102,7 +102,7 @@
 
   // Persistent Settings state
   let settingsState: main.SettingsView = {
-    version: 5,
+    version: 6,
     theme: getInitialTheme(),
     locale: 'system',
     downloadDir: '',
@@ -123,7 +123,9 @@
     notifyQuickText: true,
     notifyPairingRequests: true,
     notifyGuestRequests: true,
-    notificationsSupported: false
+    notificationsSupported: false,
+    historyRetentionDays: 90,
+    historyMaxRecords: 5000
   }
   let settingsSavedAlert = ''
   let settingsError = ''
