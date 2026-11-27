@@ -355,42 +355,140 @@ func securityMiddlewareWithHost(next http.Handler, allowedMDNSHost string) http.
 // without an authenticated session in the request context.
 func newAPIMux(services *Services, stall time.Duration, grants *DownloadGrantStore, shutdownCh <-chan struct{}) http.Handler {
 	mux := http.NewServeMux()
+	pinLimiter := newPINLimiter()
+	gate := func(fn http.HandlerFunc) http.Handler {
+		return requirePINUnlocked(services, fn)
+	}
 	mux.HandleFunc("GET /api/events", handlePersonalEvents(services, shutdownCh))
-	mux.HandleFunc("POST /api/uploads", handleUploadDeclare(services, stall))
-	mux.HandleFunc("GET /api/uploads/{id}", handleUploadStatus(services))
-	mux.HandleFunc("HEAD /api/uploads/{id}/content", handleUploadHead(services))
-	mux.HandleFunc("PATCH /api/uploads/{id}/content", handleUploadPatch(services, stall))
-	mux.HandleFunc("PUT /api/uploads/{id}/content", handleUploadContent(services, stall))
-	mux.HandleFunc("POST /api/batches", handleBatchCreate(services))
-	mux.HandleFunc("GET /api/batches/{id}", handleBatchStatus(services))
-	mux.HandleFunc("DELETE /api/batches/{id}/items/{itemID}", handleBatchItemCancel(services))
-	mux.HandleFunc("HEAD /api/batches/{batchID}/items/{itemID}/content", handleBatchHead(services))
-	mux.HandleFunc("PATCH /api/batches/{batchID}/items/{itemID}/content", handleBatchPatch(services, stall))
-	mux.HandleFunc("PUT /api/batches/{batchID}/items/{itemID}/content", handleBatchContent(services, stall))
-	mux.HandleFunc("GET /api/files", serveFilesList(services))
-	mux.HandleFunc("GET /api/files/{id}/download", serveFileDownload(services, stall))
-	mux.HandleFunc("GET /api/sources", serveSourcesList(services))
-	mux.HandleFunc("GET /api/sources/{id}/items", serveSourceItems(services))
-	mux.HandleFunc("POST /api/download-grants", createDownloadGrant(services, grants))
-	mux.HandleFunc("GET /api/download-progress/{id}", serveDownloadProgress(services, grants))
-	mux.HandleFunc("POST /api/text", handleTextMessageSend(services))
-	mux.HandleFunc("GET /api/text", handleTextMessageList(services))
+	mux.HandleFunc("GET /api/pin/status", handleSessionPINStatus(services))
+	mux.HandleFunc("POST /api/pin/verify", handleSessionPINVerify(services, pinLimiter))
+	mux.Handle("POST /api/uploads", gate(handleUploadDeclare(services, stall)))
+	mux.Handle("GET /api/uploads/{id}", gate(handleUploadStatus(services)))
+	mux.Handle("HEAD /api/uploads/{id}/content", gate(handleUploadHead(services)))
+	mux.Handle("PATCH /api/uploads/{id}/content", gate(handleUploadPatch(services, stall)))
+	mux.Handle("PUT /api/uploads/{id}/content", gate(handleUploadContent(services, stall)))
+	mux.Handle("POST /api/batches", gate(handleBatchCreate(services)))
+	mux.Handle("GET /api/batches/{id}", gate(handleBatchStatus(services)))
+	mux.Handle("DELETE /api/batches/{id}/items/{itemID}", gate(handleBatchItemCancel(services)))
+	mux.Handle("HEAD /api/batches/{batchID}/items/{itemID}/content", gate(handleBatchHead(services)))
+	mux.Handle("PATCH /api/batches/{batchID}/items/{itemID}/content", gate(handleBatchPatch(services, stall)))
+	mux.Handle("PUT /api/batches/{batchID}/items/{itemID}/content", gate(handleBatchContent(services, stall)))
+	mux.Handle("GET /api/files", gate(serveFilesList(services)))
+	mux.Handle("GET /api/files/{id}/download", gate(serveFileDownload(services, grants, stall)))
+	mux.Handle("GET /api/sources", gate(serveSourcesList(services)))
+	mux.Handle("GET /api/sources/{id}/items", gate(serveSourceItems(services)))
+	mux.Handle("POST /api/download-grants", gate(createDownloadGrant(services, grants)))
+	mux.Handle("GET /api/download-progress/{id}", gate(serveDownloadProgress(services, grants)))
+	mux.Handle("POST /api/text", gate(handleTextMessageSend(services)))
+	mux.Handle("GET /api/text", gate(handleTextMessageList(services)))
 	mux.HandleFunc("GET /api/diagnostics/ping", handleDiagnosticsPing(services))
 	mux.HandleFunc("POST /api/diagnostics/ping", handleDiagnosticsPing(services))
 
 	// Trusted Devices Pairing & Management Endpoints (behind requireSession)
-	mux.HandleFunc("POST /api/pair/challenge", handlePairChallenge(services))
-	mux.HandleFunc("POST /api/pair/reveal", handlePairReveal(services))
-	mux.HandleFunc("POST /api/pair/request", handlePairRequest(services))
-	mux.HandleFunc("POST /api/pair/rearm", handlePairRearm(services))
-	mux.HandleFunc("POST /api/auth/challenge", handleAuthChallenge(services))
-	mux.HandleFunc("GET /api/devices", handleDevicesList(services))
-	mux.HandleFunc("DELETE /api/devices/{id}", handleDeviceRemove(services))
-	mux.HandleFunc("PUT /api/devices/{id}/auto-approve", handleDeviceSetAutoApprove(services))
-	mux.HandleFunc("PUT /api/devices/{id}/policy", handleDeviceSetPolicy(services))
-	mux.HandleFunc("GET /api/visibility", handleVisibilityGet(services))
+	mux.Handle("POST /api/pair/challenge", gate(handlePairChallenge(services)))
+	mux.Handle("POST /api/pair/reveal", gate(handlePairReveal(services)))
+	mux.Handle("POST /api/pair/request", gate(handlePairRequest(services)))
+	mux.Handle("POST /api/pair/rearm", gate(handlePairRearm(services)))
+	mux.Handle("POST /api/auth/challenge", gate(handleAuthChallenge(services)))
+	mux.Handle("GET /api/devices", gate(handleDevicesList(services)))
+	mux.Handle("DELETE /api/devices/{id}", gate(handleDeviceRemove(services)))
+	mux.Handle("PUT /api/devices/{id}/auto-approve", gate(handleDeviceSetAutoApprove(services)))
+	mux.Handle("PUT /api/devices/{id}/policy", gate(handleDeviceSetPolicy(services)))
+	mux.Handle("GET /api/visibility", gate(handleVisibilityGet(services)))
 
 	return mux
+}
+
+const pinUnlockCookieName = "flitnix-pin-unlock"
+
+func isRequestPINUnlocked(r *http.Request, sess *session.Session) bool {
+	if sess == nil || !sess.PINRequired() {
+		return true
+	}
+	if c, err := r.Cookie(pinUnlockCookieName); err == nil && c.Value != "" {
+		return sess.ValidatePINUnlock(c.Value)
+	}
+	return false
+}
+
+func requirePINUnlocked(svcs *Services, next http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sess := sessionFrom(r)
+		if sess != nil && !isRequestPINUnlocked(r, sess) {
+			writeErrorCode(w, http.StatusForbidden, "PIN required to unlock this session", "pin_required")
+			return
+		}
+		next(w, r)
+	})
+}
+
+func handleSessionPINStatus(svcs *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess := sessionFrom(r)
+		if sess == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		maxDL, compDL, remDL := sess.DownloadQuotaStats()
+		resp := map[string]any{
+			"pinRequired":        sess.PINRequired(),
+			"pinUnlocked":        isRequestPINUnlocked(r, sess),
+			"expiresAt":          sess.ExpiresAt(),
+			"maxDownloads":       maxDL,
+			"completedDownloads": compDL,
+			"remainingDownloads": remDL,
+		}
+		if hard := sess.HardExpiresAt(); !hard.IsZero() {
+			resp["hardExpiresAt"] = hard
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+func handleSessionPINVerify(svcs *Services, limiter *deviceSessionLimiter) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess := sessionFrom(r)
+		if sess == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		ip := clientIPFromRequest(r)
+		if allowed, retryAfter := limiter.checkAllowed(ip); !allowed {
+			writeRateLimit(w, retryAfter)
+			return
+		}
+		var req struct {
+			Pin string `json:"pin"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid PIN payload")
+			return
+		}
+		if !sess.VerifyPIN(req.Pin) {
+			limiter.recordFailure(ip)
+			if allowed, retryAfter := limiter.checkAllowed(ip); !allowed {
+				writeRateLimit(w, retryAfter)
+				return
+			}
+			writeErrorCode(w, http.StatusForbidden, "Incorrect PIN", "invalid_pin")
+			return
+		}
+		limiter.clear(ip)
+		proof, err := sess.IssuePINUnlock()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "could not create unlock session")
+			return
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name:     pinUnlockCookieName,
+			Value:    proof,
+			Path:     "/api/",
+			HttpOnly: true,
+			SameSite: http.SameSiteStrictMode,
+			Secure:   r.TLS != nil,
+		})
+		writeJSON(w, http.StatusOK, map[string]any{"unlocked": true})
+	}
 }
 
 func handleLocalCACertDownload(services *Services) http.HandlerFunc {
@@ -1604,11 +1702,15 @@ const downloadCopySize = 256 * 1024
 // registry's Add-time snapshot stays untouched); a file that vanished or
 // stopped being a regular file answers 404. The session is pinned so the
 // idle timer never aborts a long download.
-func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
+func serveFileDownload(svcs *Services, grants *DownloadGrantStore, stall time.Duration) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sess := sessionFrom(r)
 		if sess == nil {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if !isRequestPINUnlocked(r, sess) {
+			writeErrorCode(w, http.StatusForbidden, "PIN required to unlock this session", "pin_required")
 			return
 		}
 		if isQRSharingPaused(svcs, sess) {
@@ -1649,6 +1751,23 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
+
+		dlKey := "filedl:" + sf.ID + ":" + strconv.FormatInt(time.Now().UnixNano(), 36)
+		if !sess.TryReserveDownload(dlKey) {
+			writeErrorCode(w, http.StatusGone, "download limit reached for this session", "download_limit_reached")
+			return
+		}
+		dlCompleted := false
+		defer func() {
+			if dlCompleted {
+				_, autoEnd := sess.ConsumeDownload(dlKey)
+				if autoEnd {
+					go endSessionForDownloadLimit(svcs, grants, sess)
+				}
+			} else {
+				sess.ReleaseDownload(dlKey)
+			}
+		}()
 
 		var downloadID string
 		if svcs.Downloads != nil {
@@ -1693,6 +1812,9 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 			}
 			if svcs.Downloads != nil {
 				svcs.Downloads.Finish(downloadID, seeker.read)
+			}
+			if seeker.read == size || seeker.curOffset == size {
+				dlCompleted = true
 			}
 			return
 		}
@@ -1795,6 +1917,9 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 
 		if svcs.Downloads != nil {
 			svcs.Downloads.FinishWithDigest(downloadID, written, actualSHA256)
+		}
+		if written == size {
+			dlCompleted = true
 		}
 	}
 }

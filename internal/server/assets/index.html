@@ -92,6 +92,21 @@
     </details>
   </section>
 
+  <section class="card" id="pin-unlock-card" hidden aria-live="polite">
+    <div class="awareness-card__header">
+      <h2 style="margin: 0; font-size: 1.05rem;">Session PIN Required</h2>
+      <span class="badge badge--waiting">Locked</span>
+    </div>
+    <p class="muted" style="margin: 0.4rem 0 0.7rem;">Enter the PIN shown on your desktop host to unlock files and transfers.</p>
+    <form id="pin-unlock-form" class="code-form" autocomplete="off">
+      <div class="code-row">
+        <input id="pin-unlock-input" class="text-input" type="password" maxlength="32" placeholder="Enter session PIN" aria-label="Session PIN">
+        <button type="submit" class="btn" id="pin-unlock-btn">Unlock</button>
+      </div>
+      <p class="code-error" id="pin-unlock-error" hidden role="alert"></p>
+    </form>
+  </section>
+
   <section class="flow" id="flow" hidden>
 
     <section class="card awareness-card" id="awareness-card">

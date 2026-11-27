@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/itsyamin/flitnix/internal/session"
 	"github.com/itsyamin/flitnix/internal/transfer"
 )
 
@@ -208,6 +209,8 @@ type RoomConfig struct {
 	Duration             time.Duration          `json:"duration"`
 	Mode                 RoomMode               `json:"mode,omitempty"`
 	AutoApproveGuests    bool                   `json:"autoApproveGuests,omitempty"`
+	PinCode              string                 `json:"pinCode,omitempty"`
+	MaxDownloads         int                    `json:"maxDownloads,omitempty"`
 	SharedPaths          []string               `json:"sharedPaths,omitempty"`
 	Title                string                 `json:"title"`
 	Description          string                 `json:"description,omitempty"`
@@ -300,6 +303,9 @@ type RoomView struct {
 	AllowsUpload        bool                  `json:"allowsUpload"`
 	AllowsDownload      bool                  `json:"allowsDownload"`
 	RequireJoinApproval bool                  `json:"requireJoinApproval"`
+	PINRequired         bool                  `json:"pinRequired"`
+	MaxDownloads        int                   `json:"maxDownloads"`
+	RemainingDownloads  int                   `json:"remainingDownloads"`
 	DownloadCount       int                   `json:"downloadCount"`
 	ActiveDownloads     int                   `json:"activeDownloads"`
 	Title               string                `json:"title"`
@@ -343,6 +349,8 @@ type Room struct {
 	roster          map[string]*ExpectedParticipant
 	shared          *transfer.Registry
 	quota           *transfer.QuotaManager
+	pinVerifier     session.PinVerifier
+	dlQuota         session.DownloadQuota
 	downloadCount   int
 	activeDownloads int
 }
@@ -423,6 +431,10 @@ func NewRoomWithConfig(cfg RoomConfig) (*Room, error) {
 		collisionPolicy = CollisionPreserveBoth
 	}
 
+	pinVerifier, err := session.NewPinVerifier(cfg.PinCode)
+	if err != nil {
+		return nil, err
+	}
 	mode := NormalizeRoomMode(cfg.Mode)
 	r := &Room{
 		ID:                roomID,
@@ -447,7 +459,9 @@ func NewRoomWithConfig(cfg RoomConfig) (*Room, error) {
 		roster:            make(map[string]*ExpectedParticipant),
 		shared:            transfer.NewRegistry(),
 		quota:             cfg.Quota,
+		pinVerifier:       pinVerifier,
 	}
+	r.dlQuota.Init(cfg.MaxDownloads)
 
 	if r.AllowsDownload() {
 		for _, rawPath := range cfg.SharedPaths {
@@ -524,6 +538,7 @@ func (r *Room) View() RoomView {
 	formSchema := make([]FormField, len(r.FormSchema))
 	copy(formSchema, r.FormSchema)
 
+	maxDL, _, remDL := r.dlQuota.Stats()
 	return RoomView{
 		ID:                  r.ID,
 		Date:                r.Date,
@@ -533,6 +548,9 @@ func (r *Room) View() RoomView {
 		AllowsUpload:        r.AllowsUpload(),
 		AllowsDownload:      r.AllowsDownload(),
 		RequireJoinApproval: !r.AutoApproveGuests,
+		PINRequired:         r.pinVerifier.Enabled(),
+		MaxDownloads:        maxDL,
+		RemainingDownloads:  remDL,
 		DownloadCount:       r.downloadCount,
 		ActiveDownloads:     r.activeDownloads,
 		Title:               r.Title,
@@ -636,8 +654,50 @@ func (r *Room) RecordDownloadStart() {
 	r.mu.Unlock()
 }
 
+// PINRequired reports whether joining this room requires a PIN.
+func (r *Room) PINRequired() bool {
+	return r != nil && r.pinVerifier.Enabled()
+}
+
+// VerifyPIN validates candidate against the room's salted PIN hash in constant time.
+func (r *Room) VerifyPIN(candidate string) bool {
+	if r == nil {
+		return false
+	}
+	return r.pinVerifier.Verify(candidate)
+}
+
+// TryReserveDownload atomically reserves a download slot for reservationID.
+func (r *Room) TryReserveDownload(reservationID string) bool {
+	if r == nil {
+		return false
+	}
+	return r.dlQuota.TryReserve(reservationID)
+}
+
+// ReleaseDownload releases an uncompleted reservation slot.
+func (r *Room) ReleaseDownload(reservationID string) {
+	if r == nil {
+		return
+	}
+	r.dlQuota.Release(reservationID)
+}
+
+// DownloadQuotaStats returns (limit, completed, remaining). remaining is -1 when unlimited.
+func (r *Room) DownloadQuotaStats() (limit, completed, remaining int) {
+	if r == nil {
+		return 0, 0, -1
+	}
+	return r.dlQuota.Stats()
+}
+
 // RecordDownloadEnd decrements active room download count and records completed downloads.
 func (r *Room) RecordDownloadEnd(completed bool) {
+	r.RecordDownloadEndFor("", completed)
+}
+
+// RecordDownloadEndFor updates download counts and finalizes or releases reservationID.
+func (r *Room) RecordDownloadEndFor(reservationID string, completed bool) {
 	if r == nil {
 		return
 	}
@@ -649,6 +709,13 @@ func (r *Room) RecordDownloadEnd(completed bool) {
 		r.downloadCount++
 	}
 	r.mu.Unlock()
+	if reservationID != "" {
+		if completed {
+			r.dlQuota.Consume(reservationID)
+		} else {
+			r.dlQuota.Release(reservationID)
+		}
+	}
 }
 
 func (r *Room) End() {

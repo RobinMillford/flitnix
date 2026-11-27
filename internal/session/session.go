@@ -215,12 +215,19 @@ type Session struct {
 	kind       string // "qr" (default) or "device"
 	deviceID   string // enrolled device ID when kind == "device"
 
-	created    time.Time
-	idle       time.Duration
-	expiresN   atomic.Int64 // unix nanos of the idle deadline
-	revokedN   atomic.Int64 // nonzero once revoked
-	pinned     atomic.Int32 // transfers currently using the session
-	nowFactory func() time.Time
+	created      time.Time
+	idle         time.Duration
+	expiresN     atomic.Int64 // unix nanos of the idle deadline
+	hardExpiresN atomic.Int64 // optional absolute expiry unix nanos (0 = none)
+	revokedN     atomic.Int64 // nonzero once revoked
+	pinned       atomic.Int32 // transfers currently using the session
+	nowFactory   func() time.Time
+
+	pinVerifier    PinVerifier
+	dlQuota        DownloadQuota
+	oneTimeAutoEnd bool
+	unlockMu       sync.Mutex
+	unlocks        map[string]time.Time
 }
 
 // Manager owns all sessions. Every method is safe for concurrent use.
@@ -358,15 +365,28 @@ const (
 // Create inserts a new active session and returns it, including its raw
 // token (the desktop needs it, e.g. to build the QR URL in stage 4).
 func (m *Manager) Create() (*Session, error) {
-	return m.createWithKind(KindQR, "")
+	return m.createWithKind(KindQR, "", PolicyOptions{})
+}
+
+// CreateWithPolicy inserts a new active session configured with optional PIN
+// protection, custom absolute expiry, and download limits.
+func (m *Manager) CreateWithPolicy(opts PolicyOptions) (*Session, error) {
+	return m.createWithKind(KindQR, "", opts)
 }
 
 // CreateForDevice inserts a new active session bound to an enrolled trusted device ID.
 func (m *Manager) CreateForDevice(deviceID string) (*Session, error) {
-	return m.createWithKind(KindDevice, deviceID)
+	return m.createWithKind(KindDevice, deviceID, PolicyOptions{})
 }
 
-func (m *Manager) createWithKind(kind, deviceID string) (*Session, error) {
+func (m *Manager) createWithKind(kind, deviceID string, opts PolicyOptions) (*Session, error) {
+	pinVerifier, err := NewPinVerifier(opts.PinCode)
+	if err != nil {
+		return nil, err
+	}
+	if opts.MaxDownloads < 0 {
+		opts.MaxDownloads = 0
+	}
 	tok, err := generateToken()
 	if err != nil {
 		return nil, err
@@ -388,19 +408,25 @@ func (m *Manager) createWithKind(kind, deviceID string) (*Session, error) {
 	now := m.now()
 	d := digestToken(tok)
 	s := &Session{
-		token:      tok,
-		digest:     d,
-		key:        hex.EncodeToString(d[:]),
-		verifier:   m.verify(tok),
-		id:         id,
-		generation: 1,
-		kind:       kind,
-		deviceID:   deviceID,
-		created:    now,
-		idle:       m.idle,
-		nowFactory: m.now,
+		token:          tok,
+		digest:         d,
+		key:            hex.EncodeToString(d[:]),
+		verifier:       m.verify(tok),
+		id:             id,
+		generation:     1,
+		kind:           kind,
+		deviceID:       deviceID,
+		created:        now,
+		idle:           m.idle,
+		nowFactory:     m.now,
+		pinVerifier:    pinVerifier,
+		oneTimeAutoEnd: opts.OneTimeAutoEnd,
 	}
+	s.dlQuota.Init(opts.MaxDownloads)
 	s.expiresN.Store(now.Add(m.idle).UnixNano())
+	if opts.ExpiresIn > 0 {
+		s.hardExpiresN.Store(now.Add(opts.ExpiresIn).UnixNano())
+	}
 	if m.onCreate != nil {
 		record := m.recordFor(s, StatusActive)
 		if err := m.onCreate(record); err != nil {
@@ -542,7 +568,7 @@ func (m *Manager) pruneLocked(now time.Time) {
 	// are never dropped here because that would abort an active transfer.
 	var stale []*Session
 	for _, s := range m.active {
-		if s.staleUnpinned(now) {
+		if s.isHardExpired(now) || s.staleUnpinned(now) {
 			stale = append(stale, s)
 		}
 	}
@@ -771,6 +797,114 @@ func (s *Session) staleUnpinned(now time.Time) bool {
 	return s.pinned.Load() == 0 && now.After(time.Unix(0, s.expiresN.Load()))
 }
 
+func (s *Session) isHardExpired(now time.Time) bool {
+	hard := s.hardExpiresN.Load()
+	return hard > 0 && !now.Before(time.Unix(0, hard))
+}
+
+// PINRequired reports whether a PIN is required to access this session's routes.
+func (s *Session) PINRequired() bool {
+	return s != nil && s.pinVerifier.Enabled()
+}
+
+// VerifyPIN validates candidate against the salted PIN verifier in constant time.
+func (s *Session) VerifyPIN(candidate string) bool {
+	if s == nil {
+		return false
+	}
+	return s.pinVerifier.Verify(candidate)
+}
+
+// IssuePINUnlock mints an opaque cookie proof bound to this unlocked session client.
+func (s *Session) IssuePINUnlock() (string, error) {
+	if s == nil {
+		return "", ErrInvalid
+	}
+	raw, err := generateToken()
+	if err != nil {
+		return "", err
+	}
+	digest := HashUnlockProof(raw)
+	now := s.nowFactory()
+	s.unlockMu.Lock()
+	if s.unlocks == nil {
+		s.unlocks = make(map[string]time.Time)
+	}
+	if len(s.unlocks) >= 32 {
+		var oldest string
+		var oldestAt time.Time
+		for k, t := range s.unlocks {
+			if oldest == "" || t.Before(oldestAt) {
+				oldest = k
+				oldestAt = t
+			}
+		}
+		if oldest != "" {
+			delete(s.unlocks, oldest)
+		}
+	}
+	s.unlocks[digest] = now
+	s.unlockMu.Unlock()
+	return raw, nil
+}
+
+// ValidatePINUnlock reports whether the presented unlock proof matches a valid unlock on s.
+func (s *Session) ValidatePINUnlock(raw string) bool {
+	if s == nil || !s.pinVerifier.Enabled() {
+		return true
+	}
+	if raw == "" {
+		return false
+	}
+	digest := HashUnlockProof(raw)
+	s.unlockMu.Lock()
+	defer s.unlockMu.Unlock()
+	_, ok := s.unlocks[digest]
+	return ok
+}
+
+// HardExpiresAt returns the configured custom expiration timestamp, or zero if unset.
+func (s *Session) HardExpiresAt() time.Time {
+	hard := s.hardExpiresN.Load()
+	if hard <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, hard)
+}
+
+// DownloadQuotaStats returns (limit, completed, remaining). remaining is -1 when unlimited.
+func (s *Session) DownloadQuotaStats() (limit, completed, remaining int) {
+	if s == nil {
+		return 0, 0, -1
+	}
+	return s.dlQuota.Stats()
+}
+
+// TryReserveDownload atomically reserves a download slot for reservationID.
+func (s *Session) TryReserveDownload(reservationID string) bool {
+	if s == nil {
+		return false
+	}
+	return s.dlQuota.TryReserve(reservationID)
+}
+
+// ReleaseDownload frees an uncompleted reserved download slot.
+func (s *Session) ReleaseDownload(reservationID string) {
+	if s == nil {
+		return
+	}
+	s.dlQuota.Release(reservationID)
+}
+
+// ConsumeDownload records a completed download and returns (exhausted, autoEnd).
+func (s *Session) ConsumeDownload(reservationID string) (exhausted bool, autoEnd bool) {
+	if s == nil {
+		return false, false
+	}
+	_, exhausted = s.dlQuota.Consume(reservationID)
+	return exhausted, exhausted && s.oneTimeAutoEnd
+}
+
 // Begin marks the session as being used by an ongoing transfer. A pinned
 // session survives its idle deadline, so an in-flight large transfer is
 // never aborted by the idle timer. Every Begin must be paired with an End
@@ -844,18 +978,29 @@ func (s *Session) Created() time.Time { return s.created }
 // IdleTimeout returns the configured idle window.
 func (s *Session) IdleTimeout() time.Duration { return s.idle }
 
-// ExpiresAt returns the moment the session becomes idle-expired, assuming
-// no further activity and no active transfers.
-func (s *Session) ExpiresAt() time.Time { return time.Unix(0, s.expiresN.Load()) }
+// ExpiresAt returns the moment the session becomes expired (earlier of idle
+// deadline or configured custom hard deadline).
+func (s *Session) ExpiresAt() time.Time {
+	idleAt := time.Unix(0, s.expiresN.Load())
+	hard := s.hardExpiresN.Load()
+	if hard > 0 {
+		hardAt := time.Unix(0, hard)
+		if hardAt.Before(idleAt) {
+			return hardAt
+		}
+	}
+	return idleAt
+}
 
 // Status reports the current lifecycle status. A session pinned by ongoing
-// transfers past its idle deadline still reports active; it expires once
-// unpinned and staled, at the next validation pass.
+// transfers past its idle deadline still reports active unless its configured
+// hard expiry has elapsed.
 func (s *Session) Status() Status {
 	if s.revokedN.Load() != 0 {
 		return StatusRevoked
 	}
-	if s.staleUnpinned(s.nowFactory()) {
+	now := s.nowFactory()
+	if s.isHardExpired(now) || s.staleUnpinned(now) {
 		return StatusExpired
 	}
 	return StatusActive

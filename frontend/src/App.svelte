@@ -22,7 +22,7 @@
   import SettingsView from './views/SettingsView.svelte'
 
   import {
-    StartSession, EndSession, ListSessions, ListPendingUploads, RecentUploads,
+    StartSession, StartSessionWithConfig, EndSession, ListSessions, ListPendingUploads, RecentUploads,
     RecentDownloads, ApproveUpload, RejectUpload, CancelUpload, DiscardUpload,
     ListPendingBatches, ListBatches, ApproveBatch, RejectBatch, CancelBatch,
     PauseBatch, ResumeBatch, DiscardBatch,
@@ -253,6 +253,11 @@
   let guestMode: 'upload_only' | 'download_only' | 'two_way' = 'upload_only'
   let guestAutoApproveGuests = false
   let guestSharedPaths: string[] = []
+  let guestPinCode = ''
+  let guestMaxDownloads = 0
+  let sessionPinCode = ''
+  let sessionMaxDownloads = 0
+  let sessionDurationMinutes = 0
   let exporting = false
   let exportSuccessMsg = ''
 
@@ -461,7 +466,17 @@
       if (interfaces.length > 1 && !selectedIp) {
         throw new Error('Choose the network interface that connects to the phone, then start.')
       }
-      const v = await StartSession(selectedIp)
+      const pinClean = sessionPinCode.trim()
+      const hasPolicy = Boolean(pinClean) || sessionMaxDownloads > 0 || sessionDurationMinutes > 0
+      const v = hasPolicy
+        ? await StartSessionWithConfig({
+            ip: selectedIp,
+            pinCode: pinClean,
+            maxDownloads: sessionMaxDownloads,
+            durationMinutes: sessionDurationMinutes,
+            oneTimeAutoEnd: sessionMaxDownloads === 1
+          } as any)
+        : await StartSession(selectedIp)
       activeInterfaceName = v.interfaceName ?? ''; activeAddress = v.address ?? ''
       await fetchQR(v.key)
       liveAnnouncement = tFn('announcements.sessionStarted')
@@ -762,6 +777,8 @@
         durationMinutes: guestDurationMinutes,
         mode: guestMode,
         autoApproveGuests: guestAutoApproveGuests,
+        pinCode: guestPinCode.trim(),
+        maxDownloads: guestMode === 'upload_only' ? 0 : guestMaxDownloads,
         sharedPaths: guestMode === 'upload_only' ? [] : guestSharedPaths,
         title: guestTitle,
         description: guestDescription,
@@ -1755,6 +1772,9 @@
               {serverAddress}
               {localHttpsStatus}
               {qrUseHttps}
+              bind:sessionPinCode
+              bind:sessionMaxDownloads
+              bind:sessionDurationMinutes
               {toggleQrHttpsAction}
               {qrUrl}
               {qrError}
@@ -1845,6 +1865,8 @@
               bind:guestDurationMinutes
               bind:guestMode
               bind:guestAutoApproveGuests
+              bind:guestPinCode
+              bind:guestMaxDownloads
               {guestSharedPaths}
               {guestStarting}
               {guestCopiedLink}

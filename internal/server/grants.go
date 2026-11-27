@@ -51,11 +51,12 @@ const (
 // Redemption failures. The HTTP layer maps each to a distinct status; none of
 // them says anything about why a secret did not match.
 var (
-	errGrantInvalid = errors.New("download grant is not valid")
-	errGrantExpired = errors.New("download grant expired")
-	errGrantBusy    = errors.New("another download is already active for this session")
-	errRoomBusy     = errors.New("room download capacity reached; try again shortly")
-	errGrantSession = errors.New("session is no longer active")
+	errGrantInvalid  = errors.New("download grant is not valid")
+	errGrantExpired  = errors.New("download grant expired")
+	errGrantBusy     = errors.New("another download is already active for this session")
+	errRoomBusy      = errors.New("room download capacity reached; try again shortly")
+	errGrantSession  = errors.New("session is no longer active")
+	errDownloadLimit = session.ErrDownloadLimitReached
 )
 
 type archiveSource struct {
@@ -92,6 +93,7 @@ type continuationRecord struct {
 	CreatedAt     time.Time
 	LastActive    time.Time
 	ActiveStreams int
+	Completed     bool
 	LockHandle    io.Closer
 }
 
@@ -174,10 +176,19 @@ func randomGrantValue() (string, error) {
 // forgets finished progress records after progressRetention. Callers hold
 // s.mu. It is invoked on every store operation, so cleanup needs no timer and
 // the store is bounded whenever it is used at all.
+func releaseGrantQuota(g downloadGrant) {
+	if g.GuestRoom != nil {
+		g.GuestRoom.ReleaseDownload(g.ID)
+	} else if g.Sess != nil {
+		g.Sess.ReleaseDownload(g.ID)
+	}
+}
+
 func (s *DownloadGrantStore) pruneLocked(now time.Time) {
 	for id, g := range s.grants {
 		if now.After(g.ExpiresAt) {
 			delete(s.grants, id)
+			releaseGrantQuota(g)
 			if p := s.progress[g.Progress]; p != nil {
 				p.mu.Lock()
 				if p.State == progressPending {
@@ -195,6 +206,13 @@ func (s *DownloadGrantStore) pruneLocked(now time.Time) {
 			continue
 		}
 		if now.Sub(cont.LastActive) > continuationIdleTimeout || now.Sub(cont.CreatedAt) > continuationMaxAge {
+			if !cont.Completed {
+				if cont.GuestRoom != nil {
+					cont.GuestRoom.ReleaseDownload(cont.GrantID)
+				} else if cont.Sess != nil {
+					cont.Sess.ReleaseDownload(cont.GrantID)
+				}
+			}
 			if cont.LockHandle != nil {
 				_ = cont.LockHandle.Close()
 			}
@@ -265,12 +283,31 @@ func (s *DownloadGrantStore) createInternal(key string, sess *session.Session, r
 	if err != nil {
 		return downloadGrant{}, nil, err
 	}
+	if sess != nil {
+		if !sess.TryReserveDownload(id) {
+			return downloadGrant{}, nil, errDownloadLimit
+		}
+	} else if room != nil {
+		if !room.TryReserveDownload(id) {
+			return downloadGrant{}, nil, errDownloadLimit
+		}
+	}
 	secret, err := randomGrantValue()
 	if err != nil {
+		if sess != nil {
+			sess.ReleaseDownload(id)
+		} else if room != nil {
+			room.ReleaseDownload(id)
+		}
 		return downloadGrant{}, nil, err
 	}
 	progressID, err := randomGrantValue()
 	if err != nil {
+		if sess != nil {
+			sess.ReleaseDownload(id)
+		} else if room != nil {
+			room.ReleaseDownload(id)
+		}
 		return downloadGrant{}, nil, err
 	}
 	kind := "file"
@@ -281,6 +318,9 @@ func (s *DownloadGrantStore) createInternal(key string, sess *session.Session, r
 	if s.downloads != nil && room == nil {
 		record, startErr := s.downloads.StartKind(progressID, filename, key, total, kind)
 		if startErr != nil {
+			if sess != nil {
+				sess.ReleaseDownload(id)
+			}
 			return downloadGrant{}, nil, startErr
 		}
 		downloadID = record.ID
@@ -482,6 +522,48 @@ func (s *DownloadGrantStore) finishStream(id string) {
 		}
 		cont.LastActive = s.now()
 	}
+}
+
+// finishQuota marks a grant's quota slot as consumed (if completed == true, at
+// most once per grant) or releases/tracks failure, returning whether autoEnd applies.
+func (s *DownloadGrantStore) finishQuota(grant downloadGrant, completed bool) (exhausted bool, autoEnd bool) {
+	if s == nil {
+		return false, false
+	}
+	firstCompletion := false
+	hasCont := false
+	s.mu.Lock()
+	if cont, ok := s.continuations[grant.ID]; ok {
+		hasCont = true
+		if completed && !cont.Completed {
+			cont.Completed = true
+			firstCompletion = true
+		}
+	} else if completed {
+		firstCompletion = true
+	}
+	s.mu.Unlock()
+
+	if grant.GuestRoom != nil {
+		if firstCompletion {
+			grant.GuestRoom.RecordDownloadEndFor(grant.ID, true)
+		} else {
+			grant.GuestRoom.RecordDownloadEndFor("", false)
+			if !completed && !hasCont {
+				grant.GuestRoom.ReleaseDownload(grant.ID)
+			}
+		}
+		return false, false
+	}
+	if grant.Sess != nil {
+		if firstCompletion {
+			return grant.Sess.ConsumeDownload(grant.ID)
+		}
+		if !completed && !hasCont {
+			grant.Sess.ReleaseDownload(grant.ID)
+		}
+	}
+	return false, false
 }
 
 // RevokeSession purges all grants, continuations, and active records for a revoked session.

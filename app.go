@@ -64,17 +64,30 @@ import (
 // producer leaves it empty so the raw secret is available exactly once, to
 // the one code path that needs it.
 type SessionView struct {
-	Key             string    `json:"key"`
-	Created         time.Time `json:"created"`
-	ExpiresAt       time.Time `json:"expiresAt"`
-	PinnedTransfers int32     `json:"pinnedTransfers"`
-	Token           string    `json:"token,omitempty"`
+	Key                string    `json:"key"`
+	Created            time.Time `json:"created"`
+	ExpiresAt          time.Time `json:"expiresAt"`
+	HardExpiresAt      time.Time `json:"hardExpiresAt,omitempty"`
+	PinnedTransfers    int32     `json:"pinnedTransfers"`
+	PinRequired        bool      `json:"pinRequired"`
+	MaxDownloads       int       `json:"maxDownloads"`
+	CompletedDownloads int       `json:"completedDownloads"`
+	RemainingDownloads int       `json:"remainingDownloads"`
+	Token              string    `json:"token,omitempty"`
 
 	// InterfaceName and Address are populated by StartSession: the chosen
 	// network interface and the machine's own IPv4 address used for the
 	// session's URL (never a gateway address). Listings leave both empty.
 	InterfaceName string `json:"interfaceName,omitempty"`
 	Address       string `json:"address,omitempty"`
+}
+
+type SessionConfigView struct {
+	IP              string `json:"ip"`
+	PinCode         string `json:"pinCode,omitempty"`
+	MaxDownloads    int    `json:"maxDownloads,omitempty"`
+	DurationMinutes int    `json:"durationMinutes,omitempty"`
+	OneTimeAutoEnd  bool   `json:"oneTimeAutoEnd,omitempty"`
 }
 
 type GuestRoomView struct {
@@ -86,6 +99,9 @@ type GuestRoomView struct {
 	AllowsUpload        bool                        `json:"allowsUpload"`
 	AllowsDownload      bool                        `json:"allowsDownload"`
 	RequireJoinApproval bool                        `json:"requireJoinApproval"`
+	PinRequired         bool                        `json:"pinRequired"`
+	MaxDownloads        int                         `json:"maxDownloads"`
+	RemainingDownloads  int                         `json:"remainingDownloads"`
 	DownloadCount       int                         `json:"downloadCount"`
 	ActiveDownloads     int                         `json:"activeDownloads"`
 	Title               string                      `json:"title"`
@@ -110,6 +126,8 @@ type GuestRoomConfigView struct {
 	DurationMinutes      int                         `json:"durationMinutes"`
 	Mode                 string                      `json:"mode,omitempty"`
 	AutoApproveGuests    bool                        `json:"autoApproveGuests,omitempty"`
+	PinCode              string                      `json:"pinCode,omitempty"`
+	MaxDownloads         int                         `json:"maxDownloads,omitempty"`
 	SharedPaths          []string                    `json:"sharedPaths,omitempty"`
 	Title                string                      `json:"title"`
 	Description          string                      `json:"description,omitempty"`
@@ -1644,10 +1662,14 @@ func (a *App) endAllSessions() {
 // the QR flow plus the interface and address the QR encodes; nothing else
 // ever sees the token.
 func (a *App) StartSession(ip string) (SessionView, error) {
+	return a.StartSessionWithConfig(SessionConfigView{IP: ip})
+}
+
+func (a *App) StartSessionWithConfig(cfg SessionConfigView) (SessionView, error) {
 	if a.ctx == nil {
 		return SessionView{}, errors.New("flitnix: the app is still starting")
 	}
-	view, err := a.resolveInterface(ip)
+	view, err := a.resolveInterface(cfg.IP)
 	if err != nil {
 		return SessionView{}, err
 	}
@@ -1658,7 +1680,16 @@ func (a *App) StartSession(ip string) (SessionView, error) {
 	if err := a.ensureServer(listen); err != nil {
 		return SessionView{}, err
 	}
-	s, err := a.sessions.Create()
+	var expiresIn time.Duration
+	if cfg.DurationMinutes > 0 {
+		expiresIn = time.Duration(cfg.DurationMinutes) * time.Minute
+	}
+	s, err := a.sessions.CreateWithPolicy(session.PolicyOptions{
+		PinCode:        cfg.PinCode,
+		MaxDownloads:   cfg.MaxDownloads,
+		ExpiresIn:      expiresIn,
+		OneTimeAutoEnd: cfg.OneTimeAutoEnd,
+	})
 	if err != nil {
 		// No session was created: keep the no-session-without-server
 		// invariant unless another session is still active.
@@ -3108,12 +3139,18 @@ func (a *App) OpenDownloadFolder() error {
 // ---- Projections ----
 
 func sessionView(s *session.Session, token string) SessionView {
+	maxDL, compDL, remDL := s.DownloadQuotaStats()
 	return SessionView{
-		Key:             s.Key(),
-		Created:         s.Created(),
-		ExpiresAt:       s.ExpiresAt(),
-		PinnedTransfers: s.PinnedTransfers(),
-		Token:           token,
+		Key:                s.Key(),
+		Created:            s.Created(),
+		ExpiresAt:          s.ExpiresAt(),
+		HardExpiresAt:      s.HardExpiresAt(),
+		PinnedTransfers:    s.PinnedTransfers(),
+		PinRequired:        s.PINRequired(),
+		MaxDownloads:       maxDL,
+		CompletedDownloads: compDL,
+		RemainingDownloads: remDL,
+		Token:              token,
 	}
 }
 
@@ -3296,6 +3333,9 @@ func (a *App) buildGuestRoomView(room *guest.Room, srvURL string) GuestRoomView 
 		AllowsUpload:        v.AllowsUpload,
 		AllowsDownload:      v.AllowsDownload,
 		RequireJoinApproval: v.RequireJoinApproval,
+		PinRequired:         v.PINRequired,
+		MaxDownloads:        v.MaxDownloads,
+		RemainingDownloads:  v.RemainingDownloads,
 		DownloadCount:       v.DownloadCount,
 		ActiveDownloads:     v.ActiveDownloads,
 		Title:               v.Title,
@@ -3368,6 +3408,8 @@ func (a *App) StartGuestRoomWithConfig(cfg GuestRoomConfigView) (GuestRoomView, 
 		Duration:             duration,
 		Mode:                 mode,
 		AutoApproveGuests:    cfg.AutoApproveGuests,
+		PinCode:              cfg.PinCode,
+		MaxDownloads:         cfg.MaxDownloads,
 		SharedPaths:          cfg.SharedPaths,
 		Title:                cfg.Title,
 		Description:          cfg.Description,
