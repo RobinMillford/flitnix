@@ -31,6 +31,10 @@ func TestDefaultSettings(t *testing.T) {
 	if d.LaunchOnLogin {
 		t.Fatalf("expected default launchOnLogin false")
 	}
+	if !d.NotificationsEnabled || d.QuietMode || d.HideNotificationFilenames {
+		t.Fatalf("unexpected default notification flags: enabled=%v quiet=%v hideNames=%v",
+			d.NotificationsEnabled, d.QuietMode, d.HideNotificationFilenames)
+	}
 }
 
 func TestStore_SaveAndGetRoundTrip(t *testing.T) {

@@ -13,7 +13,7 @@ import (
 
 const (
 	// CurrentSchemaVersion is the current version of the settings file schema.
-	CurrentSchemaVersion = 4
+	CurrentSchemaVersion = 5
 
 	// Allowed themes
 	ThemeSystem = "system"
@@ -43,26 +43,44 @@ type Settings struct {
 	VisibilityMode         string    `json:"visibilityMode"`
 	VisibilityPreviousMode string    `json:"visibilityPreviousMode"`
 	VisibilityExpiresAt    time.Time `json:"visibilityExpiresAt,omitempty"`
-	MinimizeToTray         bool      `json:"minimizeToTray"`
-	LaunchOnLogin          bool      `json:"launchOnLogin"`
-	UpdatedAt              time.Time `json:"updatedAt"`
+	MinimizeToTray            bool      `json:"minimizeToTray"`
+	LaunchOnLogin             bool      `json:"launchOnLogin"`
+	NotificationsEnabled      bool      `json:"notificationsEnabled"`
+	QuietMode                 bool      `json:"quietMode"`
+	HideNotificationFilenames bool      `json:"hideNotificationFilenames"`
+	NotifyIncomingTransfers   bool      `json:"notifyIncomingTransfers"`
+	NotifyCompletedTransfers  bool      `json:"notifyCompletedTransfers"`
+	NotifyFailedTransfers     bool      `json:"notifyFailedTransfers"`
+	NotifyQuickText           bool      `json:"notifyQuickText"`
+	NotifyPairingRequests     bool      `json:"notifyPairingRequests"`
+	NotifyGuestRequests       bool      `json:"notifyGuestRequests"`
+	UpdatedAt                 time.Time `json:"updatedAt"`
 }
 
 // DefaultSettings returns the baseline configuration for Flitnix.
 func DefaultSettings() Settings {
 	return Settings{
-		Version:                CurrentSchemaVersion,
-		Theme:                  ThemeSystem,
-		Locale:                 "system",
-		DownloadDir:            "", // empty indicates default (~/Downloads/Flitnix)
-		AutoStartSession:       false,
-		PreserveModTimes:       true,
-		PreferredInterface:     "",
-		VisibilityMode:         VisibilityTrustedOnly,
-		VisibilityPreviousMode: VisibilityTrustedOnly,
-		MinimizeToTray:         true,
-		LaunchOnLogin:          false,
-		UpdatedAt:              time.Now().UTC(),
+		Version:                   CurrentSchemaVersion,
+		Theme:                     ThemeSystem,
+		Locale:                    "system",
+		DownloadDir:               "", // empty indicates default (~/Downloads/Flitnix)
+		AutoStartSession:          false,
+		PreserveModTimes:          true,
+		PreferredInterface:        "",
+		VisibilityMode:            VisibilityTrustedOnly,
+		VisibilityPreviousMode:    VisibilityTrustedOnly,
+		MinimizeToTray:            true,
+		LaunchOnLogin:             false,
+		NotificationsEnabled:      true,
+		QuietMode:                 false,
+		HideNotificationFilenames: false,
+		NotifyIncomingTransfers:   true,
+		NotifyCompletedTransfers:  true,
+		NotifyFailedTransfers:     true,
+		NotifyQuickText:           true,
+		NotifyPairingRequests:     true,
+		NotifyGuestRequests:       true,
+		UpdatedAt:                 time.Now().UTC(),
 	}
 }
 
@@ -193,6 +211,17 @@ func migrateSettings(old Settings) Settings {
 		// when upgrading from v3 unless explicitly saved false.
 		if old.Version < 3 {
 			migrated.MinimizeToTray = true
+		}
+	}
+	if old.Version < 5 {
+		if old.Version < 4 {
+			migrated.NotificationsEnabled = true
+			migrated.NotifyIncomingTransfers = true
+			migrated.NotifyCompletedTransfers = true
+			migrated.NotifyFailedTransfers = true
+			migrated.NotifyQuickText = true
+			migrated.NotifyPairingRequests = true
+			migrated.NotifyGuestRequests = true
 		}
 	}
 	migrated.Version = CurrentSchemaVersion

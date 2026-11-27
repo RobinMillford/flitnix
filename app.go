@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -35,12 +36,14 @@ import (
 
 	"github.com/itsyamin/flitnix/internal/audit"
 	"github.com/itsyamin/flitnix/internal/autostart"
+	"github.com/itsyamin/flitnix/internal/client"
 	"github.com/itsyamin/flitnix/internal/devices"
 	"github.com/itsyamin/flitnix/internal/discovery"
 	"github.com/itsyamin/flitnix/internal/doctor"
 	"github.com/itsyamin/flitnix/internal/events"
 	"github.com/itsyamin/flitnix/internal/guest"
 	"github.com/itsyamin/flitnix/internal/netenv"
+	"github.com/itsyamin/flitnix/internal/notify"
 	"github.com/itsyamin/flitnix/internal/power"
 	"github.com/itsyamin/flitnix/internal/qr"
 	"github.com/itsyamin/flitnix/internal/server"
@@ -266,10 +269,20 @@ type SettingsView struct {
 	VisibilityPreviousMode string `json:"visibilityPreviousMode,omitempty"`
 	VisibilityExpiresAt    string `json:"visibilityExpiresAt,omitempty"`
 	QRSharingPaused        bool   `json:"qrSharingPaused,omitempty"`
-	MinimizeToTray         bool   `json:"minimizeToTray"`
-	LaunchOnLogin          bool   `json:"launchOnLogin"`
-	TraySupported          bool   `json:"traySupported,omitempty"`
-	AutostartSupported     bool   `json:"autostartSupported,omitempty"`
+	MinimizeToTray            bool   `json:"minimizeToTray"`
+	LaunchOnLogin             bool   `json:"launchOnLogin"`
+	TraySupported             bool   `json:"traySupported,omitempty"`
+	AutostartSupported        bool   `json:"autostartSupported,omitempty"`
+	NotificationsEnabled      bool   `json:"notificationsEnabled"`
+	QuietMode                 bool   `json:"quietMode"`
+	HideNotificationFilenames bool   `json:"hideNotificationFilenames"`
+	NotifyIncomingTransfers   bool   `json:"notifyIncomingTransfers"`
+	NotifyCompletedTransfers  bool   `json:"notifyCompletedTransfers"`
+	NotifyFailedTransfers     bool   `json:"notifyFailedTransfers"`
+	NotifyQuickText           bool   `json:"notifyQuickText"`
+	NotifyPairingRequests     bool   `json:"notifyPairingRequests"`
+	NotifyGuestRequests       bool   `json:"notifyGuestRequests"`
+	NotificationsSupported    bool   `json:"notificationsSupported,omitempty"`
 }
 
 // App owns the Flitnix core instances and the desktop lifecycle.
@@ -283,6 +296,7 @@ type App struct {
 	settingsStore *settings.Store
 	autostart     *autostart.Manager
 	tray          *tray.Service
+	notify        *notify.Manager
 	trayIcon      []byte
 	startHidden   bool
 	windowHidden  atomic.Bool
@@ -586,6 +600,7 @@ func (a *App) startup(ctx context.Context) {
 	a.startupMu.Unlock()
 
 	if ctx != nil && ctx.Value("frontend") != nil {
+		a.initNotify()
 		a.initTray()
 	}
 	ensureLinuxNautilusScript()
@@ -948,7 +963,348 @@ func (a *App) runEventsBridge(ctx context.Context) {
 				"scope":   ev.Scope,
 				"payload": ev.RawPayload,
 			})
+			a.handleDesktopEvent(ev)
 		}
+	}
+}
+
+func (a *App) initNotify() {
+	a.startupMu.Lock()
+	if a.notify != nil {
+		a.startupMu.Unlock()
+		return
+	}
+	pol := a.notifyPolicyFromSettings()
+	mgr := notify.NewManager(pol, a.handleNotificationAction)
+	a.notify = mgr
+	a.startupMu.Unlock()
+}
+
+func (a *App) notifyPolicyFromSettings() notify.Policy {
+	if a.settingsStore == nil {
+		return notify.DefaultPolicy()
+	}
+	s := a.settingsStore.Get()
+	return notify.Policy{
+		Enabled:         s.NotificationsEnabled,
+		QuietMode:       s.QuietMode,
+		HideFilenames:   s.HideNotificationFilenames,
+		Incoming:        s.NotifyIncomingTransfers,
+		Completed:       s.NotifyCompletedTransfers,
+		Failed:          s.NotifyFailedTransfers,
+		QuickText:       s.NotifyQuickText,
+		PairingRequests: s.NotifyPairingRequests,
+		GuestRequests:   s.NotifyGuestRequests,
+	}
+}
+
+func decodeEventPayload[T any](raw any) (T, bool) {
+	var zero T
+	if raw == nil {
+		return zero, false
+	}
+	if direct, ok := raw.(T); ok {
+		return direct, true
+	}
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return zero, false
+	}
+	var out T
+	if err := json.Unmarshal(b, &out); err != nil {
+		return zero, false
+	}
+	return out, true
+}
+
+func (a *App) handleDesktopEvent(ev events.DesktopEvent) {
+	if !strings.HasSuffix(ev.Type, ".progress") && ev.Type != events.TypePeerTransfer {
+		a.updateTrayState()
+	}
+	a.startupMu.Lock()
+	n := a.notify
+	a.startupMu.Unlock()
+	if n == nil {
+		return
+	}
+	pol := n.Policy()
+
+	switch ev.Type {
+	case events.TypeBatchPending:
+		bv, ok := decodeEventPayload[BatchView](ev.RawPayload)
+		if !ok || bv.ApprovalState != string(transfer.ApprovalPending) {
+			return
+		}
+		name := bv.RootName
+		if name == "" && len(bv.Items) > 0 {
+			name = bv.Items[0].DisplayName
+		}
+		sender := bv.DeviceName
+		if sender == "" {
+			sender = "Connected mobile device"
+		}
+		title, body := notify.FormatIncomingSummary(pol.HideFilenames, sender, name, bv.TotalItemCount, client.FormatBytes(bv.DeclaredTotalBytes))
+		n.Notify(notify.Notification{
+			Key:           "batch:pending:" + bv.ID,
+			Category:      notify.CatIncomingTransfer,
+			Title:         title,
+			Body:          body,
+			DefaultAction: notify.Action{Kind: notify.ActionOpenWindow},
+			Actions: []notify.Action{
+				{Kind: notify.ActionApproveBatch, TargetID: bv.ID, Label: "Approve"},
+				{Kind: notify.ActionDeclineBatch, TargetID: bv.ID, Label: "Decline"},
+				{Kind: notify.ActionOpenWindow, Label: "Open"},
+			},
+		})
+
+	case events.TypeBatchUpdated:
+		bv, ok := decodeEventPayload[BatchView](ev.RawPayload)
+		if !ok {
+			return
+		}
+		name := bv.RootName
+		if name == "" && len(bv.Items) > 0 {
+			name = bv.Items[0].DisplayName
+		}
+		switch bv.State {
+		case string(transfer.BatchStateCompleted):
+			title, body := notify.FormatCompletedSummary(pol.HideFilenames, "upload", name, bv.TotalItemCount)
+			n.Notify(notify.Notification{
+				Key:           "batch:done:" + bv.ID,
+				Category:      notify.CatTransferCompleted,
+				Title:         title,
+				Body:          body,
+				DefaultAction: notify.Action{Kind: notify.ActionRevealTransfer, TargetID: bv.ID},
+				Actions: []notify.Action{
+					{Kind: notify.ActionRevealTransfer, TargetID: bv.ID, Label: "Open Folder"},
+				},
+			})
+		case string(transfer.BatchStateFailed):
+			body := "Transfer failed"
+			if !pol.HideFilenames && name != "" {
+				body = fmt.Sprintf("%s did not finish", notify.SanitizeText(name, 64))
+			}
+			n.Notify(notify.Notification{
+				Key:           "batch:fail:" + bv.ID,
+				Category:      notify.CatTransferFailed,
+				Title:         "Transfer failed",
+				Body:          body,
+				DefaultAction: notify.Action{Kind: notify.ActionOpenWindow},
+			})
+		}
+
+	case events.TypeUploadPending, events.TypeUploadUpdated:
+		uv, ok := decodeEventPayload[UploadView](ev.RawPayload)
+		if !ok || a.requireStandalone(uv.ID) != nil {
+			// Batch items are already summarized at the batch level to avoid notification flooding.
+			return
+		}
+		switch uv.State {
+		case string(transfer.StatePending):
+			title, body := notify.FormatIncomingSummary(pol.HideFilenames, uv.DeviceName, uv.Name, 1, client.FormatBytes(uv.Size))
+			n.Notify(notify.Notification{
+				Key:           "upload:pending:" + uv.ID,
+				Category:      notify.CatIncomingTransfer,
+				Title:         title,
+				Body:          body,
+				DefaultAction: notify.Action{Kind: notify.ActionOpenWindow},
+				Actions: []notify.Action{
+					{Kind: notify.ActionApproveUpload, TargetID: uv.ID, Label: "Approve"},
+					{Kind: notify.ActionDeclineUpload, TargetID: uv.ID, Label: "Decline"},
+				},
+			})
+		case string(transfer.StateCompleted):
+			title, body := notify.FormatCompletedSummary(pol.HideFilenames, "upload", uv.Name, 1)
+			n.Notify(notify.Notification{
+				Key:           "upload:done:" + uv.ID,
+				Category:      notify.CatTransferCompleted,
+				Title:         title,
+				Body:          body,
+				DefaultAction: notify.Action{Kind: notify.ActionRevealTransfer, TargetID: uv.ID},
+				Actions: []notify.Action{
+					{Kind: notify.ActionRevealTransfer, TargetID: uv.ID, Label: "Open Folder"},
+				},
+			})
+		case string(transfer.StateFailed):
+			body := "Incoming file transfer failed"
+			if !pol.HideFilenames && uv.Name != "" {
+				body = fmt.Sprintf("%s failed", notify.SanitizeText(uv.Name, 64))
+			}
+			n.Notify(notify.Notification{
+				Key:           "upload:fail:" + uv.ID,
+				Category:      notify.CatTransferFailed,
+				Title:         "Transfer failed",
+				Body:          body,
+				DefaultAction: notify.Action{Kind: notify.ActionOpenWindow},
+			})
+		}
+
+	case events.TypeDownloadUpdated:
+		dv, ok := decodeEventPayload[DownloadView](ev.RawPayload)
+		if !ok {
+			return
+		}
+		if dv.State == string(transfer.DownloadSent) {
+			title, body := notify.FormatCompletedSummary(pol.HideFilenames, "download", dv.Name, 1)
+			n.Notify(notify.Notification{
+				Key:           "download:done:" + dv.ID,
+				Category:      notify.CatTransferCompleted,
+				Title:         title,
+				Body:          body,
+				DefaultAction: notify.Action{Kind: notify.ActionOpenWindow},
+			})
+		} else if dv.State == string(transfer.DownloadFailed) {
+			body := "Phone download did not complete"
+			if !pol.HideFilenames && dv.Name != "" {
+				body = fmt.Sprintf("%s did not complete", notify.SanitizeText(dv.Name, 64))
+			}
+			n.Notify(notify.Notification{
+				Key:           "download:fail:" + dv.ID,
+				Category:      notify.CatTransferFailed,
+				Title:         "Download failed",
+				Body:          body,
+				DefaultAction: notify.Action{Kind: notify.ActionOpenWindow},
+			})
+		}
+
+	case events.TypePairingPrompt:
+		ps, ok := decodeEventPayload[devices.PairingStatusView](ev.RawPayload)
+		if !ok || !ps.Active || !ps.RequiresApproval {
+			return
+		}
+		body := "Verify the security code in Flitnix before approving"
+		if !pol.HideFilenames && ps.DeviceName != "" {
+			body = fmt.Sprintf("%s wants to pair — open Flitnix to verify code %s", notify.SanitizeText(ps.DeviceName, 40), notify.SanitizeText(ps.SAS, 16))
+		}
+		n.Notify(notify.Notification{
+			Key:           "pairing:" + ps.RequestID,
+			Category:      notify.CatPairingRequest,
+			Title:         "Device pairing request",
+			Body:          body,
+			DefaultAction: notify.Action{Kind: notify.ActionReviewPairing, TargetID: ps.RequestID},
+			Actions: []notify.Action{
+				{Kind: notify.ActionReviewPairing, TargetID: ps.RequestID, Label: "Review Pairing"},
+			},
+		})
+
+	case events.TypeTextMessage:
+		msg, ok := decodeEventPayload[TextMessageView](ev.RawPayload)
+		if !ok || msg.Sender != "phone" {
+			return
+		}
+		if !a.windowHidden.Load() {
+			return
+		}
+		body := "New Quick Text note from connected device"
+		if !pol.HideFilenames && msg.Content != "" {
+			body = msg.Content
+		}
+		n.Notify(notify.Notification{
+			Key:           "text:" + msg.ID,
+			Category:      notify.CatQuickText,
+			Title:         "Quick Text received",
+			Body:          body,
+			DefaultAction: notify.Action{Kind: notify.ActionOpenWindow},
+			Actions: []notify.Action{
+				{Kind: notify.ActionOpenWindow, Label: "Open"},
+			},
+		})
+
+	case events.TypeGuestRoomUpdated:
+		m, ok := decodeEventPayload[map[string]any](ev.RawPayload)
+		if !ok || m["action"] != "guest_joined" || m["state"] != string(guest.GuestPending) {
+			return
+		}
+		gid, _ := m["guestId"].(string)
+		nick, _ := m["nickname"].(string)
+		body := "A guest asked to join your Drop Box"
+		if !pol.HideFilenames && nick != "" {
+			body = fmt.Sprintf("%s wants to join your Guest Drop Box", notify.SanitizeText(nick, 40))
+		}
+		n.Notify(notify.Notification{
+			Key:           "guest:join:" + gid,
+			Category:      notify.CatGuestRequest,
+			Title:         "Guest join request",
+			Body:          body,
+			DefaultAction: notify.Action{Kind: notify.ActionOpenWindow},
+			Actions: []notify.Action{
+				{Kind: notify.ActionApproveGuest, TargetID: gid, Label: "Approve"},
+				{Kind: notify.ActionDeclineGuest, TargetID: gid, Label: "Decline"},
+			},
+		})
+
+	case events.TypeGuestUploadUpdated:
+		m, ok := decodeEventPayload[map[string]any](ev.RawPayload)
+		if !ok {
+			return
+		}
+		state, _ := m["state"].(string)
+		uid, _ := m["id"].(string)
+		name, _ := m["name"].(string)
+		if state == string(guest.UploadPendingApproval) && uid != "" {
+			body := "1 guest upload waiting for approval"
+			if !pol.HideFilenames && name != "" {
+				body = fmt.Sprintf("%s waiting in Guest Drop Box", notify.SanitizeText(name, 64))
+			}
+			n.Notify(notify.Notification{
+				Key:           "guest:up:" + uid,
+				Category:      notify.CatGuestRequest,
+				Title:         "Guest upload request",
+				Body:          body,
+				DefaultAction: notify.Action{Kind: notify.ActionOpenWindow},
+				Actions: []notify.Action{
+					{Kind: notify.ActionApproveGuestUpload, TargetID: uid, Label: "Approve"},
+					{Kind: notify.ActionDeclineGuestUpload, TargetID: uid, Label: "Decline"},
+				},
+			})
+		}
+	}
+}
+
+func (a *App) handleNotificationAction(inv notify.ActionInvocation) {
+	switch inv.Kind {
+	case notify.ActionOpenWindow:
+		a.RestoreWindow()
+	case notify.ActionReviewPairing:
+		// Never approve pairing from a notification without explicit SAS verification.
+		a.RestoreWindow()
+		a.emitFrontendEvent("flitnix:navigate", map[string]string{"tab": "devices"})
+	case notify.ActionRevealTransfer:
+		if err := a.OpenDownloadFolder(); err != nil {
+			a.RestoreWindow()
+		}
+	case notify.ActionApproveBatch:
+		if a.GetVisibilityState().Mode == devices.VisibilityHidden {
+			a.RestoreWindow()
+			return
+		}
+		if _, err := a.ApproveBatch(inv.TargetID); err != nil {
+			a.RestoreWindow()
+		}
+	case notify.ActionDeclineBatch:
+		_, _ = a.RejectBatch(inv.TargetID)
+	case notify.ActionApproveUpload:
+		if a.GetVisibilityState().Mode == devices.VisibilityHidden {
+			a.RestoreWindow()
+			return
+		}
+		if _, err := a.ApproveUpload(inv.TargetID); err != nil {
+			a.RestoreWindow()
+		}
+	case notify.ActionDeclineUpload:
+		_, _ = a.RejectUpload(inv.TargetID)
+	case notify.ActionApproveGuest:
+		if err := a.ApproveGuest(inv.TargetID); err != nil {
+			a.RestoreWindow()
+		}
+	case notify.ActionDeclineGuest:
+		_ = a.RejectGuest(inv.TargetID)
+	case notify.ActionApproveGuestUpload:
+		if err := a.ApproveGuestUpload(inv.TargetID); err != nil {
+			a.RestoreWindow()
+		}
+	case notify.ActionDeclineGuestUpload:
+		_ = a.RejectGuestUpload(inv.TargetID)
 	}
 }
 
@@ -1002,6 +1358,9 @@ func (a *App) shutdown(ctx context.Context) {
 		a.guestMgr.Close()
 		if a.events != nil {
 			a.events.Close()
+		}
+		if a.notify != nil {
+			a.notify.Close()
 		}
 		if a.auditStore != nil {
 			a.auditStore.Close()
@@ -2215,16 +2574,25 @@ func (a *App) ReceiveDirectory() string { return a.store.Dir() }
 func (a *App) GetSettings() SettingsView {
 	traySup := a.tray != nil && a.tray.Supported()
 	autoSup := a.autostart != nil && a.autostart.Supported()
+	notifySup := a.notify != nil && a.notify.Supported()
 	if a.settingsStore == nil {
 		return SettingsView{
-			Version:            settings.CurrentSchemaVersion,
-			Theme:              settings.ThemeSystem,
-			Locale:             "system",
-			EffectiveDir:       a.store.Dir(),
-			PreserveModTimes:   true,
-			MinimizeToTray:     true,
-			TraySupported:      traySup,
-			AutostartSupported: autoSup,
+			Version:                  settings.CurrentSchemaVersion,
+			Theme:                    settings.ThemeSystem,
+			Locale:                   "system",
+			EffectiveDir:             a.store.Dir(),
+			PreserveModTimes:         true,
+			MinimizeToTray:           true,
+			NotificationsEnabled:     true,
+			NotifyIncomingTransfers:  true,
+			NotifyCompletedTransfers: true,
+			NotifyFailedTransfers:    true,
+			NotifyQuickText:          true,
+			NotifyPairingRequests:    true,
+			NotifyGuestRequests:      true,
+			TraySupported:            traySup,
+			AutostartSupported:       autoSup,
+			NotificationsSupported:   notifySup,
 		}
 	}
 	s := a.settingsStore.Get()
@@ -2240,22 +2608,32 @@ func (a *App) GetSettings() SettingsView {
 		expStr = vis.TemporaryExpiresAt.UTC().Format(time.RFC3339Nano)
 	}
 	return SettingsView{
-		Version:                s.Version,
-		Theme:                  s.Theme,
-		Locale:                 s.Locale,
-		DownloadDir:            s.DownloadDir,
-		EffectiveDir:           a.store.Dir(),
-		AutoStartSession:       s.AutoStartSession,
-		PreserveModTimes:       s.PreserveModTimes,
-		PreferredInterface:     s.PreferredInterface,
-		VisibilityMode:         string(vis.Mode),
-		VisibilityPreviousMode: string(vis.PreviousRestrictiveMode),
-		VisibilityExpiresAt:    expStr,
-		QRSharingPaused:        vis.QRSharingPaused,
-		MinimizeToTray:         s.MinimizeToTray,
-		LaunchOnLogin:          launchEnabled,
-		TraySupported:          traySup,
-		AutostartSupported:     autoSup,
+		Version:                   s.Version,
+		Theme:                     s.Theme,
+		Locale:                    s.Locale,
+		DownloadDir:               s.DownloadDir,
+		EffectiveDir:              a.store.Dir(),
+		AutoStartSession:          s.AutoStartSession,
+		PreserveModTimes:          s.PreserveModTimes,
+		PreferredInterface:        s.PreferredInterface,
+		VisibilityMode:            string(vis.Mode),
+		VisibilityPreviousMode:    string(vis.PreviousRestrictiveMode),
+		VisibilityExpiresAt:       expStr,
+		QRSharingPaused:           vis.QRSharingPaused,
+		MinimizeToTray:            s.MinimizeToTray,
+		LaunchOnLogin:             launchEnabled,
+		TraySupported:             traySup,
+		AutostartSupported:        autoSup,
+		NotificationsEnabled:      s.NotificationsEnabled,
+		QuietMode:                 s.QuietMode,
+		HideNotificationFilenames: s.HideNotificationFilenames,
+		NotifyIncomingTransfers:   s.NotifyIncomingTransfers,
+		NotifyCompletedTransfers:  s.NotifyCompletedTransfers,
+		NotifyFailedTransfers:     s.NotifyFailedTransfers,
+		NotifyQuickText:           s.NotifyQuickText,
+		NotifyPairingRequests:     s.NotifyPairingRequests,
+		NotifyGuestRequests:       s.NotifyGuestRequests,
+		NotificationsSupported:    notifySup,
 	}
 }
 
@@ -2321,22 +2699,35 @@ func (a *App) SaveSettings(view SettingsView) error {
 		}
 	}
 	s := settings.Settings{
-		Version:                view.Version,
-		Theme:                  view.Theme,
-		Locale:                 view.Locale,
-		DownloadDir:            view.DownloadDir,
-		AutoStartSession:       view.AutoStartSession,
-		PreserveModTimes:       view.PreserveModTimes,
-		PreferredInterface:     view.PreferredInterface,
-		VisibilityMode:         current.VisibilityMode,
-		VisibilityPreviousMode: current.VisibilityPreviousMode,
-		VisibilityExpiresAt:    current.VisibilityExpiresAt,
-		MinimizeToTray:         view.MinimizeToTray,
-		LaunchOnLogin:          view.LaunchOnLogin,
+		Version:                   view.Version,
+		Theme:                     view.Theme,
+		Locale:                    view.Locale,
+		DownloadDir:               view.DownloadDir,
+		AutoStartSession:          view.AutoStartSession,
+		PreserveModTimes:          view.PreserveModTimes,
+		PreferredInterface:        view.PreferredInterface,
+		VisibilityMode:            current.VisibilityMode,
+		VisibilityPreviousMode:    current.VisibilityPreviousMode,
+		VisibilityExpiresAt:       current.VisibilityExpiresAt,
+		MinimizeToTray:            view.MinimizeToTray,
+		LaunchOnLogin:             view.LaunchOnLogin,
+		NotificationsEnabled:      view.NotificationsEnabled,
+		QuietMode:                 view.QuietMode,
+		HideNotificationFilenames: view.HideNotificationFilenames,
+		NotifyIncomingTransfers:   view.NotifyIncomingTransfers,
+		NotifyCompletedTransfers:  view.NotifyCompletedTransfers,
+		NotifyFailedTransfers:     view.NotifyFailedTransfers,
+		NotifyQuickText:           view.NotifyQuickText,
+		NotifyPairingRequests:     view.NotifyPairingRequests,
+		NotifyGuestRequests:       view.NotifyGuestRequests,
 	}
 	if err := a.settingsStore.Save(s); err != nil {
 		return err
 	}
+	if a.notify != nil {
+		a.notify.SetPolicy(a.notifyPolicyFromSettings())
+	}
+	a.updateTrayState()
 	if a.store != nil {
 		a.store.SetPreserveModTimes(a.settingsStore.Get().PreserveModTimes)
 		if err := a.store.SetDir(s.DownloadDir); err != nil {
@@ -2369,6 +2760,10 @@ func (a *App) ResetSettings() (SettingsView, error) {
 	if prevLaunch && a.autostart != nil {
 		_ = a.autostart.SetEnabled(false)
 	}
+	if a.notify != nil {
+		a.notify.SetPolicy(a.notifyPolicyFromSettings())
+	}
+	a.updateTrayState()
 	if a.store != nil {
 		a.store.SetPreserveModTimes(a.settingsStore.Get().PreserveModTimes)
 		_ = a.store.SetDir("")
