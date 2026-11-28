@@ -73,6 +73,49 @@ func derivePINDigest(salt [pinSaltSize]byte, pin string) [sha256.Size]byte {
 	return sum
 }
 
+// PinVerifierRecord is a durable, non-secret projection of a PIN verifier. Only
+// the salted digest is persisted; the plaintext PIN is never stored.
+type PinVerifierRecord struct {
+	Enabled bool   `json:"enabled,omitempty"`
+	Salt    string `json:"salt,omitempty"`
+	Digest  string `json:"digest,omitempty"`
+}
+
+// Record returns the durable projection of this verifier.
+func (p PinVerifier) Record() PinVerifierRecord {
+	if !p.enabled {
+		return PinVerifierRecord{}
+	}
+	return PinVerifierRecord{
+		Enabled: true,
+		Salt:    hex.EncodeToString(p.salt[:]),
+		Digest:  hex.EncodeToString(p.digest[:]),
+	}
+}
+
+// Load restores a verifier from its durable projection. It fail-closed on
+// malformed records so a corrupt journal cannot silently drop PIN protection.
+func (p *PinVerifier) Load(rec PinVerifierRecord) error {
+	if !rec.Enabled {
+		*p = PinVerifier{}
+		return nil
+	}
+	salt, err := hex.DecodeString(rec.Salt)
+	if err != nil || len(salt) != pinSaltSize {
+		return errors.New("session: invalid PIN salt in durable record")
+	}
+	digest, err := hex.DecodeString(rec.Digest)
+	if err != nil || len(digest) != sha256.Size {
+		return errors.New("session: invalid PIN digest in durable record")
+	}
+	var v PinVerifier
+	v.enabled = true
+	copy(v.salt[:], salt)
+	copy(v.digest[:], digest)
+	*p = v
+	return nil
+}
+
 // Enabled reports whether PIN verification is active.
 func (p PinVerifier) Enabled() bool { return p.enabled }
 
@@ -174,6 +217,35 @@ func (q *DownloadQuota) Stats() (limit, completed, remaining int) {
 		rem = 0
 	}
 	return limit, completed, rem
+}
+
+// DownloadQuotaRecord is the durable projection of a session download cap.
+// Reservations are deliberately omitted: grants are process-local, so an
+// in-flight reservation cannot outlive a restart and must not consume a slot.
+type DownloadQuotaRecord struct {
+	Limit     int `json:"limit,omitempty"`
+	Completed int `json:"completed,omitempty"`
+}
+
+// Record returns the durable projection of this quota.
+func (q *DownloadQuota) Record() DownloadQuotaRecord {
+	limit, completed, _ := q.Stats()
+	return DownloadQuotaRecord{Limit: limit, Completed: completed}
+}
+
+// Load restores a quota from its durable projection.
+func (q *DownloadQuota) Load(rec DownloadQuotaRecord) {
+	if rec.Limit < 0 {
+		rec.Limit = 0
+	}
+	if rec.Completed < 0 {
+		rec.Completed = 0
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.limit = rec.Limit
+	q.completed = rec.Completed
+	q.reserved = nil
 }
 
 // Exhausted reports whether all download slots have completed.
