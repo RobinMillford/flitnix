@@ -46,6 +46,28 @@ func TestSanitizeAndFormatPrivacy(t *testing.T) {
 	}
 }
 
+func TestFormatCompletedSummaryWording(t *testing.T) {
+	title, body := FormatCompletedSummary(false, "download", "report.pdf", 1)
+	if title != "Transfer completed" {
+		t.Fatalf("outgoing share title = %q", title)
+	}
+	if strings.Contains(title, "Download") || strings.Contains(body, "Download") || strings.Contains(body, "downloaded") {
+		t.Fatalf("outgoing share notification is phone-centric: %q / %q", title, body)
+	}
+	if !strings.Contains(body, "report.pdf") || !strings.Contains(body, "shared") {
+		t.Fatalf("unexpected outgoing share body: %q", body)
+	}
+
+	hiddenTitle, hiddenBody := FormatCompletedSummary(true, "download", "secret.pdf", 1)
+	if hiddenTitle != "Transfer completed" || strings.Contains(hiddenBody, "secret.pdf") {
+		t.Fatalf("privacy mask or wording failed: %q / %q", hiddenTitle, hiddenBody)
+	}
+
+	if inTitle, _ := FormatCompletedSummary(false, "upload", "photo.jpg", 1); inTitle != "File received" {
+		t.Fatalf("incoming transfer wording changed: %q", inTitle)
+	}
+}
+
 func TestManagerPolicyQuietModeDedupAndTokenSecurity(t *testing.T) {
 	b := &mockBackend{supported: true, notifyCh: make(chan dispatchedNotification, 8)}
 	var acts []ActionInvocation
