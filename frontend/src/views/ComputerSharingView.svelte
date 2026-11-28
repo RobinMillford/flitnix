@@ -192,8 +192,11 @@
       <div class="peer-pill-row">
         <span class="peer-status-chip" class:online={!!serverAddress}>
           <span class="dot"></span>
-          {serverAddress ? `Listening TLS 1.3 + HTTP on ${serverAddress}` : 'Starting local peer listener…'}
+          {serverAddress ? `🔒 TLS 1.3 Pinned + HTTP on ${serverAddress}` : 'Starting local peer listener…'}
         </span>
+        {#if localPeerInfo?.requireEncrypted}
+          <span class="trust-badge trusted" title="Desktop peer transfers always use TLS 1.3 with Ed25519 host identity verification">Encrypted Required</span>
+        {/if}
         {#if localPeerInfo}
           <span class="peer-fp-chip tabular" title="Cryptographic Ed25519 Host ID">
             {osIcon(localPeerInfo.os)} {localPeerInfo.deviceName} · ID {localPeerInfo.fingerprint}

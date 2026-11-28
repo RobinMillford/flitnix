@@ -13,6 +13,11 @@
   export let guestFormSchema: guest.FormField[] = []
   export let guestDestDir: string = ''
   export let guestDurationMinutes: number = 60
+  export let guestMode: 'upload_only' | 'download_only' | 'two_way' = 'upload_only'
+  export let guestAutoApproveGuests: boolean = false
+  export let guestPinCode: string = ''
+  export let guestMaxDownloads: number = 0
+  export let guestSharedPaths: string[] = []
   export let guestStarting: boolean = false
   export let guestCopiedLink: boolean = false
   export let exporting: boolean = false
@@ -27,10 +32,20 @@
   export let rejectUpload: (uploadId: string) => void = () => {}
   export let pickDestination: () => void = () => {}
   export let openFolder: () => void = () => {}
+  export let pickShareFiles: () => void = () => {}
+  export let pickShareFolder: () => void = () => {}
+  export let removeStagedSharePath: (index: number) => void = () => {}
+  export let removeSharedSource: (id: string) => void = () => {}
   export let exportCollection: (roomId: string) => void = () => {}
   export let copyGuestLink: (url: string | undefined) => void = () => {}
   export let copyTextToClipboard: (text: string) => void = () => {}
   export let showToast: (msg: string, type?: any) => void = () => {}
+
+  function fmtMode(mode?: string): string {
+    if (mode === 'download_only') return 'Download Only'
+    if (mode === 'two_way') return 'Two-Way'
+    return 'Upload Only'
+  }
 
   let wizardStep: 1 | 2 | 3 = 1
   let confirmEndRoomOpen = false
@@ -163,6 +178,33 @@
 
           <div class="form-section-group">
             <div class="form-row">
+              <span class="subhead-label">Room Sharing Mode</span>
+              <div class="policy-radio-group" style="grid-template-columns: repeat(3, 1fr);">
+                <label class="policy-card" class:selected={guestMode === 'upload_only'}>
+                  <input type="radio" name="room-mode" value="upload_only" bind:group={guestMode} />
+                  <div>
+                    <strong>Upload Only</strong>
+                    <span>Existing drop box: guests submit files after join &amp; file approval.</span>
+                  </div>
+                </label>
+                <label class="policy-card" class:selected={guestMode === 'download_only'}>
+                  <input type="radio" name="room-mode" value="download_only" bind:group={guestMode} />
+                  <div>
+                    <strong>Download Only</strong>
+                    <span>Broadcast host files/folders to attendees. Guest uploads disabled.</span>
+                  </div>
+                </label>
+                <label class="policy-card" class:selected={guestMode === 'two_way'}>
+                  <input type="radio" name="room-mode" value="two_way" bind:group={guestMode} />
+                  <div>
+                    <strong>Two-Way</strong>
+                    <span>Guests download host files and submit uploads (both approvals active).</span>
+                  </div>
+                </label>
+              </div>
+            </div>
+
+            <div class="form-row">
               <label for="guest-room-title">Collection Title <span class="req">*</span></label>
               <input
                 id="guest-room-title"
@@ -202,10 +244,60 @@
         <div class="step-card step-two-layout">
           <div class="form-side-column">
             <div class="step-header">
-              <h3>Configure Guest Submission Fields</h3>
-              <p>Choose what information attendees must provide before uploading files to this computer.</p>
+              <h3>{guestMode === 'download_only' ? 'Select Files & Access Rules' : 'Configure Guest Submission & Access'}</h3>
+              <p>
+                {#if guestMode === 'download_only'}
+                  Choose files or folders to broadcast to attendees via the room QR code.
+                {:else if guestMode === 'two_way'}
+                  Configure host files to broadcast and submission fields for guest uploads.
+                {:else}
+                  Choose what information attendees must provide before uploading files to this computer.
+                {/if}
+              </p>
             </div>
 
+            {#if guestMode !== 'upload_only'}
+              <div class="option-subcard">
+                <span class="subcard-title">Host Files to Share ({guestSharedPaths.length})</span>
+                <p class="subcard-desc">Only explicitly added files or folders are accessible to approved guests in this room.</p>
+                <div class="path-actions" style="margin-bottom: 10px;">
+                  <button type="button" class="button secondary small" on:click={pickShareFiles}>+ Add Files</button>
+                  <button type="button" class="button secondary small" on:click={pickShareFolder}>+ Add Folder</button>
+                </div>
+                {#if guestSharedPaths.length > 0}
+                  <div class="fields-list-box">
+                    {#each guestSharedPaths as sp, idx (`${sp}-${idx}`)}
+                      <div class="field-item-row">
+                        <div class="field-drag-label">
+                          <strong style="word-break: break-all;">{sp}</strong>
+                        </div>
+                        <button type="button" class="remove-field-btn" on:click={() => removeStagedSharePath(idx)} title="Remove">&times;</button>
+                      </div>
+                    {/each}
+                  </div>
+                {:else}
+                  <div class="empty-fields-note">No files selected yet. You can also add files after starting the room.</div>
+                {/if}
+              </div>
+            {/if}
+
+            <div class="option-subcard">
+              <label style="display:flex; align-items:flex-start; gap:8px; cursor:pointer; font-size:12.5px; font-weight:600;">
+                <input
+                  type="checkbox"
+                  checked={!guestAutoApproveGuests}
+                  on:change={(e) => { guestAutoApproveGuests = !(e.currentTarget as HTMLInputElement).checked }}
+                />
+                <span>
+                  Require host approval for each guest joining
+                  <span style="display:block; font-weight:400; font-size:11.5px; color:var(--text-secondary); margin-top:2px;">
+                    Recommended. Incoming uploaded files always require separate host file approval regardless of join approval.
+                  </span>
+                </span>
+              </label>
+            </div>
+
+            {#if guestMode !== 'download_only'}
             <!-- Field Toggles -->
             <div class="fields-picker-box">
               <span class="subhead-label">Standard Submission Fields:</span>
@@ -271,6 +363,7 @@
                 <div class="empty-fields-note">No fields configured. Guests will upload files with default nickname only.</div>
               {/if}
             </div>
+            {/if}
 
             <div class="wizard-footer-actions">
               <button type="button" class="button ghost" on:click={() => { wizardStep = 1 }}>
@@ -357,7 +450,7 @@
               <span class="subcard-title">Room Active Duration</span>
               <p class="subcard-desc">After this duration, the room expires automatically and stops accepting guest connections.</p>
               <div class="duration-pills-row">
-                {#each [15, 30, 60, 120, 240] as mins}
+                {#each [5, 15, 30, 60, 120, 240, 1440] as mins}
                   <button
                     type="button"
                     class="duration-pill"
@@ -369,13 +462,44 @@
                 {/each}
               </div>
             </div>
+
+            <!-- Access PIN & Download Limit -->
+            <div class="option-subcard">
+              <span class="subcard-title">Access Controls (PIN &amp; Download Limit)</span>
+              <p class="subcard-desc">Optionally require a PIN to join this room (never embedded in the QR code) or cap total host-file downloads.</p>
+              <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px;">
+                <div>
+                  <label for="guest-pin-input" style="font-size:12px; font-weight:600; display:block; margin-bottom:4px;">Room PIN (Optional)</label>
+                  <input
+                    id="guest-pin-input"
+                    type="password"
+                    class="text-input compact"
+                    maxlength="32"
+                    bind:value={guestPinCode}
+                    placeholder="4-32 chars (blank = none)"
+                  />
+                </div>
+                {#if guestMode !== 'upload_only'}
+                  <div>
+                    <label for="guest-dl-limit" style="font-size:12px; font-weight:600; display:block; margin-bottom:4px;">Download Cap</label>
+                    <select id="guest-dl-limit" class="text-input compact" bind:value={guestMaxDownloads}>
+                      <option value={0}>Unlimited</option>
+                      <option value={1}>1 Download</option>
+                      <option value={5}>5 Downloads</option>
+                      <option value={25}>25 Downloads</option>
+                      <option value={50}>50 Downloads</option>
+                    </select>
+                  </div>
+                {/if}
+              </div>
+            </div>
           </div>
 
           <!-- Launch Summary Strip -->
           <div class="launch-summary-strip">
             <div class="summary-meta">
-              <strong>Ready to launch: {guestTitle}</strong>
-              <span>Duration: {guestDurationMinutes} min · {guestFormSchema.length} fields · {guestCollisionPolicy === 'preserve_both' ? 'Preserve both' : 'Strict reject'}</span>
+              <strong>Ready to launch: {guestTitle} ({fmtMode(guestMode)})</strong>
+              <span>Duration: {guestDurationMinutes} min · {guestMode !== 'download_only' ? `${guestFormSchema.length} fields · ` : ''}{guestMode !== 'upload_only' ? `${guestSharedPaths.length} shared · ` : ''}{guestAutoApproveGuests ? 'Open join' : 'Host join approval'}</span>
             </div>
             <button
               type="button"
@@ -407,8 +531,16 @@
           <div class="dash-status-row">
             <span class="active-pulse-badge">
               <span class="chip-pulse active"></span>
-              Live Guest Drop Box Room
+              Live {fmtMode(guestRoomState?.room?.mode)} Room
             </span>
+            {#if guestRoomState?.room?.pinRequired}
+              <span class="countdown-chip">🔐 PIN Protected</span>
+            {/if}
+            {#if (guestRoomState?.room?.maxDownloads ?? 0) > 0}
+              <span class="countdown-chip tabular">
+                {guestRoomState?.room?.remainingDownloads}/{guestRoomState?.room?.maxDownloads} Downloads left
+              </span>
+            {/if}
             {#if guestRoomState?.room?.expiresAt}
               <span class="countdown-chip tabular">
                 ⏱ {fmtRemaining(guestRoomState.room.expiresAt)}
@@ -473,7 +605,7 @@
             </button>
           </div>
 
-          <div class="room-stats-summary-row">
+          <div class="room-stats-summary-row" style={guestRoomState?.room?.allowsDownload ? 'grid-template-columns: repeat(4, 1fr);' : ''}>
             <div class="stat-box">
               <span class="stat-num tabular">{guestRoomState?.pendingGuests?.length || 0}</span>
               <span class="stat-lbl">Pending Guests</span>
@@ -482,10 +614,18 @@
               <span class="stat-num tabular">{guestRoomState?.approvedGuests?.length || 0}</span>
               <span class="stat-lbl">Connected</span>
             </div>
-            <div class="stat-box">
-              <span class="stat-num tabular">{guestRoomState?.recentUploads?.length || 0}</span>
-              <span class="stat-lbl">Files Received</span>
-            </div>
+            {#if guestRoomState?.room?.allowsUpload !== false}
+              <div class="stat-box">
+                <span class="stat-num tabular">{guestRoomState?.recentUploads?.length || 0}</span>
+                <span class="stat-lbl">Files Received</span>
+              </div>
+            {/if}
+            {#if guestRoomState?.room?.allowsDownload}
+              <div class="stat-box">
+                <span class="stat-num tabular">{guestRoomState?.room?.downloadCount || 0}</span>
+                <span class="stat-lbl">Downloads ({guestRoomState?.room?.activeDownloads || 0} active)</span>
+              </div>
+            {/if}
           </div>
         </div>
       </div>
@@ -577,8 +717,38 @@
           </div>
         </div>
 
-        <!-- Right: Received Files -->
+        <!-- Right: Shared Broadcast Files & Received Uploads -->
         <div class="activity-column">
+          {#if guestRoomState?.room?.allowsDownload}
+            <div class="activity-card">
+              <div class="act-card-head">
+                <h4>Shared by Host</h4>
+                <div class="head-right">
+                  <span class="count-pill">{guestRoomState?.room?.sharedSources?.length || 0}</span>
+                  <button type="button" class="button secondary small" on:click={pickShareFiles}>+ Files</button>
+                  <button type="button" class="button secondary small" on:click={pickShareFolder}>+ Folder</button>
+                </div>
+              </div>
+              <div class="act-list">
+                {#each (guestRoomState?.room?.sharedSources || []) as src (src.id)}
+                  <div class="upload-file-row">
+                    <div class="file-icon-box">{src.kind === 'folder' ? '📁' : '📄'}</div>
+                    <div class="file-meta-col">
+                      <strong>{src.name}</strong>
+                      <span class="file-sub-info tabular">{src.kind === 'folder' ? `${src.itemCount} items · ` : ''}{formatBytes(src.totalBytes)}</span>
+                    </div>
+                    <button type="button" class="button ghost small" on:click={() => removeSharedSource(src.id)}>
+                      Remove
+                    </button>
+                  </div>
+                {:else}
+                  <div class="empty-compact">No host files shared yet. Click + Files or + Folder to broadcast to approved guests.</div>
+                {/each}
+              </div>
+            </div>
+          {/if}
+
+          {#if guestRoomState?.room?.allowsUpload !== false}
           <div class="activity-card">
             <div class="act-card-head">
               <h4>Received Uploads</h4>
@@ -616,6 +786,7 @@
               {/each}
             </div>
           </div>
+          {/if}
         </div>
       </div>
     </div>

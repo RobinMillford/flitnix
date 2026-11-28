@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/itsyamin/flitnix/internal/session"
 	"github.com/itsyamin/flitnix/internal/transfer"
 )
 
@@ -29,6 +30,25 @@ const (
 	RoomExpired  RoomState = "expired"
 	RoomEnded    RoomState = "ended"
 )
+
+type RoomMode string
+
+const (
+	RoomModeUploadOnly   RoomMode = "upload_only"
+	RoomModeDownloadOnly RoomMode = "download_only"
+	RoomModeTwoWay       RoomMode = "two_way"
+)
+
+func NormalizeRoomMode(m RoomMode) RoomMode {
+	switch RoomMode(strings.ToLower(strings.TrimSpace(string(m)))) {
+	case RoomModeDownloadOnly:
+		return RoomModeDownloadOnly
+	case RoomModeTwoWay:
+		return RoomModeTwoWay
+	default:
+		return RoomModeUploadOnly
+	}
+}
 
 type GuestState string
 
@@ -67,6 +87,8 @@ var (
 	ErrUnauthorized         = errors.New("guest: unauthorized")
 	ErrRoomFull             = errors.New("guest: room capacity reached")
 	ErrFileConflict         = errors.New("guest: file already exists and collision policy rejects overwrite")
+	ErrUploadDisabled       = errors.New("guest: uploads are disabled in download-only rooms")
+	ErrDownloadDisabled     = errors.New("guest: downloads are disabled in upload-only rooms")
 )
 
 type CollisionPolicy string
@@ -185,6 +207,11 @@ func DefaultPresets() []Preset {
 type RoomConfig struct {
 	DestinationRoot      string                 `json:"destinationRoot"`
 	Duration             time.Duration          `json:"duration"`
+	Mode                 RoomMode               `json:"mode,omitempty"`
+	AutoApproveGuests    bool                   `json:"autoApproveGuests,omitempty"`
+	PinCode              string                 `json:"pinCode,omitempty"`
+	MaxDownloads         int                    `json:"maxDownloads,omitempty"`
+	SharedPaths          []string               `json:"sharedPaths,omitempty"`
 	Title                string                 `json:"title"`
 	Description          string                 `json:"description,omitempty"`
 	Deadline             *time.Time             `json:"deadline,omitempty"`
@@ -268,35 +295,46 @@ type UploadRequest struct {
 }
 
 type RoomView struct {
-	ID              string                `json:"id"`
-	Date            string                `json:"date"`
-	DestinationRoot string                `json:"destinationRoot"`
-	RoomFolder      string                `json:"roomFolder"`
-	Title           string                `json:"title"`
-	Description     string                `json:"description,omitempty"`
-	Deadline        *time.Time            `json:"deadline,omitempty"`
-	CollisionPolicy CollisionPolicy       `json:"collisionPolicy"`
-	State           RoomState             `json:"state"`
-	DurationSeconds int                   `json:"durationSeconds"`
-	CreatedAt       time.Time             `json:"createdAt"`
-	ExpiresAt       time.Time             `json:"expiresAt"`
-	InviteSecret    string                `json:"inviteSecret,omitempty"`
-	InviteURL       string                `json:"inviteUrl,omitempty"`
-	FormSchema      []FormField           `json:"formSchema,omitempty"`
-	Roster          []ExpectedParticipant `json:"roster,omitempty"`
-	HasRoster       bool                  `json:"hasRoster"`
+	ID                  string                `json:"id"`
+	Date                string                `json:"date"`
+	DestinationRoot     string                `json:"destinationRoot"`
+	RoomFolder          string                `json:"roomFolder"`
+	Mode                RoomMode              `json:"mode"`
+	AllowsUpload        bool                  `json:"allowsUpload"`
+	AllowsDownload      bool                  `json:"allowsDownload"`
+	RequireJoinApproval bool                  `json:"requireJoinApproval"`
+	PINRequired         bool                  `json:"pinRequired"`
+	MaxDownloads        int                   `json:"maxDownloads"`
+	RemainingDownloads  int                   `json:"remainingDownloads"`
+	DownloadCount       int                   `json:"downloadCount"`
+	ActiveDownloads     int                   `json:"activeDownloads"`
+	Title               string                `json:"title"`
+	Description         string                `json:"description,omitempty"`
+	Deadline            *time.Time            `json:"deadline,omitempty"`
+	CollisionPolicy     CollisionPolicy       `json:"collisionPolicy"`
+	State               RoomState             `json:"state"`
+	DurationSeconds     int                   `json:"durationSeconds"`
+	CreatedAt           time.Time             `json:"createdAt"`
+	ExpiresAt           time.Time             `json:"expiresAt"`
+	InviteSecret        string                `json:"inviteSecret,omitempty"`
+	InviteURL           string                `json:"inviteUrl,omitempty"`
+	FormSchema          []FormField           `json:"formSchema,omitempty"`
+	Roster              []ExpectedParticipant `json:"roster,omitempty"`
+	HasRoster           bool                  `json:"hasRoster"`
 }
 
 type Room struct {
-	ID              string
-	Date            string
-	InviteSecret    string
-	DestinationRoot string
-	RoomFolder      string
-	Duration        time.Duration
-	CreatedAt       time.Time
-	ExpiresAt       time.Time
-	State           RoomState
+	ID                string
+	Date              string
+	InviteSecret      string
+	DestinationRoot   string
+	RoomFolder        string
+	Mode              RoomMode
+	AutoApproveGuests bool
+	Duration          time.Duration
+	CreatedAt         time.Time
+	ExpiresAt         time.Time
+	State             RoomState
 
 	Title           string
 	Description     string
@@ -304,12 +342,17 @@ type Room struct {
 	CollisionPolicy CollisionPolicy
 	FormSchema      []FormField
 
-	mu            sync.RWMutex
-	guests        map[string]*Guest
-	guestsByToken map[string]*Guest
-	uploads       map[string]*UploadRequest
-	roster        map[string]*ExpectedParticipant
-	quota         *transfer.QuotaManager
+	mu              sync.RWMutex
+	guests          map[string]*Guest
+	guestsByToken   map[string]*Guest
+	uploads         map[string]*UploadRequest
+	roster          map[string]*ExpectedParticipant
+	shared          *transfer.Registry
+	quota           *transfer.QuotaManager
+	pinVerifier     session.PinVerifier
+	dlQuota         session.DownloadQuota
+	downloadCount   int
+	activeDownloads int
 }
 
 func randomID() string {
@@ -388,26 +431,44 @@ func NewRoomWithConfig(cfg RoomConfig) (*Room, error) {
 		collisionPolicy = CollisionPreserveBoth
 	}
 
+	pinVerifier, err := session.NewPinVerifier(cfg.PinCode)
+	if err != nil {
+		return nil, err
+	}
+	mode := NormalizeRoomMode(cfg.Mode)
 	r := &Room{
-		ID:              roomID,
-		Date:            dateStr,
-		InviteSecret:    inviteSecret,
-		DestinationRoot: absDest,
-		RoomFolder:      roomFolder,
-		Duration:        dur,
-		CreatedAt:       now,
-		ExpiresAt:       now.Add(dur),
-		State:           RoomActive,
-		Title:           title,
-		Description:     strings.TrimSpace(cfg.Description),
-		Deadline:        cfg.Deadline,
-		CollisionPolicy: collisionPolicy,
-		FormSchema:      cfg.FormSchema,
-		guests:          make(map[string]*Guest),
-		guestsByToken:   make(map[string]*Guest),
-		uploads:         make(map[string]*UploadRequest),
-		roster:          make(map[string]*ExpectedParticipant),
-		quota:           cfg.Quota,
+		ID:                roomID,
+		Date:              dateStr,
+		InviteSecret:      inviteSecret,
+		DestinationRoot:   absDest,
+		RoomFolder:        roomFolder,
+		Mode:              mode,
+		AutoApproveGuests: cfg.AutoApproveGuests,
+		Duration:          dur,
+		CreatedAt:         now,
+		ExpiresAt:         now.Add(dur),
+		State:             RoomActive,
+		Title:             title,
+		Description:       strings.TrimSpace(cfg.Description),
+		Deadline:          cfg.Deadline,
+		CollisionPolicy:   collisionPolicy,
+		FormSchema:        cfg.FormSchema,
+		guests:            make(map[string]*Guest),
+		guestsByToken:     make(map[string]*Guest),
+		uploads:           make(map[string]*UploadRequest),
+		roster:            make(map[string]*ExpectedParticipant),
+		shared:            transfer.NewRegistry(),
+		quota:             cfg.Quota,
+		pinVerifier:       pinVerifier,
+	}
+	r.dlQuota.Init(cfg.MaxDownloads)
+
+	if r.AllowsDownload() {
+		for _, rawPath := range cfg.SharedPaths {
+			if _, addErr := r.AddSharedPath(rawPath); addErr != nil {
+				return nil, addErr
+			}
+		}
 	}
 
 	for _, ep := range cfg.ExpectedParticipants {
@@ -477,23 +538,183 @@ func (r *Room) View() RoomView {
 	formSchema := make([]FormField, len(r.FormSchema))
 	copy(formSchema, r.FormSchema)
 
+	maxDL, _, remDL := r.dlQuota.Stats()
 	return RoomView{
-		ID:              r.ID,
-		Date:            r.Date,
-		DestinationRoot: r.DestinationRoot,
-		RoomFolder:      r.RoomFolder,
-		Title:           r.Title,
-		Description:     r.Description,
-		Deadline:        r.Deadline,
-		CollisionPolicy: r.CollisionPolicy,
-		State:           r.State,
-		DurationSeconds: int(r.Duration.Seconds()),
-		CreatedAt:       r.CreatedAt,
-		ExpiresAt:       r.ExpiresAt,
-		InviteSecret:    r.InviteSecret,
-		FormSchema:      formSchema,
-		Roster:          roster,
-		HasRoster:       len(r.roster) > 0,
+		ID:                  r.ID,
+		Date:                r.Date,
+		DestinationRoot:     r.DestinationRoot,
+		RoomFolder:          r.RoomFolder,
+		Mode:                r.Mode,
+		AllowsUpload:        r.AllowsUpload(),
+		AllowsDownload:      r.AllowsDownload(),
+		RequireJoinApproval: !r.AutoApproveGuests,
+		PINRequired:         r.pinVerifier.Enabled(),
+		MaxDownloads:        maxDL,
+		RemainingDownloads:  remDL,
+		DownloadCount:       r.downloadCount,
+		ActiveDownloads:     r.activeDownloads,
+		Title:               r.Title,
+		Description:         r.Description,
+		Deadline:            r.Deadline,
+		CollisionPolicy:     r.CollisionPolicy,
+		State:               r.State,
+		DurationSeconds:     int(r.Duration.Seconds()),
+		CreatedAt:           r.CreatedAt,
+		ExpiresAt:           r.ExpiresAt,
+		InviteSecret:        r.InviteSecret,
+		FormSchema:          formSchema,
+		Roster:              roster,
+		HasRoster:           len(r.roster) > 0,
+	}
+}
+
+// AllowsUpload reports whether guests may upload files to the host in this room.
+func (r *Room) AllowsUpload() bool {
+	if r == nil {
+		return false
+	}
+	return r.Mode == RoomModeUploadOnly || r.Mode == RoomModeTwoWay || r.Mode == ""
+}
+
+// AllowsDownload reports whether guests may browse and download host-shared files.
+func (r *Room) AllowsDownload() bool {
+	if r == nil {
+		return false
+	}
+	return r.Mode == RoomModeDownloadOnly || r.Mode == RoomModeTwoWay
+}
+
+// SharedRegistry returns the room-isolated registry of explicitly shared files/folders.
+func (r *Room) SharedRegistry() *transfer.Registry {
+	if r == nil {
+		return nil
+	}
+	return r.shared
+}
+
+// AddSharedPath validates and attaches a file or directory strictly to this room.
+func (r *Room) AddSharedPath(rawPath string) (transfer.SharedSource, error) {
+	if r == nil {
+		return transfer.SharedSource{}, ErrRoomNotFound
+	}
+	if !r.AllowsDownload() {
+		return transfer.SharedSource{}, ErrDownloadDisabled
+	}
+	clean := strings.TrimSpace(rawPath)
+	if clean == "" {
+		return transfer.SharedSource{}, transfer.ErrMissingFile
+	}
+	st, err := os.Stat(clean)
+	if err != nil {
+		return transfer.SharedSource{}, err
+	}
+	if st.IsDir() {
+		return r.shared.AddFolder(clean, "room-"+r.ID)
+	}
+	return r.shared.AddFileSource(clean, filepath.Base(clean), "room-"+r.ID)
+}
+
+// RemoveSharedSource unlists a shared file or folder from this room.
+func (r *Room) RemoveSharedSource(id string) bool {
+	if r == nil || r.shared == nil {
+		return false
+	}
+	return r.shared.Remove(id)
+}
+
+// ListSharedSources returns all host files/folders shared strictly in this room.
+func (r *Room) ListSharedSources() []transfer.SharedSource {
+	if r == nil || r.shared == nil || !r.AllowsDownload() {
+		return nil
+	}
+	return r.shared.ListSources()
+}
+
+// ValidateGuestApproved reports whether guestID is currently approved in an active room.
+func (r *Room) ValidateGuestApproved(guestID string) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.State != RoomActive && r.State != RoomExpiring {
+		return false
+	}
+	g, ok := r.guests[guestID]
+	return ok && g.State == GuestApproved
+}
+
+// RecordDownloadStart increments active room download count.
+func (r *Room) RecordDownloadStart() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.activeDownloads++
+	r.mu.Unlock()
+}
+
+// PINRequired reports whether joining this room requires a PIN.
+func (r *Room) PINRequired() bool {
+	return r != nil && r.pinVerifier.Enabled()
+}
+
+// VerifyPIN validates candidate against the room's salted PIN hash in constant time.
+func (r *Room) VerifyPIN(candidate string) bool {
+	if r == nil {
+		return false
+	}
+	return r.pinVerifier.Verify(candidate)
+}
+
+// TryReserveDownload atomically reserves a download slot for reservationID.
+func (r *Room) TryReserveDownload(reservationID string) bool {
+	if r == nil {
+		return false
+	}
+	return r.dlQuota.TryReserve(reservationID)
+}
+
+// ReleaseDownload releases an uncompleted reservation slot.
+func (r *Room) ReleaseDownload(reservationID string) {
+	if r == nil {
+		return
+	}
+	r.dlQuota.Release(reservationID)
+}
+
+// DownloadQuotaStats returns (limit, completed, remaining). remaining is -1 when unlimited.
+func (r *Room) DownloadQuotaStats() (limit, completed, remaining int) {
+	if r == nil {
+		return 0, 0, -1
+	}
+	return r.dlQuota.Stats()
+}
+
+// RecordDownloadEnd decrements active room download count and records completed downloads.
+func (r *Room) RecordDownloadEnd(completed bool) {
+	r.RecordDownloadEndFor("", completed)
+}
+
+// RecordDownloadEndFor updates download counts and finalizes or releases reservationID.
+func (r *Room) RecordDownloadEndFor(reservationID string, completed bool) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	if r.activeDownloads > 0 {
+		r.activeDownloads--
+	}
+	if completed {
+		r.downloadCount++
+	}
+	r.mu.Unlock()
+	if reservationID != "" {
+		if completed {
+			r.dlQuota.Consume(reservationID)
+		} else {
+			r.dlQuota.Release(reservationID)
+		}
 	}
 }
 
@@ -522,6 +743,9 @@ func (r *Room) revokeAllLocked(reason string) {
 			u.State = UploadCanceled
 			u.Error = reason
 		}
+	}
+	if r.shared != nil {
+		r.shared.Clear()
 	}
 }
 
@@ -590,6 +814,20 @@ func (r *Room) JoinWithParticipant(nickname, participantID string) (*Guest, erro
 		CreatedAt:     time.Now(),
 	}
 
+	if r.AutoApproveGuests {
+		g.State = GuestApproved
+		g.DecidedAt = time.Now()
+		if r.AllowsUpload() {
+			guestDir := filepath.Join(r.RoomFolder, fmt.Sprintf("%s-%s", g.ID, g.SafeSlug))
+			store, storeErr := transfer.NewStore(transfer.StoreConfig{Dir: guestDir})
+			if storeErr != nil {
+				return nil, fmt.Errorf("guest: cannot create store for guest %s: %w", g.ID, storeErr)
+			}
+			g.store = store
+			g.transfer = transfer.NewService(transfer.Config{Store: store, Quota: r.quota})
+		}
+	}
+
 	if participantID != "" {
 		if p, ok := r.roster[participantID]; ok {
 			p.AssignedGuestID = guestID
@@ -654,15 +892,16 @@ func (r *Room) ApproveGuest(id string) error {
 		return nil
 	}
 
-	// Prepare isolated directory for guest
-	guestDir := filepath.Join(r.RoomFolder, fmt.Sprintf("%s-%s", g.ID, g.SafeSlug))
-	store, err := transfer.NewStore(transfer.StoreConfig{Dir: guestDir})
-	if err != nil {
-		return fmt.Errorf("guest: cannot create store for guest %s: %w", id, err)
+	if r.AllowsUpload() {
+		// Prepare isolated directory for guest
+		guestDir := filepath.Join(r.RoomFolder, fmt.Sprintf("%s-%s", g.ID, g.SafeSlug))
+		store, err := transfer.NewStore(transfer.StoreConfig{Dir: guestDir})
+		if err != nil {
+			return fmt.Errorf("guest: cannot create store for guest %s: %w", id, err)
+		}
+		g.store = store
+		g.transfer = transfer.NewService(transfer.Config{Store: store, Quota: r.quota})
 	}
-
-	g.store = store
-	g.transfer = transfer.NewService(transfer.Config{Store: store, Quota: r.quota})
 	g.State = GuestApproved
 	g.DecidedAt = time.Now()
 
@@ -748,12 +987,24 @@ func (r *Room) DeclareUploadWithMeta(guestID, fileName string, size int64, formV
 	if r.State != RoomActive && r.State != RoomExpiring {
 		return nil, ErrRoomInactive
 	}
+	if !r.AllowsUpload() {
+		return nil, ErrUploadDisabled
+	}
 	g, ok := r.guests[guestID]
 	if !ok {
 		return nil, ErrGuestNotFound
 	}
 	if g.State != GuestApproved {
 		return nil, ErrGuestNotApproved
+	}
+	if g.transfer == nil {
+		guestDir := filepath.Join(r.RoomFolder, fmt.Sprintf("%s-%s", g.ID, g.SafeSlug))
+		store, err := transfer.NewStore(transfer.StoreConfig{Dir: guestDir})
+		if err != nil {
+			return nil, fmt.Errorf("guest: cannot create store for guest %s: %w", g.ID, err)
+		}
+		g.store = store
+		g.transfer = transfer.NewService(transfer.Config{Store: store, Quota: r.quota})
 	}
 
 	sanitizedName, err := transfer.SanitizeName(fileName)

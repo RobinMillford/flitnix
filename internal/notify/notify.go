@@ -465,10 +465,12 @@ func FormatIncomingSummary(hideNames bool, sender, itemName string, itemCount in
 }
 
 // FormatCompletedSummary builds privacy-aware notification text for completed transfers.
+// Direction is from the phone's point of view: "download" means the phone finished
+// downloading a file shared from the desktop, so the text stays desktop-centric.
 func FormatCompletedSummary(hideNames bool, direction, itemName string, itemCount int) (string, string) {
 	if hideNames {
 		if direction == "download" {
-			return "Transfer sent", "Shared file finished downloading"
+			return "Transfer completed", "Shared file finished downloading"
 		}
 		if itemCount > 1 {
 			return "Transfer received", fmt.Sprintf("%d files saved to Flitnix folder", itemCount)
@@ -480,7 +482,7 @@ func FormatCompletedSummary(hideNames bool, direction, itemName string, itemCoun
 		name = "transfer"
 	}
 	if direction == "download" {
-		return "Download completed", fmt.Sprintf("%s was downloaded cleanly", name)
+		return "Transfer completed", fmt.Sprintf("%s was shared successfully", name)
 	}
 	if itemCount > 1 {
 		return "Files received", fmt.Sprintf("%s (+%d more) saved", name, itemCount-1)

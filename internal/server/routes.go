@@ -21,6 +21,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/itsyamin/flitnix/internal/clipboard"
 	"github.com/itsyamin/flitnix/internal/devices"
 	"github.com/itsyamin/flitnix/internal/events"
 	"github.com/itsyamin/flitnix/internal/session"
@@ -57,10 +58,14 @@ import (
 // Everything below /api/ that is unknown yields 404 within the API router.
 // With a nil Services every /api/ path answers 404 (page-only server).
 func newRouter(services *Services, stall, downloadStall time.Duration, grants *DownloadGrantStore) http.Handler {
-	return newRouterWithShutdown(services, stall, downloadStall, grants, nil)
+	return newRouterWithOptions(services, stall, downloadStall, grants, nil, false)
 }
 
 func newRouterWithShutdown(services *Services, stall, downloadStall time.Duration, grants *DownloadGrantStore, shutdownCh <-chan struct{}) http.Handler {
+	return newRouterWithOptions(services, stall, downloadStall, grants, shutdownCh, false)
+}
+
+func newRouterWithOptions(services *Services, stall, downloadStall time.Duration, grants *DownloadGrantStore, shutdownCh <-chan struct{}, localHTTPSActive bool) http.Handler {
 	index, err := pageAssets.ReadFile("assets/index.html")
 	if err != nil {
 		panic("server: embedded assets missing: " + err.Error())
@@ -75,6 +80,16 @@ func newRouterWithShutdown(services *Services, stall, downloadStall time.Duratio
 	mux.HandleFunc("/healthz", serveHealth)
 	mux.HandleFunc("/ping", handleDiagnosticsPing(services))
 	mux.HandleFunc("/static/", serveStatic(assetsRoot))
+	if manifestBytes, mErr := pageAssets.ReadFile("assets/manifest.webmanifest"); mErr == nil {
+		mux.HandleFunc("/manifest.webmanifest", serveAssetBytes("application/manifest+json; charset=utf-8", "no-cache", "", manifestBytes))
+	}
+	if swBytes, swErr := pageAssets.ReadFile("assets/sw.js"); swErr == nil {
+		mux.HandleFunc("/sw.js", serveAssetBytes("application/javascript; charset=utf-8", "no-cache, no-store, must-revalidate", "/", swBytes))
+	}
+	if offlineBytes, offErr := pageAssets.ReadFile("assets/offline.html"); offErr == nil {
+		mux.HandleFunc("/offline.html", serveAssetBytes("text/html; charset=utf-8", "no-cache", "", offlineBytes))
+	}
+	mux.HandleFunc("/share-target", handleShareTargetFallback)
 
 	guestIndex, err := pageAssets.ReadFile("assets/guest.html")
 	if err == nil && len(guestIndex) > 0 {
@@ -91,6 +106,9 @@ func newRouterWithShutdown(services *Services, stall, downloadStall time.Duratio
 		mux.HandleFunc("/api/", serveNotFound)
 		mux.HandleFunc("/guest-api/", serveNotFound)
 	} else {
+		if localHTTPSActive && services.LocalHTTPS != nil {
+			mux.HandleFunc("GET /local-ca.crt", handleLocalCACertDownload(services))
+		}
 		// The whole API router sits behind one session check, so unknown
 		// /api/* paths and method mismatches are answered only after
 		// authentication; a token holder learns nothing about the
@@ -113,13 +131,17 @@ func newRouterWithShutdown(services *Services, stall, downloadStall time.Duratio
 		mux.HandleFunc("HEAD /api/archive-downloads/{id}", downloadHandler)
 
 		if services.GuestManager != nil {
-			guestAPI := newGuestAPIMux(services, stall, shutdownCh)
+			guestAPI := newGuestAPIMux(services, stall, downloadStall, grants, shutdownCh)
 			mux.Handle("/guest-api/", guestAPI)
 		} else {
 			mux.HandleFunc("/guest-api/", serveNotFound)
 		}
 	}
-	return securityMiddleware(mux)
+	allowedMDNSHost := ""
+	if services != nil && services.HostIdentity != nil {
+		allowedMDNSHost = LocalMDNSHost(services.HostIdentity.HostID)
+	}
+	return securityMiddlewareWithHost(mux, allowedMDNSHost)
 }
 
 // parseHostPort safely parses an HTTP Host authority string into host and port.
@@ -194,6 +216,10 @@ func parseHostPort(raw string) (host string, port string, isBracketed bool, err 
 // address, localhost, or RFC 2606 test domains (for httptest). Any arbitrary
 // DNS hostname is rejected to prevent DNS rebinding attacks.
 func isAllowedHost(hostHeader string) bool {
+	return isAllowedHostWithMDNS(hostHeader, "")
+}
+
+func isAllowedHostWithMDNS(hostHeader, allowedMDNSHost string) bool {
 	host, _, isBracketed, err := parseHostPort(hostHeader)
 	if err != nil || host == "" {
 		return false
@@ -231,6 +257,9 @@ func isAllowedHost(hostHeader string) bool {
 		return true
 	}
 	if lower == "example.com" || strings.HasSuffix(lower, ".example.com") || strings.HasSuffix(lower, ".test") {
+		return true
+	}
+	if allowedMDNSHost != "" && lower == strings.ToLower(allowedMDNSHost) {
 		return true
 	}
 
@@ -278,13 +307,17 @@ func equalHostPort(h1, h2 string) bool {
 // with untrusted Host headers (DNS rebinding), and rejects cross-origin state-changing
 // requests (CSRF via Sec-Fetch-Site, Origin, or Referer).
 func securityMiddleware(next http.Handler) http.Handler {
+	return securityMiddlewareWithHost(next, "")
+}
+
+func securityMiddlewareWithHost(next http.Handler, allowedMDNSHost string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; worker-src 'self'; manifest-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'")
 
-		if !isAllowedHost(r.Host) {
+		if !isAllowedHostWithMDNS(r.Host, allowedMDNSHost) {
 			writeError(w, http.StatusBadRequest, "invalid host header")
 			return
 		}
@@ -323,42 +356,163 @@ func securityMiddleware(next http.Handler) http.Handler {
 // without an authenticated session in the request context.
 func newAPIMux(services *Services, stall time.Duration, grants *DownloadGrantStore, shutdownCh <-chan struct{}) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/events", handlePersonalEvents(services, shutdownCh))
-	mux.HandleFunc("POST /api/uploads", handleUploadDeclare(services, stall))
-	mux.HandleFunc("GET /api/uploads/{id}", handleUploadStatus(services))
-	mux.HandleFunc("HEAD /api/uploads/{id}/content", handleUploadHead(services))
-	mux.HandleFunc("PATCH /api/uploads/{id}/content", handleUploadPatch(services, stall))
-	mux.HandleFunc("PUT /api/uploads/{id}/content", handleUploadContent(services, stall))
-	mux.HandleFunc("POST /api/batches", handleBatchCreate(services))
-	mux.HandleFunc("GET /api/batches/{id}", handleBatchStatus(services))
-	mux.HandleFunc("DELETE /api/batches/{id}/items/{itemID}", handleBatchItemCancel(services))
-	mux.HandleFunc("HEAD /api/batches/{batchID}/items/{itemID}/content", handleBatchHead(services))
-	mux.HandleFunc("PATCH /api/batches/{batchID}/items/{itemID}/content", handleBatchPatch(services, stall))
-	mux.HandleFunc("PUT /api/batches/{batchID}/items/{itemID}/content", handleBatchContent(services, stall))
-	mux.HandleFunc("GET /api/files", serveFilesList(services))
-	mux.HandleFunc("GET /api/files/{id}/download", serveFileDownload(services, stall))
-	mux.HandleFunc("GET /api/sources", serveSourcesList(services))
-	mux.HandleFunc("GET /api/sources/{id}/items", serveSourceItems(services))
-	mux.HandleFunc("POST /api/download-grants", createDownloadGrant(services, grants))
-	mux.HandleFunc("GET /api/download-progress/{id}", serveDownloadProgress(services, grants))
-	mux.HandleFunc("POST /api/text", handleTextMessageSend(services))
-	mux.HandleFunc("GET /api/text", handleTextMessageList(services))
+	pinLimiter := newPINLimiter()
+	gate := func(fn http.HandlerFunc) http.Handler {
+		return requirePINUnlocked(services, fn)
+	}
+	// The event stream exposes transfer metadata, so it is subject to the same
+	// PIN gate as the file and grant endpoints. Status/verify stay outside it.
+	mux.Handle("GET /api/events", gate(handlePersonalEvents(services, shutdownCh)))
+	mux.HandleFunc("GET /api/pin/status", handleSessionPINStatus(services))
+	mux.HandleFunc("POST /api/pin/verify", handleSessionPINVerify(services, pinLimiter))
+	mux.Handle("POST /api/uploads", gate(handleUploadDeclare(services, stall)))
+	mux.Handle("GET /api/uploads/{id}", gate(handleUploadStatus(services)))
+	mux.Handle("HEAD /api/uploads/{id}/content", gate(handleUploadHead(services)))
+	mux.Handle("PATCH /api/uploads/{id}/content", gate(handleUploadPatch(services, stall)))
+	mux.Handle("PUT /api/uploads/{id}/content", gate(handleUploadContent(services, stall)))
+	mux.Handle("POST /api/batches", gate(handleBatchCreate(services)))
+	mux.Handle("GET /api/batches/{id}", gate(handleBatchStatus(services)))
+	mux.Handle("DELETE /api/batches/{id}/items/{itemID}", gate(handleBatchItemCancel(services)))
+	mux.Handle("HEAD /api/batches/{batchID}/items/{itemID}/content", gate(handleBatchHead(services)))
+	mux.Handle("PATCH /api/batches/{batchID}/items/{itemID}/content", gate(handleBatchPatch(services, stall)))
+	mux.Handle("PUT /api/batches/{batchID}/items/{itemID}/content", gate(handleBatchContent(services, stall)))
+	mux.Handle("GET /api/files", gate(serveFilesList(services)))
+	mux.Handle("GET /api/files/{id}/download", gate(serveFileDownload(services, grants, stall)))
+	mux.Handle("GET /api/sources", gate(serveSourcesList(services)))
+	mux.Handle("GET /api/sources/{id}/items", gate(serveSourceItems(services)))
+	mux.Handle("POST /api/download-grants", gate(createDownloadGrant(services, grants)))
+	mux.Handle("GET /api/download-progress/{id}", gate(serveDownloadProgress(services, grants)))
+	mux.Handle("POST /api/text", gate(handleTextMessageSend(services)))
+	mux.Handle("GET /api/text", gate(handleTextMessageList(services)))
+	mux.Handle("GET /api/clipboard", gate(handleClipboardGet(services)))
+	mux.Handle("POST /api/clipboard", gate(handleClipboardPush(services)))
 	mux.HandleFunc("GET /api/diagnostics/ping", handleDiagnosticsPing(services))
 	mux.HandleFunc("POST /api/diagnostics/ping", handleDiagnosticsPing(services))
 
 	// Trusted Devices Pairing & Management Endpoints (behind requireSession)
-	mux.HandleFunc("POST /api/pair/challenge", handlePairChallenge(services))
-	mux.HandleFunc("POST /api/pair/reveal", handlePairReveal(services))
-	mux.HandleFunc("POST /api/pair/request", handlePairRequest(services))
-	mux.HandleFunc("POST /api/pair/rearm", handlePairRearm(services))
-	mux.HandleFunc("POST /api/auth/challenge", handleAuthChallenge(services))
-	mux.HandleFunc("GET /api/devices", handleDevicesList(services))
-	mux.HandleFunc("DELETE /api/devices/{id}", handleDeviceRemove(services))
-	mux.HandleFunc("PUT /api/devices/{id}/auto-approve", handleDeviceSetAutoApprove(services))
-	mux.HandleFunc("PUT /api/devices/{id}/policy", handleDeviceSetPolicy(services))
-	mux.HandleFunc("GET /api/visibility", handleVisibilityGet(services))
+	mux.Handle("POST /api/pair/challenge", gate(handlePairChallenge(services)))
+	mux.Handle("POST /api/pair/reveal", gate(handlePairReveal(services)))
+	mux.Handle("POST /api/pair/request", gate(handlePairRequest(services)))
+	mux.Handle("POST /api/pair/rearm", gate(handlePairRearm(services)))
+	mux.Handle("POST /api/auth/challenge", gate(handleAuthChallenge(services)))
+	mux.Handle("GET /api/devices", gate(handleDevicesList(services)))
+	mux.Handle("DELETE /api/devices/{id}", gate(handleDeviceRemove(services)))
+	mux.Handle("PUT /api/devices/{id}/auto-approve", gate(handleDeviceSetAutoApprove(services)))
+	mux.Handle("PUT /api/devices/{id}/policy", gate(handleDeviceSetPolicy(services)))
+	mux.Handle("GET /api/visibility", gate(handleVisibilityGet(services)))
 
 	return mux
+}
+
+const pinUnlockCookieName = "flitnix-pin-unlock"
+
+func isRequestPINUnlocked(r *http.Request, sess *session.Session) bool {
+	if sess == nil || !sess.PINRequired() {
+		return true
+	}
+	if c, err := r.Cookie(pinUnlockCookieName); err == nil && c.Value != "" {
+		return sess.ValidatePINUnlock(c.Value)
+	}
+	return false
+}
+
+func requirePINUnlocked(svcs *Services, next http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sess := sessionFrom(r)
+		if sess != nil && !isRequestPINUnlocked(r, sess) {
+			writeErrorCode(w, http.StatusForbidden, "PIN required to unlock this session", "pin_required")
+			return
+		}
+		next(w, r)
+	})
+}
+
+func handleSessionPINStatus(svcs *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess := sessionFrom(r)
+		if sess == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		maxDL, compDL, remDL := sess.DownloadQuotaStats()
+		resp := map[string]any{
+			"pinRequired":        sess.PINRequired(),
+			"pinUnlocked":        isRequestPINUnlocked(r, sess),
+			"expiresAt":          sess.ExpiresAt(),
+			"maxDownloads":       maxDL,
+			"completedDownloads": compDL,
+			"remainingDownloads": remDL,
+		}
+		if hard := sess.HardExpiresAt(); !hard.IsZero() {
+			resp["hardExpiresAt"] = hard
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+func handleSessionPINVerify(svcs *Services, limiter *deviceSessionLimiter) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess := sessionFrom(r)
+		if sess == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		ip := clientIPFromRequest(r)
+		if allowed, retryAfter := limiter.checkAllowed(ip); !allowed {
+			writeRateLimit(w, retryAfter)
+			return
+		}
+		var req struct {
+			Pin string `json:"pin"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid PIN payload")
+			return
+		}
+		if !sess.VerifyPIN(req.Pin) {
+			limiter.recordFailure(ip)
+			if allowed, retryAfter := limiter.checkAllowed(ip); !allowed {
+				writeRateLimit(w, retryAfter)
+				return
+			}
+			writeErrorCode(w, http.StatusForbidden, "Incorrect PIN", "invalid_pin")
+			return
+		}
+		limiter.clear(ip)
+		proof, err := sess.IssuePINUnlock()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "could not create unlock session")
+			return
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name:     pinUnlockCookieName,
+			Value:    proof,
+			Path:     "/api/",
+			HttpOnly: true,
+			SameSite: http.SameSiteStrictMode,
+			Secure:   r.TLS != nil,
+		})
+		writeJSON(w, http.StatusOK, map[string]any{"unlocked": true})
+	}
+}
+
+func handleLocalCACertDownload(services *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if services == nil || services.LocalHTTPS == nil || services.HostIdentity == nil {
+			serveNotFound(w, r)
+			return
+		}
+		pemBytes, _, err := services.LocalHTTPS.CACertPEM(services.HostIdentity.HostID)
+		if err != nil || len(pemBytes) == 0 {
+			writeError(w, http.StatusNotFound, "local CA certificate unavailable")
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-x509-ca-cert")
+		w.Header().Set("Content-Disposition", `attachment; filename="flitnix-local-ca.crt"`)
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(pemBytes)
+	}
 }
 
 func handleDiagnosticsPing(services *Services) http.HandlerFunc {
@@ -1553,11 +1707,15 @@ const downloadCopySize = 256 * 1024
 // registry's Add-time snapshot stays untouched); a file that vanished or
 // stopped being a regular file answers 404. The session is pinned so the
 // idle timer never aborts a long download.
-func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
+func serveFileDownload(svcs *Services, grants *DownloadGrantStore, stall time.Duration) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sess := sessionFrom(r)
 		if sess == nil {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if !isRequestPINUnlocked(r, sess) {
+			writeErrorCode(w, http.StatusForbidden, "PIN required to unlock this session", "pin_required")
 			return
 		}
 		if isQRSharingPaused(svcs, sess) {
@@ -1598,6 +1756,23 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
+
+		dlKey := "filedl:" + sf.ID + ":" + strconv.FormatInt(time.Now().UnixNano(), 36)
+		if !sess.TryReserveDownload(dlKey) {
+			writeErrorCode(w, http.StatusGone, "download limit reached for this session", "download_limit_reached")
+			return
+		}
+		dlCompleted := false
+		defer func() {
+			if dlCompleted {
+				_, autoEnd := sess.ConsumeDownload(dlKey)
+				if autoEnd {
+					go endSessionForDownloadLimit(svcs, grants, sess)
+				}
+			} else {
+				sess.ReleaseDownload(dlKey)
+			}
+		}()
 
 		var downloadID string
 		if svcs.Downloads != nil {
@@ -1642,6 +1817,9 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 			}
 			if svcs.Downloads != nil {
 				svcs.Downloads.Finish(downloadID, seeker.read)
+			}
+			if seeker.read == size || seeker.curOffset == size {
+				dlCompleted = true
 			}
 			return
 		}
@@ -1745,6 +1923,9 @@ func serveFileDownload(svcs *Services, stall time.Duration) http.HandlerFunc {
 		if svcs.Downloads != nil {
 			svcs.Downloads.FinishWithDigest(downloadID, written, actualSHA256)
 		}
+		if written == size {
+			dlCompleted = true
+		}
 	}
 }
 
@@ -1789,6 +1970,93 @@ func serveHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func serveAssetBytes(contentType, cacheControl, swAllowed string, body []byte) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requireGetHead(w, r) {
+			return
+		}
+		if contentType != "" {
+			w.Header().Set("Content-Type", contentType)
+		}
+		if cacheControl != "" {
+			w.Header().Set("Cache-Control", cacheControl)
+		}
+		if swAllowed != "" {
+			w.Header().Set("Service-Worker-Allowed", swAllowed)
+		}
+		w.WriteHeader(http.StatusOK)
+		if r.Method == http.MethodHead {
+			return
+		}
+		_, _ = w.Write(body)
+	}
+}
+
+const maxShareTargetFallbackBytes = 32 << 20 // 32 MiB cap for unauthenticated fallback POST
+
+// handleShareTargetFallback handles /share-target when the Service Worker did
+// not intercept the POST (e.g. non-SW test clients or unsupported contexts).
+// It enforces strict body size bounds, never persists unauthenticated files,
+// and directs browsers back to the app shell.
+func handleShareTargetFallback(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "GET, HEAD, POST")
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxShareTargetFallbackBytes)
+	ct := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
+	var title, text, sharedURL string
+	var fileCount int
+	if strings.HasPrefix(ct, "multipart/form-data") {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) {
+				writeError(w, http.StatusRequestEntityTooLarge, "shared payload exceeds fallback limit; use HTTPS PWA service worker for large files")
+				return
+			}
+			writeError(w, http.StatusBadRequest, "invalid multipart share payload")
+			return
+		}
+		if r.MultipartForm != nil {
+			defer func() { _ = r.MultipartForm.RemoveAll() }()
+			fileCount = len(r.MultipartForm.File["files"])
+		}
+		title = r.FormValue("title")
+		text = r.FormValue("text")
+		sharedURL = r.FormValue("url")
+	} else {
+		if err := r.ParseForm(); err != nil {
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) {
+				writeError(w, http.StatusRequestEntityTooLarge, "shared payload exceeds limit")
+				return
+			}
+			writeError(w, http.StatusBadRequest, "invalid share form payload")
+			return
+		}
+		title = r.FormValue("title")
+		text = r.FormValue("text")
+		sharedURL = r.FormValue("url")
+	}
+	if strings.Contains(strings.ToLower(r.Header.Get("Accept")), "application/json") {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"received":      true,
+			"serviceWorker": false,
+			"fileCount":     fileCount,
+			"hasText":       strings.TrimSpace(text) != "" || strings.TrimSpace(title) != "",
+			"hasUrl":        strings.TrimSpace(sharedURL) != "",
+			"message":       "Share Target requires the HTTPS PWA Service Worker to stage files locally for confirmation.",
+		})
+		return
+	}
+	http.Redirect(w, r, "/?share_notice=sw_required", http.StatusSeeOther)
 }
 
 // serveStatic serves files embedded under /static/<name>. The directory
@@ -1937,6 +2205,159 @@ func handleTextMessageList(svcs *Services) http.HandlerFunc {
 
 		msgs := svcs.TextMessages.List(sess.Key())
 		writeJSON(w, http.StatusOK, map[string]any{"messages": msgs})
+	}
+}
+
+func publishClipboardItemToTrusted(svcs *Services, excludeDeviceID string, item clipboard.SyncItem) {
+	if svcs == nil || svcs.Events == nil {
+		return
+	}
+	if svcs.Sessions != nil {
+		for _, s := range svcs.Sessions.ActiveSessions() {
+			devID := s.DeviceID()
+			if devID == "" || devID == excludeDeviceID {
+				continue
+			}
+			if svcs.Devices != nil {
+				if _, ok := svcs.Devices.Get(devID); !ok {
+					continue
+				}
+			}
+			svcs.Events.PublishPersonal(s.Key(), events.TypeClipboardUpdated, item)
+		}
+	}
+	svcs.Events.PublishDesktop(events.TypeClipboardUpdated, item)
+}
+
+func refreshClipboardAuthorizedPeers(svcs *Services) {
+	if svcs == nil || svcs.Clipboard == nil {
+		return
+	}
+	hasTrusted := false
+	if svcs.Sessions != nil {
+		for _, s := range svcs.Sessions.ActiveSessions() {
+			devID := s.DeviceID()
+			if devID == "" {
+				continue
+			}
+			if svcs.Devices == nil {
+				hasTrusted = true
+				break
+			}
+			if _, ok := svcs.Devices.Get(devID); ok {
+				hasTrusted = true
+				break
+			}
+		}
+	}
+	svcs.Clipboard.SetActiveAuthorizedPeers(hasTrusted)
+}
+
+func requireTrustedClipboardDevice(w http.ResponseWriter, r *http.Request, svcs *Services) (devices.Device, bool) {
+	sess := sessionFrom(r)
+	if sess == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return devices.Device{}, false
+	}
+	devID := sess.DeviceID()
+	if devID == "" || svcs == nil || svcs.Devices == nil {
+		writeErrorCode(w, http.StatusForbidden, "Automatic clipboard sync is restricted to paired trusted devices", "trusted_device_required")
+		return devices.Device{}, false
+	}
+	dev, ok := svcs.Devices.Get(devID)
+	if !ok {
+		writeErrorCode(w, http.StatusUnauthorized, "This device is no longer trusted", "device_revoked")
+		return devices.Device{}, false
+	}
+	return dev, true
+}
+
+func handleClipboardGet(svcs *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := requireTrustedClipboardDevice(w, r, svcs); !ok {
+			return
+		}
+		if svcs.Clipboard == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"enabled": false, "supported": false})
+			return
+		}
+		st := svcs.Clipboard.Status()
+		resp := map[string]any{
+			"enabled":             st.Enabled,
+			"paused":              st.Paused,
+			"watching":            st.Watching,
+			"supported":           st.Supported,
+			"backendName":         st.BackendName,
+			"concealedFilterSafe": st.ConcealedFilterSafe,
+			"unsupportedReason":   st.UnsupportedReason,
+			"lastSyncAt":          st.LastSyncAt,
+			"lastOrigin":          st.LastOrigin,
+			"lastSizeBytes":       st.LastSizeBytes,
+			"lastSkippedReason":   st.LastSkippedReason,
+		}
+		if item, hasItem := svcs.Clipboard.Latest(); hasItem {
+			resp["latest"] = item
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+func handleClipboardPush(svcs *Services) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		dev, ok := requireTrustedClipboardDevice(w, r, svcs)
+		if !ok {
+			return
+		}
+		if svcs.Clipboard == nil || !svcs.Clipboard.Enabled() {
+			writeErrorCode(w, http.StatusForbidden, "Automatic clipboard sync is disabled on this desktop", "clipboard_sync_disabled")
+			return
+		}
+		if svcs.Clipboard.Paused() {
+			writeErrorCode(w, http.StatusConflict, "Automatic clipboard sync is currently paused on this desktop", "clipboard_sync_paused")
+			return
+		}
+		raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, clipboard.MaxContentBytes+2048))
+		if err != nil {
+			writeError(w, http.StatusRequestEntityTooLarge, "clipboard payload exceeds 64 KiB limit")
+			return
+		}
+		if !utf8.Valid(raw) {
+			writeError(w, http.StatusBadRequest, "clipboard content must be valid UTF-8 text")
+			return
+		}
+		var req struct {
+			Content string `json:"content"`
+		}
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid clipboard JSON payload")
+			return
+		}
+		item, applied, err := svcs.Clipboard.ReceiveRemote(r.Context(), dev.ID, dev.Name, req.Content)
+		if err != nil {
+			switch {
+			case errors.Is(err, clipboard.ErrPayloadTooLarge):
+				writeErrorCode(w, http.StatusRequestEntityTooLarge, "clipboard content exceeds 64 KiB limit", "clipboard_too_large")
+			case errors.Is(err, clipboard.ErrInvalidUTF8), errors.Is(err, clipboard.ErrEmptyContent):
+				writeError(w, http.StatusBadRequest, err.Error())
+			case errors.Is(err, clipboard.ErrDisabled):
+				writeErrorCode(w, http.StatusForbidden, "Automatic clipboard sync is disabled", "clipboard_sync_disabled")
+			case errors.Is(err, clipboard.ErrPaused):
+				writeErrorCode(w, http.StatusConflict, "Automatic clipboard sync is paused", "clipboard_sync_paused")
+			default:
+				writeError(w, http.StatusInternalServerError, "clipboard sync failed")
+			}
+			return
+		}
+		if applied {
+			publishClipboardItemToTrusted(svcs, dev.ID, item)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"applied": applied,
+			"item":    item,
+		})
 	}
 }
 
@@ -2229,6 +2650,7 @@ func handleDeviceRemove(svcs *Services) http.HandlerFunc {
 				}
 			}
 		}
+		refreshClipboardAuthorizedPeers(svcs)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
 	}
 }

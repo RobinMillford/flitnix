@@ -24,7 +24,7 @@ const (
 	ScopeGuest    = "guest"
 	ScopeDesktop  = "desktop"
 
-	MaxPayloadBytes       = 16 * 1024
+	MaxPayloadBytes       = 96 * 1024
 	DefaultQueueSize      = 64
 	ProgressBackpressure  = 48 // shed progress events once queue >= 75% full
 	MaxGlobalPersonalSubs = 64
@@ -49,6 +49,8 @@ const (
 	TypeDownloadProgress   = "download.progress"
 	TypeTextMessage        = "text.message"
 	TypeTextCleared        = "text.cleared"
+	TypeClipboardUpdated   = "clipboard.updated"
+	TypeClipboardState     = "clipboard.state"
 	TypeFilesUpdated       = "files.updated"
 	TypeSessionCreated     = "session.created"
 	TypeSessionEnded       = "session.ended"

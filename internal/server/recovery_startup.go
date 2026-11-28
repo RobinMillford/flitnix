@@ -144,9 +144,22 @@ func installSessionRecovery(store *recovery.Store, svcs *Services) error {
 			Status:     session.Status(record.Status),
 			CreatedAt:  record.CreatedAt,
 			ExpiresAt:  record.ExpiresAt,
+			PIN: session.PinVerifierRecord{
+				Enabled: record.PinEnabled,
+				Salt:    record.PinSalt,
+				Digest:  record.PinDigest,
+			},
+			DownloadLimit: session.DownloadQuotaRecord{
+				Limit:     record.DownloadLimit,
+				Completed: record.DownloadsDone,
+			},
+			OneTimeAutoEnd: record.OneTimeAutoEnd,
 		}
 		if record.RevokedAt != nil {
 			restored.RevokedAt = *record.RevokedAt
+		}
+		if record.HardExpiresAt != nil {
+			restored.HardExpiresAt = *record.HardExpiresAt
 		}
 		if err := svcs.Sessions.Restore(restored); err != nil {
 			return err
@@ -163,23 +176,36 @@ func installSessionRecovery(store *recovery.Store, svcs *Services) error {
 		}
 		return store.Append(kind, durableSession(record))
 	})
+	svcs.Sessions.SetUpdateHook(func(record session.SessionRecord) error {
+		return store.Append(recovery.EventSessionUpdated, durableSession(record))
+	})
 	return nil
 }
 
 func durableSession(record session.SessionRecord) recovery.SessionRecord {
 	out := recovery.SessionRecord{
-		SessionID:     record.SessionID,
-		SessionKey:    record.SessionKey,
-		TokenVerifier: hex.EncodeToString(record.Verifier[:]),
-		KeyID:         recovery.KeyID,
-		Generation:    record.Generation,
-		Status:        string(record.Status),
-		CreatedAt:     record.CreatedAt,
-		ExpiresAt:     record.ExpiresAt,
+		SessionID:      record.SessionID,
+		SessionKey:     record.SessionKey,
+		TokenVerifier:  hex.EncodeToString(record.Verifier[:]),
+		KeyID:          recovery.KeyID,
+		Generation:     record.Generation,
+		Status:         string(record.Status),
+		CreatedAt:      record.CreatedAt,
+		ExpiresAt:      record.ExpiresAt,
+		PinEnabled:     record.PIN.Enabled,
+		PinSalt:        record.PIN.Salt,
+		PinDigest:      record.PIN.Digest,
+		DownloadLimit:  record.DownloadLimit.Limit,
+		DownloadsDone:  record.DownloadLimit.Completed,
+		OneTimeAutoEnd: record.OneTimeAutoEnd,
 	}
 	if !record.RevokedAt.IsZero() {
 		revoked := record.RevokedAt
 		out.RevokedAt = &revoked
+	}
+	if !record.HardExpiresAt.IsZero() {
+		hard := record.HardExpiresAt
+		out.HardExpiresAt = &hard
 	}
 	return out
 }

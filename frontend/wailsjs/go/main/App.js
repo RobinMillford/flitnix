@@ -10,6 +10,10 @@ export function AddExpectedParticipant(arg1, arg2, arg3) {
   return window['go']['main']['App']['AddExpectedParticipant'](arg1, arg2, arg3);
 }
 
+export function AddGuestSharedPaths(arg1) {
+  return window['go']['main']['App']['AddGuestSharedPaths'](arg1);
+}
+
 export function ApplyHistoryRetentionNow() {
   return window['go']['main']['App']['ApplyHistoryRetentionNow']();
 }
@@ -66,12 +70,20 @@ export function ClearTextMessages(arg1) {
   return window['go']['main']['App']['ClearTextMessages'](arg1);
 }
 
+export function ClearTransferHistory() {
+  return window['go']['main']['App']['ClearTransferHistory']();
+}
+
 export function ConnectAndSendToPeer(arg1) {
   return window['go']['main']['App']['ConnectAndSendToPeer'](arg1);
 }
 
 export function DeleteGuestTemplate(arg1) {
   return window['go']['main']['App']['DeleteGuestTemplate'](arg1);
+}
+
+export function DeleteHistoryRecord(arg1) {
+  return window['go']['main']['App']['DeleteHistoryRecord'](arg1);
 }
 
 export function DenyPairing(arg1) {
@@ -114,6 +126,10 @@ export function ExportGuestCollection(arg1) {
   return window['go']['main']['App']['ExportGuestCollection'](arg1);
 }
 
+export function ExportLocalCACert() {
+  return window['go']['main']['App']['ExportLocalCACert']();
+}
+
 export function GetAppVersion() {
   return window['go']['main']['App']['GetAppVersion']();
 }
@@ -122,8 +138,16 @@ export function GetBatch(arg1) {
   return window['go']['main']['App']['GetBatch'](arg1);
 }
 
+export function GetClipboardSyncStatus() {
+  return window['go']['main']['App']['GetClipboardSyncStatus']();
+}
+
 export function GetGuestRoomState() {
   return window['go']['main']['App']['GetGuestRoomState']();
+}
+
+export function GetLocalHTTPSStatus() {
+  return window['go']['main']['App']['GetLocalHTTPSStatus']();
 }
 
 export function GetLocalPeerInfo() {
@@ -154,6 +178,14 @@ export function GetVisibilityState() {
   return window['go']['main']['App']['GetVisibilityState']();
 }
 
+export function HideWindow() {
+  return window['go']['main']['App']['HideWindow']();
+}
+
+export function InspectPeerTarget(arg1, arg2) {
+  return window['go']['main']['App']['InspectPeerTarget'](arg1, arg2);
+}
+
 export function ListAuditEvents(arg1) {
   return window['go']['main']['App']['ListAuditEvents'](arg1);
 }
@@ -170,6 +202,10 @@ export function ListGuestTemplates() {
   return window['go']['main']['App']['ListGuestTemplates']();
 }
 
+export function ListKnownHosts() {
+  return window['go']['main']['App']['ListKnownHosts']();
+}
+
 export function ListNearbyPeers() {
   return window['go']['main']['App']['ListNearbyPeers']();
 }
@@ -178,16 +214,16 @@ export function ListNetworkInterfaces() {
   return window['go']['main']['App']['ListNetworkInterfaces']();
 }
 
+export function ListPeerTransfers() {
+  return window['go']['main']['App']['ListPeerTransfers']();
+}
+
 export function ListPendingBatches() {
   return window['go']['main']['App']['ListPendingBatches']();
 }
 
 export function ListPendingUploads() {
   return window['go']['main']['App']['ListPendingUploads']();
-}
-
-export function ListPeerTransfers() {
-  return window['go']['main']['App']['ListPeerTransfers']();
 }
 
 export function ListSessions() {
@@ -218,12 +254,12 @@ export function OpenGuestFolder() {
   return window['go']['main']['App']['OpenGuestFolder']();
 }
 
-export function PairWithPeer(arg1) {
-  return window['go']['main']['App']['PairWithPeer'](arg1);
+export function OpenHistoryFile(arg1) {
+  return window['go']['main']['App']['OpenHistoryFile'](arg1);
 }
 
-export function InspectPeerTarget(arg1, arg2) {
-  return window['go']['main']['App']['InspectPeerTarget'](arg1, arg2);
+export function PairWithPeer(arg1) {
+  return window['go']['main']['App']['PairWithPeer'](arg1);
 }
 
 export function PauseBatch(arg1) {
@@ -234,12 +270,12 @@ export function PickExportDestination() {
   return window['go']['main']['App']['PickExportDestination']();
 }
 
-export function PickFilesForSharing() {
-  return window['go']['main']['App']['PickFilesForSharing']();
-}
-
 export function PickFilesForPeer() {
   return window['go']['main']['App']['PickFilesForPeer']();
+}
+
+export function PickFilesForSharing() {
+  return window['go']['main']['App']['PickFilesForSharing']();
 }
 
 export function PickFolderForPeer() {
@@ -254,16 +290,24 @@ export function PickGuestDestination() {
   return window['go']['main']['App']['PickGuestDestination']();
 }
 
+export function PickGuestSharePaths(arg1) {
+  return window['go']['main']['App']['PickGuestSharePaths'](arg1);
+}
+
+export function QueryTransferHistory(arg1) {
+  return window['go']['main']['App']['QueryTransferHistory'](arg1);
+}
+
+export function QuitApp() {
+  return window['go']['main']['App']['QuitApp']();
+}
+
 export function ReArmPairing() {
   return window['go']['main']['App']['ReArmPairing']();
 }
 
 export function ReceiveDirectory() {
   return window['go']['main']['App']['ReceiveDirectory']();
-}
-
-export function RegenerateSessionShortCode(arg1) {
-  return window['go']['main']['App']['RegenerateSessionShortCode'](arg1);
 }
 
 export function RecentDownloads() {
@@ -276,6 +320,10 @@ export function RecentUploads() {
 
 export function RefreshNetwork() {
   return window['go']['main']['App']['RefreshNetwork']();
+}
+
+export function RegenerateSessionShortCode(arg1) {
+  return window['go']['main']['App']['RegenerateSessionShortCode'](arg1);
 }
 
 export function RejectBatch(arg1) {
@@ -298,6 +346,18 @@ export function RemoveExpectedParticipant(arg1) {
   return window['go']['main']['App']['RemoveExpectedParticipant'](arg1);
 }
 
+export function RemoveGuestSharedSource(arg1) {
+  return window['go']['main']['App']['RemoveGuestSharedSource'](arg1);
+}
+
+export function RemoveKnownHost(arg1) {
+  return window['go']['main']['App']['RemoveKnownHost'](arg1);
+}
+
+export function RemoveLocalCACert() {
+  return window['go']['main']['App']['RemoveLocalCACert']();
+}
+
 export function RemoveTrustedDevice(arg1) {
   return window['go']['main']['App']['RemoveTrustedDevice'](arg1);
 }
@@ -306,12 +366,24 @@ export function ResetSettings() {
   return window['go']['main']['App']['ResetSettings']();
 }
 
+export function ReshareHistoryFile(arg1) {
+  return window['go']['main']['App']['ReshareHistoryFile'](arg1);
+}
+
 export function ResolvePeerPairingSAS(arg1, arg2) {
   return window['go']['main']['App']['ResolvePeerPairingSAS'](arg1, arg2);
 }
 
+export function RestoreWindow() {
+  return window['go']['main']['App']['RestoreWindow']();
+}
+
 export function ResumeBatch(arg1) {
   return window['go']['main']['App']['ResumeBatch'](arg1);
+}
+
+export function RevealHistoryFile(arg1) {
+  return window['go']['main']['App']['RevealHistoryFile'](arg1);
 }
 
 export function RevokeAllSessions() {
@@ -354,8 +426,20 @@ export function ServerAddress() {
   return window['go']['main']['App']['ServerAddress']();
 }
 
+export function SessionHTTPSQR(arg1, arg2) {
+  return window['go']['main']['App']['SessionHTTPSQR'](arg1, arg2);
+}
+
 export function SessionQR(arg1) {
   return window['go']['main']['App']['SessionQR'](arg1);
+}
+
+export function SetClipboardSyncEnabled(arg1) {
+  return window['go']['main']['App']['SetClipboardSyncEnabled'](arg1);
+}
+
+export function SetClipboardSyncPaused(arg1) {
+  return window['go']['main']['App']['SetClipboardSyncPaused'](arg1);
 }
 
 export function SetDeviceAutoApprove(arg1, arg2) {
@@ -394,48 +478,20 @@ export function StartSession(arg1) {
   return window['go']['main']['App']['StartSession'](arg1);
 }
 
-export function TriggerNearbyScan() {
-  return window['go']['main']['App']['TriggerNearbyScan']();
-}
-
-export function ClearTransferHistory() {
-  return window['go']['main']['App']['ClearTransferHistory']();
-}
-
-export function DeleteHistoryRecord(arg1) {
-  return window['go']['main']['App']['DeleteHistoryRecord'](arg1);
-}
-
-export function HideWindow() {
-  return window['go']['main']['App']['HideWindow']();
-}
-
-export function OpenHistoryFile(arg1) {
-  return window['go']['main']['App']['OpenHistoryFile'](arg1);
-}
-
-export function QueryTransferHistory(arg1) {
-  return window['go']['main']['App']['QueryTransferHistory'](arg1);
-}
-
-export function QuitApp() {
-  return window['go']['main']['App']['QuitApp']();
-}
-
-export function ReshareHistoryFile(arg1) {
-  return window['go']['main']['App']['ReshareHistoryFile'](arg1);
-}
-
-export function RestoreWindow() {
-  return window['go']['main']['App']['RestoreWindow']();
-}
-
-export function RevealHistoryFile(arg1) {
-  return window['go']['main']['App']['RevealHistoryFile'](arg1);
+export function StartSessionWithConfig(arg1) {
+  return window['go']['main']['App']['StartSessionWithConfig'](arg1);
 }
 
 export function ToggleQuietMode() {
   return window['go']['main']['App']['ToggleQuietMode']();
+}
+
+export function ToggleWindow() {
+  return window['go']['main']['App']['ToggleWindow']();
+}
+
+export function TriggerNearbyScan() {
+  return window['go']['main']['App']['TriggerNearbyScan']();
 }
 
 export function UpdateExpectedParticipant(arg1) {

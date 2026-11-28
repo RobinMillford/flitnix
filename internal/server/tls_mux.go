@@ -11,6 +11,7 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -108,16 +109,32 @@ func (c *peekedConn) Read(p []byte) (int, error) {
 	return c.Conn.Read(p)
 }
 
-func newTLSPeekListener(inner net.Listener, cert tls.Certificate) net.Listener {
-	l := &tlsPeekListener{
-		inner: inner,
-		tlsConfig: &tls.Config{
-			MinVersion:   tls.VersionTLS13,
-			Certificates: []tls.Certificate{cert},
-			NextProtos:   []string{"http/1.1"},
+// isPeerSNI reports whether a TLS ClientHello SNI identifies a Flitnix desktop
+// or CLI peer expecting the Ed25519 HostIdentity leaf certificate.
+func isPeerSNI(serverName string) bool {
+	s := strings.ToLower(strings.TrimSpace(serverName))
+	return s == "flitnix-peer.internal" || strings.HasSuffix(s, ".flitnix.peer")
+}
+
+func newTLSPeekListener(inner net.Listener, peerCert tls.Certificate, browserCert *tls.Certificate) net.Listener {
+	cfg := &tls.Config{
+		MinVersion: tls.VersionTLS13,
+		NextProtos: []string{"http/1.1"},
+		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			if hello != nil && isPeerSNI(hello.ServerName) {
+				return &peerCert, nil
+			}
+			if browserCert != nil {
+				return browserCert, nil
+			}
+			return &peerCert, nil
 		},
-		ch:     make(chan acceptResult, 64),
-		closed: make(chan struct{}),
+	}
+	l := &tlsPeekListener{
+		inner:     inner,
+		tlsConfig: cfg,
+		ch:        make(chan acceptResult, 64),
+		closed:    make(chan struct{}),
 	}
 	go l.acceptLoop()
 	return l

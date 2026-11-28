@@ -54,6 +54,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -64,6 +65,7 @@ import (
 	"time"
 
 	"github.com/itsyamin/flitnix/internal/audit"
+	"github.com/itsyamin/flitnix/internal/clipboard"
 	"github.com/itsyamin/flitnix/internal/devices"
 	"github.com/itsyamin/flitnix/internal/events"
 	"github.com/itsyamin/flitnix/internal/guest"
@@ -142,6 +144,10 @@ type Config struct {
 	// StagingTTL overrides the retention window before Phase 10 startup recovery
 	// reclaims abandoned resumable staging files. 0 selects transfer.DefaultStagingTTL.
 	StagingTTL time.Duration
+
+	// LocalHTTPSEnabled activates opt-in Local CA-signed browser HTTPS alongside
+	// plain HTTP on the same port via tlsPeekListener.
+	LocalHTTPSEnabled bool
 }
 
 // Services bundles the collaborators the API endpoints need. The desktop
@@ -156,9 +162,11 @@ type Services struct {
 	Downloads      *transfer.DownloadRegistry
 	GuestManager   *guest.Manager
 	TextMessages   *textmsg.Store
+	Clipboard      *clipboard.Coordinator
 	Audit          *audit.Store
 	Devices        *devices.Store
 	HostIdentity   *devices.HostIdentity
+	LocalHTTPS     *LocalHTTPSManager
 	Pairing        *devices.PairingCoordinator
 	Visibility     *devices.VisibilityManager
 	Inhibitor      power.Inhibitor
@@ -269,9 +277,11 @@ type Server struct {
 	recoverErr   error
 	store        *recovery.Store
 
-	mu           sync.Mutex
-	listener     net.Listener
-	serveStarted bool
+	mu               sync.Mutex
+	listener         net.Listener
+	serveStarted     bool
+	localHTTPSActive bool
+	localHTTPSSANs   []string
 }
 
 // New prepares a server. No network is touched until Serve is called, so
@@ -295,7 +305,8 @@ func New(cfg Config) *Server {
 	}
 	shutdownCh := make(chan struct{})
 	grants := newGrantStore(downloads)
-	handler := newRouterWithShutdown(cfg.Services, cfg.TransferStall, cfg.DownloadStall, grants, shutdownCh)
+	localHTTPSActive := cfg.LocalHTTPSEnabled && cfg.Services != nil && cfg.Services.LocalHTTPS != nil
+	handler := newRouterWithOptions(cfg.Services, cfg.TransferStall, cfg.DownloadStall, grants, shutdownCh, localHTTPSActive)
 	return &Server{
 		cfg: cfg,
 		http: &http.Server{
@@ -383,13 +394,26 @@ func (s *Server) bind() (net.Listener, error) {
 		if bindErr != nil {
 			return
 		}
+		var browserCert *tls.Certificate
+		var localSANs []string
+		var localActive bool
 		if s.cfg.Services != nil && s.cfg.Services.HostIdentity != nil {
 			if cert, certErr := NewHostIdentityCertificate(s.cfg.Services.HostIdentity); certErr == nil {
-				ln = newTLSPeekListener(ln, cert)
+				if s.cfg.LocalHTTPSEnabled && s.cfg.Services.LocalHTTPS != nil {
+					hostIP, _, _ := net.SplitHostPort(ln.Addr().String())
+					if lc, sans, lcErr := s.cfg.Services.LocalHTTPS.LeafCertificate(s.cfg.Services.HostIdentity.HostID, hostIP); lcErr == nil {
+						browserCert = &lc
+						localSANs = sans
+						localActive = true
+					}
+				}
+				ln = newTLSPeekListener(ln, cert, browserCert)
 			}
 		}
 		s.mu.Lock()
 		s.listener = ln
+		s.localHTTPSActive = localActive
+		s.localHTTPSSANs = localSANs
 		s.mu.Unlock()
 		close(s.ready)
 	})
@@ -455,12 +479,63 @@ func (s *Server) Addr() net.Addr {
 func (s *Server) Ready() <-chan struct{} { return s.ready }
 
 // URL returns the HTTP URL of the bound listener, or "" before Ready closes.
-// It is hardcoded to http in stage 2; HTTPS is a release requirement for
-// later stages.
+// Plain local HTTP remains available on the multiplexed listener for zero-friction
+// guest QR sharing.
 func (s *Server) URL() string {
 	addr := s.Addr()
 	if addr == nil {
 		return ""
 	}
 	return "http://" + addr.String()
+}
+
+// HTTPSURL returns the opt-in HTTPS URL of the bound listener when local HTTPS
+// is active, or "" otherwise.
+func (s *Server) HTTPSURL() string {
+	addr := s.Addr()
+	if addr == nil || !s.LocalHTTPSActive() {
+		return ""
+	}
+	return "https://" + addr.String()
+}
+
+// MDNSHTTPSURL returns the .local HTTPS URL when local HTTPS and HostIdentity are active.
+func (s *Server) MDNSHTTPSURL() string {
+	addr := s.Addr()
+	if addr == nil || !s.LocalHTTPSActive() || s.cfg.Services == nil || s.cfg.Services.HostIdentity == nil {
+		return ""
+	}
+	mdnsHost := LocalMDNSHost(s.cfg.Services.HostIdentity.HostID)
+	if mdnsHost == "" {
+		return ""
+	}
+	_, port, err := net.SplitHostPort(addr.String())
+	if err != nil || port == "" {
+		port = strconv.Itoa(DefaultPort)
+	}
+	return "https://" + net.JoinHostPort(mdnsHost, port)
+}
+
+// LocalHTTPSActive reports whether opt-in Local CA browser HTTPS is active on the listener.
+func (s *Server) LocalHTTPSActive() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.localHTTPSActive
+}
+
+// LocalHTTPSSANs returns the Subject Alternative Names on the active browser HTTPS certificate.
+func (s *Server) LocalHTTPSSANs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.localHTTPSSANs))
+	copy(out, s.localHTTPSSANs)
+	return out
+}
+
+// RevokeRoomGrants revokes any unredeemed grants or continuation tickets for a guest room.
+func (s *Server) RevokeRoomGrants(roomID string) {
+	if s == nil || s.grants == nil || roomID == "" {
+		return
+	}
+	s.grants.RevokeRoom(roomID)
 }

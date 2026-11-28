@@ -95,6 +95,7 @@ var (
 // Event types. Each maps to one lifecycle transition.
 const (
 	EventSessionCreated    = "SessionCreated"
+	EventSessionUpdated    = "SessionUpdated"
 	EventSessionRevoked    = "SessionRevoked"
 	EventSessionExpired    = "SessionExpired"
 	EventBatchDeclared     = "BatchDeclared"
@@ -122,6 +123,14 @@ type SessionRecord struct {
 	ExpiresAt     time.Time  `json:"expiresAt"`
 	RevokedAt     *time.Time `json:"revokedAt,omitempty"`
 	DeviceLabel   string     `json:"deviceLabel,omitempty"`
+
+	PinEnabled     bool       `json:"pinEnabled,omitempty"`
+	PinSalt        string     `json:"pinSalt,omitempty"`
+	PinDigest      string     `json:"pinDigest,omitempty"`
+	DownloadLimit  int        `json:"downloadLimit,omitempty"`
+	DownloadsDone  int        `json:"downloadsDone,omitempty"`
+	OneTimeAutoEnd bool       `json:"oneTimeAutoEnd,omitempty"`
+	HardExpiresAt  *time.Time `json:"hardExpiresAt,omitempty"`
 }
 
 // ItemRecord is the durable projection of one coordinator item. Byte progress
@@ -662,7 +671,7 @@ func newEventID() (string, error) {
 // event twice produces the same projection.
 func applyEvent(state *State, ev Event) error {
 	switch ev.Type {
-	case EventSessionCreated, EventSessionRevoked, EventSessionExpired:
+	case EventSessionCreated, EventSessionUpdated, EventSessionRevoked, EventSessionExpired:
 		var rec SessionRecord
 		if err := json.Unmarshal(ev.Payload, &rec); err != nil {
 			return err

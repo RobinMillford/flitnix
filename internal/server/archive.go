@@ -21,6 +21,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/itsyamin/flitnix/internal/events"
+	"github.com/itsyamin/flitnix/internal/guest"
 	"github.com/itsyamin/flitnix/internal/session"
 	"github.com/itsyamin/flitnix/internal/transfer"
 )
@@ -45,26 +47,74 @@ type phoneSourceJSON struct {
 	TotalBytes int64  `json:"totalBytes"`
 }
 
+func buildSourcesList(reg *transfer.Registry) []phoneSourceJSON {
+	if reg == nil {
+		return []phoneSourceJSON{}
+	}
+	sources := reg.ListSources()
+	seen := make(map[string]bool, len(sources))
+	out := make([]phoneSourceJSON, 0, len(sources))
+	for _, source := range sources {
+		seen[source.ID] = true
+		var total int64
+		for _, item := range source.Items {
+			total += item.Size
+		}
+		out = append(out, phoneSourceJSON{source.ID, string(source.Kind), source.Name, source.RootName, len(source.Items), total})
+	}
+	for _, file := range reg.List() {
+		if !seen[file.ID] {
+			out = append(out, phoneSourceJSON{file.ID, string(transfer.SourceKindFile), file.Name, "", 1, file.Size})
+		}
+	}
+	return out
+}
+
 func serveSourcesList(svcs *Services) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		sources := svcs.Registry.ListSources()
-		seen := make(map[string]bool, len(sources))
-		out := make([]phoneSourceJSON, 0, len(sources))
-		for _, source := range sources {
-			seen[source.ID] = true
-			var total int64
-			for _, item := range source.Items {
-				total += item.Size
-			}
-			out = append(out, phoneSourceJSON{source.ID, string(source.Kind), source.Name, source.RootName, len(source.Items), total})
-		}
-		for _, file := range svcs.Registry.List() {
-			if !seen[file.ID] {
-				out = append(out, phoneSourceJSON{file.ID, string(transfer.SourceKindFile), file.Name, "", 1, file.Size})
-			}
-		}
-		writeJSON(w, http.StatusOK, out)
+		writeJSON(w, http.StatusOK, buildSourcesList(svcs.Registry))
 	}
+}
+
+func serveSourceItemsFromRegistry(w http.ResponseWriter, r *http.Request, reg *transfer.Registry) {
+	if reg == nil {
+		writeError(w, http.StatusNotFound, "shared source or path not found")
+		return
+	}
+	q := r.URL.Query()
+	prefix := q.Get("prefix")
+	cursor := 0
+	if rawCursor := q.Get("cursor"); rawCursor != "" {
+		v, err := strconv.Atoi(rawCursor)
+		if err != nil || v < 0 {
+			writeError(w, http.StatusBadRequest, "invalid cursor")
+			return
+		}
+		cursor = v
+	}
+	limit := transfer.DefaultSourceBrowseLimit
+	if rawLimit := q.Get("limit"); rawLimit != "" {
+		v, err := strconv.Atoi(rawLimit)
+		if err != nil || v <= 0 {
+			writeError(w, http.StatusBadRequest, "invalid limit")
+			return
+		}
+		limit = v
+	}
+	page, err := reg.BrowseSource(r.PathValue("id"), prefix, cursor, limit)
+	if err != nil {
+		switch {
+		case errors.Is(err, transfer.ErrInvalidBrowsePrefix):
+			writeError(w, http.StatusBadRequest, "invalid browse prefix")
+		case errors.Is(err, transfer.ErrNotFound):
+			writeError(w, http.StatusNotFound, "shared source or path not found")
+		default:
+			writeError(w, http.StatusInternalServerError, "could not browse shared source")
+		}
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, page)
 }
 
 func serveSourceItems(svcs *Services) http.HandlerFunc {
@@ -74,40 +124,7 @@ func serveSourceItems(svcs *Services) http.HandlerFunc {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		q := r.URL.Query()
-		prefix := q.Get("prefix")
-		cursor := 0
-		if rawCursor := q.Get("cursor"); rawCursor != "" {
-			v, err := strconv.Atoi(rawCursor)
-			if err != nil || v < 0 {
-				writeError(w, http.StatusBadRequest, "invalid cursor")
-				return
-			}
-			cursor = v
-		}
-		limit := transfer.DefaultSourceBrowseLimit
-		if rawLimit := q.Get("limit"); rawLimit != "" {
-			v, err := strconv.Atoi(rawLimit)
-			if err != nil || v <= 0 {
-				writeError(w, http.StatusBadRequest, "invalid limit")
-				return
-			}
-			limit = v
-		}
-		page, err := svcs.Registry.BrowseSource(r.PathValue("id"), prefix, cursor, limit)
-		if err != nil {
-			switch {
-			case errors.Is(err, transfer.ErrInvalidBrowsePrefix):
-				writeError(w, http.StatusBadRequest, "invalid browse prefix")
-			case errors.Is(err, transfer.ErrNotFound):
-				writeError(w, http.StatusNotFound, "shared source or path not found")
-			default:
-				writeError(w, http.StatusInternalServerError, "could not browse shared source")
-			}
-			return
-		}
-		w.Header().Set("Cache-Control", "no-store")
-		writeJSON(w, http.StatusOK, page)
+		serveSourceItemsFromRegistry(w, r, svcs.Registry)
 	}
 }
 
@@ -135,6 +152,76 @@ func (c *countingHasher) Write(p []byte) (n int, err error) {
 	return n, err
 }
 
+func resolveGrantSources(reg *transfer.Registry, req createGrantRequest) ([]archiveSource, int, string) {
+	if reg == nil {
+		return nil, http.StatusNotFound, "source not found"
+	}
+	if len(req.ItemIDs) > 0 {
+		sourceID := req.SourceID
+		if sourceID == "" && len(req.SourceIDs) == 1 {
+			sourceID = req.SourceIDs[0]
+		}
+		if sourceID == "" || (len(req.SourceIDs) > 1) || (req.SourceID != "" && len(req.SourceIDs) == 1 && req.SourceIDs[0] != req.SourceID) {
+			return nil, http.StatusBadRequest, "invalid source selection"
+		}
+		source, resolved, err := reg.ResolveSourceItems(sourceID, req.ItemIDs)
+		if err != nil {
+			if errors.Is(err, transfer.ErrNotFound) {
+				return nil, http.StatusNotFound, "source item not found"
+			}
+			return nil, http.StatusBadRequest, "invalid source selection"
+		}
+		if len(resolved) == 1 {
+			name := cleanDownloadName(path.Base(resolved[0].RelativePath))
+			if name == "" {
+				name = "download"
+			}
+			return []archiveSource{{
+				Kind: transfer.SourceKindFile,
+				Name: name,
+				File: transfer.SharedFile{
+					ID:   resolved[0].ID,
+					Name: name,
+					Path: resolved[0].Path,
+					Size: resolved[0].Size,
+				},
+			}}, 0, ""
+		}
+		return []archiveSource{{
+			Kind:  transfer.SourceKindFolder,
+			Name:  source.Name,
+			Items: resolved,
+		}}, 0, ""
+	}
+	if len(req.SourceIDs) == 0 || len(req.SourceIDs) > maxGrantSources {
+		return nil, http.StatusBadRequest, "invalid source selection"
+	}
+	sources := make([]archiveSource, 0, len(req.SourceIDs))
+	seen := make(map[string]bool, len(req.SourceIDs))
+	for _, id := range req.SourceIDs {
+		if id == "" || seen[id] {
+			return nil, http.StatusBadRequest, "invalid source selection"
+		}
+		seen[id] = true
+		if source, ok := reg.GetSource(id); ok {
+			planned := archiveSource{Kind: source.Kind, Name: source.Name, Items: source.Items, Empty: source.EmptyDirs}
+			if source.Kind == transfer.SourceKindFile && len(source.Items) == 1 {
+				if f, ok := reg.Get(source.ID); ok {
+					planned.File = f
+				} else {
+					planned.File = transfer.SharedFile{ID: source.ID, Name: source.Name, Path: source.Items[0].Path, Size: source.Items[0].Size}
+				}
+			}
+			sources = append(sources, planned)
+		} else if file, ok := reg.Get(id); ok {
+			sources = append(sources, archiveSource{Kind: transfer.SourceKindFile, Name: file.Name, File: file})
+		} else {
+			return nil, http.StatusNotFound, "source not found"
+		}
+	}
+	return sources, 0, ""
+}
+
 func createDownloadGrant(svcs *Services, grants *DownloadGrantStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sess := sessionFrom(r)
@@ -158,80 +245,17 @@ func createDownloadGrant(svcs *Services, grants *DownloadGrantStore) http.Handle
 			return
 		}
 
-		var sources []archiveSource
-		if len(req.ItemIDs) > 0 {
-			sourceID := req.SourceID
-			if sourceID == "" && len(req.SourceIDs) == 1 {
-				sourceID = req.SourceIDs[0]
-			}
-			if sourceID == "" || (len(req.SourceIDs) > 1) || (req.SourceID != "" && len(req.SourceIDs) == 1 && req.SourceIDs[0] != req.SourceID) {
-				writeError(w, http.StatusBadRequest, "invalid source selection")
-				return
-			}
-			source, resolved, err := svcs.Registry.ResolveSourceItems(sourceID, req.ItemIDs)
-			if err != nil {
-				if errors.Is(err, transfer.ErrNotFound) {
-					writeError(w, http.StatusNotFound, "source item not found")
-					return
-				}
-				writeError(w, http.StatusBadRequest, "invalid source selection")
-				return
-			}
-			if len(resolved) == 1 {
-				name := cleanDownloadName(path.Base(resolved[0].RelativePath))
-				if name == "" {
-					name = "download"
-				}
-				sources = []archiveSource{{
-					Kind: transfer.SourceKindFile,
-					Name: name,
-					File: transfer.SharedFile{
-						ID:   resolved[0].ID,
-						Name: name,
-						Path: resolved[0].Path,
-						Size: resolved[0].Size,
-					},
-				}}
-			} else {
-				sources = []archiveSource{{
-					Kind:  transfer.SourceKindFolder,
-					Name:  source.Name,
-					Items: resolved,
-				}}
-			}
-		} else {
-			if len(req.SourceIDs) == 0 || len(req.SourceIDs) > maxGrantSources {
-				writeError(w, http.StatusBadRequest, "invalid source selection")
-				return
-			}
-			sources = make([]archiveSource, 0, len(req.SourceIDs))
-			seen := make(map[string]bool, len(req.SourceIDs))
-			for _, id := range req.SourceIDs {
-				if id == "" || seen[id] {
-					writeError(w, http.StatusBadRequest, "invalid source selection")
-					return
-				}
-				seen[id] = true
-				if source, ok := svcs.Registry.GetSource(id); ok {
-					planned := archiveSource{Kind: source.Kind, Name: source.Name, Items: source.Items, Empty: source.EmptyDirs}
-					if source.Kind == transfer.SourceKindFile && len(source.Items) == 1 {
-						if f, ok := svcs.Registry.Get(source.ID); ok {
-							planned.File = f
-						} else {
-							planned.File = transfer.SharedFile{ID: source.ID, Name: source.Name, Path: source.Items[0].Path, Size: source.Items[0].Size}
-						}
-					}
-					sources = append(sources, planned)
-				} else if file, ok := svcs.Registry.Get(id); ok {
-					sources = append(sources, archiveSource{Kind: transfer.SourceKindFile, Name: file.Name, File: file})
-				} else {
-					writeError(w, http.StatusNotFound, "source not found")
-					return
-				}
-			}
+		sources, errCode, errMsg := resolveGrantSources(svcs.Registry, req)
+		if errCode != 0 {
+			writeError(w, errCode, errMsg)
+			return
 		}
 		grant, progress, err := grants.create(sess, sources, grantFilename(sources))
 		if err != nil {
+			if errors.Is(err, errDownloadLimit) {
+				writeErrorCode(w, http.StatusGone, "download limit reached for this session", "download_limit_reached")
+				return
+			}
 			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
@@ -259,20 +283,28 @@ func serveDownloadProgress(svcs *Services, grants *DownloadGrantStore) http.Hand
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		p, ok := grants.getProgress(r.PathValue("id"), sess.Key())
-		if !ok {
-			writeError(w, http.StatusNotFound, "progress not found")
-			return
-		}
-		resp := map[string]any{
-			"id": p.ID, "totalBytes": p.Total, "processedBytes": p.Processed,
-			"state": p.State, "error": p.Error,
-		}
-		if p.State == progressCompleted && p.SHA256 != "" {
-			resp["sha256"] = p.SHA256
-		}
-		writeJSON(w, http.StatusOK, resp)
+		writeDownloadProgress(w, grants, r.PathValue("id"), sess.Key())
 	}
+}
+
+func writeDownloadProgress(w http.ResponseWriter, grants *DownloadGrantStore, progressID, sessionKey string) {
+	if grants == nil {
+		writeError(w, http.StatusNotFound, "progress not found")
+		return
+	}
+	p, ok := grants.getProgress(progressID, sessionKey)
+	if !ok {
+		writeError(w, http.StatusNotFound, "progress not found")
+		return
+	}
+	resp := map[string]any{
+		"id": p.ID, "totalBytes": p.Total, "processedBytes": p.Processed,
+		"state": p.State, "error": p.Error,
+	}
+	if p.State == progressCompleted && p.SHA256 != "" {
+		resp["sha256"] = p.SHA256
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func buildArchiveEntries(sources []archiveSource) ([]archiveEntry, int64, error) {
@@ -585,24 +617,28 @@ func publicDownloadError(err error) string {
 // converts raw filesystem errors into path-free ones, and reports progress
 // in throttled batches (never per write).
 type guardedReader struct {
-	r          io.Reader
-	f          *os.File
-	snap       fileSnapshot
-	ctx        context.Context
-	sess       *session.Session
-	p          *archiveProgress
-	pending    int64
-	sinceCheck int64
-	checked    bool
-	last       time.Time
-	lastCheck  time.Time
+	r           io.Reader
+	f           *os.File
+	snap        fileSnapshot
+	ctx         context.Context
+	sess        *session.Session
+	activeCheck func() bool
+	p           *archiveProgress
+	pending     int64
+	sinceCheck  int64
+	checked     bool
+	last        time.Time
+	lastCheck   time.Time
 }
 
 func (g *guardedReader) Read(b []byte) (int, error) {
 	if g.ctx.Err() != nil {
 		return 0, errDownloadCanceled
 	}
-	if g.sess != nil && g.sess.Status() == session.StatusRevoked {
+	if g.sess != nil && g.sess.Status() != session.StatusActive {
+		return 0, errDownloadSession
+	}
+	if g.activeCheck != nil && !g.activeCheck() {
 		return 0, errDownloadSession
 	}
 	if g.f != nil && g.snap.Info != nil && (!g.checked || g.sinceCheck >= progressFlushBytes || time.Since(g.lastCheck) >= progressFlushEvery) {
@@ -709,6 +745,17 @@ func flushResponse(w http.ResponseWriter) error {
 	return nil
 }
 
+func grantActiveCheck(grant downloadGrant) func() bool {
+	if grant.GuestRoom == nil {
+		return nil
+	}
+	room := grant.GuestRoom
+	guestID := grant.GuestID
+	return func() bool {
+		return room.ValidateGuestApproved(guestID)
+	}
+}
+
 // writeArchive streams the grant's immutable plan as an uncompressed ZIP
 // directly into out. It never buffers the archive. On any error it returns
 // WITHOUT closing the zip writer: a central directory written after a failure
@@ -718,6 +765,7 @@ func writeArchive(ctx context.Context, out io.Writer, grant downloadGrant, progr
 	bufPtr := transfer.GetCopyBuffer()
 	defer transfer.PutCopyBuffer(bufPtr)
 	buf := *bufPtr
+	activeCheck := grantActiveCheck(grant)
 	for _, entry := range grant.Entries {
 		if ctx.Err() != nil {
 			return errDownloadCanceled
@@ -733,7 +781,7 @@ func writeArchive(ctx context.Context, out io.Writer, grant downloadGrant, progr
 			}
 			continue
 		}
-		if err := writeArchiveFile(ctx, zw, header, entry, grant.Sess, progress, buf); err != nil {
+		if err := writeArchiveFile(ctx, zw, header, entry, grant.Sess, activeCheck, progress, buf); err != nil {
 			return err
 		}
 	}
@@ -743,7 +791,7 @@ func writeArchive(ctx context.Context, out io.Writer, grant downloadGrant, progr
 	return zw.Close()
 }
 
-func writeArchiveFile(ctx context.Context, zw *zip.Writer, header *zip.FileHeader, entry archiveEntry, sess *session.Session, progress *archiveProgress, buf []byte) error {
+func writeArchiveFile(ctx context.Context, zw *zip.Writer, header *zip.FileHeader, entry archiveEntry, sess *session.Session, activeCheck func() bool, progress *archiveProgress, buf []byte) error {
 	f, info, err := openTrustedSource(entry.Path)
 	if err != nil {
 		return err
@@ -763,7 +811,7 @@ func writeArchiveFile(ctx context.Context, zw *zip.Writer, header *zip.FileHeade
 	}
 	// The plan fixed this entry's size. Reading no more than that keeps a
 	// growing file from changing the archive; reading less is a changed file.
-	src := &guardedReader{r: io.LimitReader(f, entry.Size), ctx: ctx, sess: sess, p: progress}
+	src := &guardedReader{r: io.LimitReader(f, entry.Size), ctx: ctx, sess: sess, activeCheck: activeCheck, p: progress}
 	n, err := io.CopyBuffer(part, src, buf)
 	src.flush()
 	if err != nil {
@@ -778,6 +826,19 @@ func writeArchiveFile(ctx context.Context, zw *zip.Writer, header *zip.FileHeade
 // abortResponse tears the connection down without a clean end-of-body, so the
 // browser reports the download as failed instead of saving a truncated file.
 func abortResponse() { panic(http.ErrAbortHandler) }
+
+func writeGrantError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errGrantExpired):
+		http.Error(w, "download expired", http.StatusGone)
+	case errors.Is(err, errGrantBusy), errors.Is(err, errRoomBusy):
+		http.Error(w, "another download is active", http.StatusConflict)
+	case errors.Is(err, errGrantSession):
+		http.Error(w, "session ended", http.StatusUnauthorized)
+	default:
+		http.Error(w, "download unavailable", http.StatusForbidden)
+	}
+}
 
 func serveArchiveDownload(svcs *Services, grants *DownloadGrantStore, stall time.Duration) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -798,14 +859,17 @@ func serveArchiveDownload(svcs *Services, grants *DownloadGrantStore, stall time
 			}
 			grant, progress, err = grants.authorizeContinuation(grantID, contCookie.Value)
 			if err != nil {
-				switch {
-				case errors.Is(err, errGrantExpired):
-					http.Error(w, "download expired", http.StatusGone)
-				case errors.Is(err, errGrantSession):
-					http.Error(w, "session ended", http.StatusUnauthorized)
-				default:
-					http.Error(w, "download unavailable", http.StatusForbidden)
-				}
+				writeGrantError(w, err)
+				return
+			}
+			if grant.GuestRoom != nil {
+				grants.finishStream(grantID)
+				http.Error(w, "download unavailable", http.StatusForbidden)
+				return
+			}
+			if grant.Sess != nil && !isRequestPINUnlocked(r, grant.Sess) {
+				grants.finishStream(grantID)
+				writeErrorCode(w, http.StatusForbidden, "PIN required to unlock this session", "pin_required")
 				return
 			}
 			isContinuation = true
@@ -824,20 +888,20 @@ func serveArchiveDownload(svcs *Services, grants *DownloadGrantStore, stall time
 			}
 			grant, progress, err = grants.redeem(grantID, cookie.Value)
 			if err != nil {
-				switch {
-				case errors.Is(err, errGrantExpired):
-					http.Error(w, "download expired", http.StatusGone)
-				case errors.Is(err, errGrantBusy):
-					http.Error(w, "another download is active", http.StatusConflict)
-				case errors.Is(err, errGrantSession):
-					http.Error(w, "session ended", http.StatusUnauthorized)
-				default:
-					http.Error(w, "download unavailable", http.StatusForbidden)
-				}
+				writeGrantError(w, err)
 				return
 			}
 			defer grants.finish(grant)
 			defer grants.finishStream(grantID)
+			if grant.GuestRoom != nil {
+				http.Error(w, "download unavailable", http.StatusForbidden)
+				return
+			}
+			if grant.Sess != nil && !isRequestPINUnlocked(r, grant.Sess) {
+				grants.finishQuota(grant, false)
+				writeErrorCode(w, http.StatusForbidden, "PIN required to unlock this session", "pin_required")
+				return
+			}
 
 			// Issue resource-specific continuation cookie on successful initial redemption
 			if grant.ContinuationTicket != "" {
@@ -853,159 +917,293 @@ func serveArchiveDownload(svcs *Services, grants *DownloadGrantStore, stall time
 			}
 		}
 
-		// Pin session during stream
+		streamAuthorizedGrant(svcs, grants, stall, w, r, grant, progress, isContinuation)
+	}
+}
+
+func serveGuestArchiveDownload(svcs *Services, grants *DownloadGrantStore, stall time.Duration) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := guestTokenFromRequest(r)
+		if token == "" {
+			writeError(w, http.StatusUnauthorized, "missing guest credential")
+			return
+		}
+		if svcs == nil || svcs.GuestManager == nil || grants == nil {
+			writeError(w, http.StatusNotFound, "guest room service unavailable")
+			return
+		}
+		room, g, err := svcs.GuestManager.ValidateGuest(token)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if g.State != guest.GuestApproved {
+			writeError(w, http.StatusForbidden, "guest is not approved for download")
+			return
+		}
+		if !room.AllowsDownload() {
+			writeErrorCode(w, http.StatusForbidden, "downloads are disabled in upload-only rooms", "room_upload_only")
+			return
+		}
+
+		grantID := r.PathValue("id")
+		contCookieName := continuationCookiePrefix + grantID
+		var grant downloadGrant
+		var progress *archiveProgress
+		var isContinuation bool
+
+		contCookie, cErr := r.Cookie(contCookieName)
+		if cErr == nil && contCookie.Value != "" {
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				w.Header().Set("Allow", "GET, HEAD")
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			grant, progress, err = grants.authorizeContinuation(grantID, contCookie.Value)
+			if err != nil {
+				writeGrantError(w, err)
+				return
+			}
+			if grant.GuestRoom == nil || grant.GuestRoom.ID != room.ID || grant.GuestID != g.ID {
+				grants.finishStream(grantID)
+				http.Error(w, "download unavailable", http.StatusForbidden)
+				return
+			}
+			isContinuation = true
+			defer grants.finishStream(grantID)
+		} else {
+			if r.Method != http.MethodGet {
+				w.Header().Set("Allow", http.MethodGet)
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			cookie, gErr := r.Cookie(grantCookieName)
+			if gErr != nil {
+				http.Error(w, "download unavailable", http.StatusUnauthorized)
+				return
+			}
+			grant, progress, err = grants.redeem(grantID, cookie.Value)
+			if err != nil {
+				writeGrantError(w, err)
+				return
+			}
+			defer grants.finish(grant)
+			defer grants.finishStream(grantID)
+			if grant.GuestRoom == nil || grant.GuestRoom.ID != room.ID || grant.GuestID != g.ID {
+				http.Error(w, "download unavailable", http.StatusForbidden)
+				return
+			}
+
+			if grant.ContinuationTicket != "" {
+				http.SetCookie(w, &http.Cookie{
+					Name:     contCookieName,
+					Value:    grant.ContinuationTicket,
+					Path:     "/guest-api/downloads/" + grantID,
+					MaxAge:   int(continuationMaxAge.Seconds()),
+					HttpOnly: true,
+					SameSite: http.SameSiteStrictMode,
+					Secure:   r.TLS != nil,
+				})
+			}
+		}
+
+		streamAuthorizedGrant(svcs, grants, stall, w, r, grant, progress, isContinuation)
+	}
+}
+
+func endSessionForDownloadLimit(svcs *Services, grants *DownloadGrantStore, sess *session.Session) {
+	if svcs == nil || sess == nil {
+		return
+	}
+	if grants != nil {
+		grants.RevokeSession(sess.Key())
+	}
+	if svcs.Sessions != nil {
+		_ = svcs.Sessions.RevokeSession(sess)
+	}
+	svcs.EmitPersonal(sess.Key(), events.TypeSessionEnded, map[string]any{
+		"key":    sess.Key(),
+		"reason": "download_limit_reached",
+	})
+}
+
+func streamAuthorizedGrant(svcs *Services, grants *DownloadGrantStore, stall time.Duration, w http.ResponseWriter, r *http.Request, grant downloadGrant, progress *archiveProgress, isContinuation bool) {
+	// Pin session during stream
+	if grant.Sess != nil {
 		grant.Sess.Begin()
 		defer grant.Sess.End()
-		if svcs.Inhibitor != nil {
-			pLease, pErr := svcs.Inhibitor.Acquire("Downloading " + grant.Filename)
-			if pErr != nil && svcs.Diagnose != nil {
-				svcs.Diagnose("power inhibitor acquire failed: %v", pErr)
-			} else if pLease != nil {
-				defer pLease.Release()
-			}
+	}
+	var downloadCompleted bool
+	if grant.GuestRoom != nil {
+		grant.GuestRoom.RecordDownloadStart()
+	}
+	defer func() {
+		_, autoEnd := grants.finishQuota(grant, downloadCompleted)
+		if autoEnd && grant.Sess != nil {
+			go endSessionForDownloadLimit(svcs, grants, grant.Sess)
 		}
+	}()
+	if svcs.Inhibitor != nil {
+		pLease, pErr := svcs.Inhibitor.Acquire("Downloading " + grant.Filename)
+		if pErr != nil && svcs.Diagnose != nil {
+			svcs.Diagnose("power inhibitor acquire failed: %v", pErr)
+		} else if pLease != nil {
+			defer pLease.Release()
+		}
+	}
 
-		out := failWriter{&stallWriter{w: w, rc: http.NewResponseController(w), stall: stall}}
-		h := w.Header()
-		h.Set("Content-Disposition", contentDisposition(grant.Filename))
-		h.Set("Cache-Control", "no-store")
-		h.Set("X-Type-Options", "nosniff")
-		h.Set("X-Content-Type-Options", "nosniff")
+	out := failWriter{&stallWriter{w: w, rc: http.NewResponseController(w), stall: stall}}
+	h := w.Header()
+	h.Set("Content-Disposition", contentDisposition(grant.Filename))
+	h.Set("Cache-Control", "no-store")
+	h.Set("X-Type-Options", "nosniff")
+	h.Set("X-Content-Type-Options", "nosniff")
+	activeCheck := grantActiveCheck(grant)
 
-		if grant.Archive || len(grant.Entries) != 1 {
-			// Tier 3: Dynamic ZIP archive
-			h.Set("Accept-Ranges", "none")
-			h.Set("Content-Type", "application/zip")
-			if r.Method == http.MethodHead {
-				w.WriteHeader(http.StatusOK)
-				return
-			}
-			h.Set("Trailer", "Content-Digest, X-Content-SHA256")
+	if grant.Archive || len(grant.Entries) != 1 {
+		// Tier 3: Dynamic ZIP archive
+		h.Set("Accept-Ranges", "none")
+		h.Set("Content-Type", "application/zip")
+		if r.Method == http.MethodHead {
 			w.WriteHeader(http.StatusOK)
+			return
+		}
+		h.Set("Trailer", "Content-Digest, X-Content-SHA256")
+		w.WriteHeader(http.StatusOK)
 
-			passHasher := sha256.New()
-			teeOut := io.MultiWriter(out, passHasher)
-			err = writeArchive(r.Context(), teeOut, grant, progress)
+		passHasher := sha256.New()
+		teeOut := io.MultiWriter(out, passHasher)
+		err := writeArchive(r.Context(), teeOut, grant, progress)
+		if err == nil {
+			actualSHA256 := hex.EncodeToString(passHasher.Sum(nil))
+			if digestHdr := transfer.FormatContentDigest(actualSHA256); digestHdr != "" {
+				w.Header().Set("Content-Digest", digestHdr)
+			}
+			w.Header().Set("X-Content-SHA256", actualSHA256)
+			finishProgressWithDigest(progress, nil, actualSHA256)
+			err = flushResponse(w)
 			if err == nil {
-				actualSHA256 := hex.EncodeToString(passHasher.Sum(nil))
-				if digestHdr := transfer.FormatContentDigest(actualSHA256); digestHdr != "" {
-					w.Header().Set("Content-Digest", digestHdr)
-				}
-				w.Header().Set("X-Content-SHA256", actualSHA256)
-				finishProgressWithDigest(progress, nil, actualSHA256)
-				err = flushResponse(w)
-			} else {
-				finishProgressWithDigest(progress, err, "")
+				downloadCompleted = true
 			}
-			if err != nil {
-				abortResponse()
-			}
-			return
+		} else {
+			finishProgressWithDigest(progress, err, "")
 		}
-
-		// Single-file download: open source
-		entry := grant.Entries[0]
-		f, info, err := openTrustedSource(entry.Path)
 		if err != nil {
-			http.Error(w, "source unavailable", http.StatusGone)
-			finishProgressWithDigest(progress, err, "")
-			return
-		}
-		defer f.Close()
-
-		if info.Size() != entry.Size && (!isContinuation || r.Header.Get("If-Range") == "") {
-			http.Error(w, "source changed", http.StatusGone)
-			finishProgressWithDigest(progress, errSourceChanged, "")
-			return
-		}
-
-		if svcs.Downloads != nil {
-			svcs.Downloads.Begin(grant.DownloadID)
-		}
-
-		// Tier 1: Verified content SHA-256 AND genuine OS-enforced immutability
-		isImmutable := false
-		if grant.SHA256 != "" {
-			if grants != nil && grants.hasContinuationLock(grantID) {
-				isImmutable = true
-			} else {
-				var lock io.Closer
-				isImmutable, lock = isOSImmutable(f, entry.Path)
-				if isImmutable && lock != nil && grants != nil {
-					grants.attachContinuationLock(grantID, lock)
-				}
-			}
-		}
-
-		if isImmutable {
-			h.Set("ETag", fmt.Sprintf("\"sha256-%s\"", grant.SHA256))
-			h.Set("Accept-Ranges", "bytes")
-			contentType := mime.TypeByExtension(filepath.Ext(grant.Filename))
-			if contentType == "" {
-				contentType = "application/octet-stream"
-			}
-			h.Set("Content-Type", contentType)
-
-			seeker := &progressSeeker{
-				r:     f,
-				ctx:   r.Context(),
-				sess:  grant.Sess,
-				p:     progress,
-				total: info.Size(),
-			}
-			http.ServeContent(w, r, grant.Filename, info.ModTime(), seeker)
-			seeker.flush()
-			if seeker.read == info.Size() {
-				finishProgressWithDigest(progress, nil, grant.SHA256)
-			}
-			return
-		}
-
-		// Tier 2: Mutable single file with strong metadata ETag, HTTP Range/If-Range resumption,
-		// and mid-stream mutation protection.
-		snap := captureFileSnapshot(f, entry.Path, info)
-		h.Set("ETag", snap.ETag)
-		h.Set("Accept-Ranges", "bytes")
-		if shouldUseRangeServeContent(r, snap.ETag, info.ModTime()) {
-			seeker := &guardedRangeSeeker{
-				f:         f,
-				snap:      snap,
-				ctx:       r.Context(),
-				sess:      grant.Sess,
-				p:         progress,
-				downloads: svcs.Downloads,
-			}
-			h.Set("Content-Type", "application/octet-stream")
-			http.ServeContent(w, r, grant.Filename, info.ModTime(), seeker)
-			seeker.flush()
-			if seeker.err != nil {
-				finishProgressWithDigest(progress, seeker.err, "")
-				abortResponse()
-				return
-			}
-			if seeker.read == info.Size() || (seeker.curOffset == info.Size() && progressProcessedAtLeast(progress, info.Size())) {
-				finishProgressWithDigest(progress, nil, "")
-			}
-			return
-		}
-		started, err := streamSingleFileWithSnapshot(r.Context(), r.Method, w, out, grant, progress, f, snap)
-		if err != nil && !started {
-			finishProgressWithDigest(progress, err, "")
-		}
-		if err != nil && started {
 			abortResponse()
 		}
+		return
+	}
+
+	// Single-file download: open source
+	entry := grant.Entries[0]
+	f, info, err := openTrustedSource(entry.Path)
+	if err != nil {
+		http.Error(w, "source unavailable", http.StatusGone)
+		finishProgressWithDigest(progress, err, "")
+		return
+	}
+	defer f.Close()
+
+	if info.Size() != entry.Size && (!isContinuation || r.Header.Get("If-Range") == "") {
+		http.Error(w, "source changed", http.StatusGone)
+		finishProgressWithDigest(progress, errSourceChanged, "")
+		return
+	}
+
+	if svcs.Downloads != nil && grant.DownloadID != "" {
+		svcs.Downloads.Begin(grant.DownloadID)
+	}
+
+	// Tier 1: Verified content SHA-256 AND genuine OS-enforced immutability
+	isImmutable := false
+	if grant.SHA256 != "" {
+		if grants != nil && grants.hasContinuationLock(grant.ID) {
+			isImmutable = true
+		} else {
+			var lock io.Closer
+			isImmutable, lock = isOSImmutable(f, entry.Path)
+			if isImmutable && lock != nil && grants != nil {
+				grants.attachContinuationLock(grant.ID, lock)
+			}
+		}
+	}
+
+	if isImmutable {
+		h.Set("ETag", fmt.Sprintf("\"sha256-%s\"", grant.SHA256))
+		h.Set("Accept-Ranges", "bytes")
+		contentType := mime.TypeByExtension(filepath.Ext(grant.Filename))
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+		h.Set("Content-Type", contentType)
+
+		seeker := &progressSeeker{
+			r:           f,
+			ctx:         r.Context(),
+			sess:        grant.Sess,
+			activeCheck: activeCheck,
+			p:           progress,
+			total:       info.Size(),
+		}
+		http.ServeContent(w, r, grant.Filename, info.ModTime(), seeker)
+		seeker.flush()
+		if r.Method != http.MethodHead && seeker.read == info.Size() {
+			finishProgressWithDigest(progress, nil, grant.SHA256)
+			downloadCompleted = true
+		}
+		return
+	}
+
+	// Tier 2: Mutable single file with strong metadata ETag, HTTP Range/If-Range resumption,
+	// and mid-stream mutation protection.
+	snap := captureFileSnapshot(f, entry.Path, info)
+	h.Set("ETag", snap.ETag)
+	h.Set("Accept-Ranges", "bytes")
+	if shouldUseRangeServeContent(r, snap.ETag, info.ModTime()) {
+		seeker := &guardedRangeSeeker{
+			f:           f,
+			snap:        snap,
+			ctx:         r.Context(),
+			sess:        grant.Sess,
+			activeCheck: activeCheck,
+			p:           progress,
+			downloads:   svcs.Downloads,
+		}
+		h.Set("Content-Type", "application/octet-stream")
+		http.ServeContent(w, r, grant.Filename, info.ModTime(), seeker)
+		seeker.flush()
+		if seeker.err != nil {
+			finishProgressWithDigest(progress, seeker.err, "")
+			abortResponse()
+			return
+		}
+		if r.Method != http.MethodHead && (seeker.read == info.Size() || (seeker.curOffset == info.Size() && progressProcessedAtLeast(progress, info.Size()))) {
+			finishProgressWithDigest(progress, nil, "")
+			downloadCompleted = true
+		}
+		return
+	}
+	started, err := streamSingleFileWithSnapshot(r.Context(), r.Method, w, out, grant, progress, f, snap)
+	if err == nil && r.Method != http.MethodHead {
+		downloadCompleted = true
+	}
+	if err != nil && !started {
+		finishProgressWithDigest(progress, err, "")
+	}
+	if err != nil && started {
+		abortResponse()
 	}
 }
 
 type progressSeeker struct {
-	r     *os.File
-	ctx   context.Context
-	sess  *session.Session
-	p     *archiveProgress
-	total int64
-	read  int64
-	last  time.Time
+	r           *os.File
+	ctx         context.Context
+	sess        *session.Session
+	activeCheck func() bool
+	p           *archiveProgress
+	total       int64
+	read        int64
+	last        time.Time
 }
 
 func (s *progressSeeker) Read(p []byte) (n int, err error) {
@@ -1013,6 +1211,9 @@ func (s *progressSeeker) Read(p []byte) (n int, err error) {
 		return 0, s.ctx.Err()
 	}
 	if s.sess != nil && s.sess.Status() != session.StatusActive {
+		return 0, errDownloadSession
+	}
+	if s.activeCheck != nil && !s.activeCheck() {
 		return 0, errDownloadSession
 	}
 	n, err = s.r.Read(p)
@@ -1085,12 +1286,19 @@ func streamSingleFileWithSnapshot(ctx context.Context, method string, w http.Res
 
 	streamHasher := sha256.New()
 	teeOut := io.MultiWriter(out, streamHasher)
-	src := &guardedReader{r: io.LimitReader(f, size), f: f, snap: snap, ctx: ctx, sess: grant.Sess, p: progress}
+	src := &guardedReader{r: io.LimitReader(f, size), f: f, snap: snap, ctx: ctx, sess: grant.Sess, activeCheck: grantActiveCheck(grant), p: progress}
 	bufPtr := transfer.GetCopyBuffer()
 	defer transfer.PutCopyBuffer(bufPtr)
 	buf := *bufPtr
 	n, err := io.CopyBuffer(teeOut, src, buf)
 	src.flush()
+	// A client that received the whole body can close the connection before
+	// the final read returns io.EOF. In that case the read layer reports a
+	// cancellation even though every byte was already written; treating it as
+	// a failure would leave the quota reservation orphaned and skip auto-end.
+	if err != nil && n == size && (errors.Is(err, errDownloadCanceled) || errors.Is(err, context.Canceled)) {
+		err = nil
+	}
 	if err != nil {
 		finishProgressWithDigest(progress, err, "")
 		return true, err

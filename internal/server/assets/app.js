@@ -67,6 +67,11 @@
   // ------------------------------------------------------------------
   var statusEl = document.getElementById("status");
   var statusText = statusEl ? statusEl.querySelector(".status__text") : null;
+  var pinUnlockCard = document.getElementById("pin-unlock-card");
+  var pinUnlockForm = document.getElementById("pin-unlock-form");
+  var pinUnlockInput = document.getElementById("pin-unlock-input");
+  var pinUnlockBtn = document.getElementById("pin-unlock-btn");
+  var pinUnlockError = document.getElementById("pin-unlock-error");
   var flowEl = document.getElementById("flow");
   var rescanCard = document.getElementById("rescan");
   var rescanText = document.getElementById("rescan-text");
@@ -120,6 +125,12 @@
   var textSendBtn = document.getElementById("text-send-btn");
   var textMessagesEl = document.getElementById("text-messages");
   var textCharCount = document.getElementById("text-char-count");
+  var clipboardBadge = document.getElementById("clipboard-sync-badge");
+  var clipboardDesc = document.getElementById("clipboard-sync-desc");
+  var clipboardPushBtn = document.getElementById("clipboard-push-btn");
+  var clipboardCopyLatestBtn = document.getElementById("clipboard-copy-latest-btn");
+  var clipboardLatestPreview = document.getElementById("clipboard-latest-preview");
+  var clipboardLatestItem = null;
   var textMessagesCache = [];
   var textPollTimer = null;
 
@@ -526,6 +537,14 @@
         if (res.status === 403 && body && body.code === "qr_sharing_paused") {
           setStatus("reconnecting", body.error || "QR sharing is currently paused by the host");
         }
+        if (res.status === 403 && body && body.code === "pin_required") {
+          if (flowEl) flowEl.hidden = true;
+          if (pinUnlockCard) pinUnlockCard.hidden = false;
+          setStatus("checking", "Session PIN required");
+        }
+        if (res.status === 410 && body && body.code === "download_limit_reached") {
+          showAwarenessBanner(body.error || "Download limit reached for this session.");
+        }
         if (res.status >= 200 && res.status < 300) return body;
         var msg = body && body.error ? body.error
           : "Request failed (" + res.status + ")";
@@ -658,6 +677,16 @@
       return;
     }
 
+    if (envType === "clipboard.updated" && payload && payload.content) {
+      applyIncomingClipboardItem(payload);
+      return;
+    }
+
+    if (envType === "clipboard.state") {
+      refreshClipboardSyncStatus();
+      return;
+    }
+
     if (envType === "batch.pending" || envType === "batch.updated") {
       if (activeBatch && !appState.ended && (!payload || !payload.id || payload.id === activeBatch.id)) {
         if (activeBatch.timer) {
@@ -703,6 +732,18 @@
         return readBody(res).then(function (body) {
           sseState.connecting = false;
           endUnauthorized(body && body.code);
+        });
+      }
+      if (res.status === 403) {
+        return readBody(res).then(function (body) {
+          sseState.connecting = false;
+          if (body && body.code === "pin_required") {
+            if (flowEl) flowEl.hidden = true;
+            if (pinUnlockCard) pinUnlockCard.hidden = false;
+            setStatus("checking", "Session PIN required");
+            return;
+          }
+          throw new Error("event stream status " + res.status);
         });
       }
       if (!res.ok || !res.body || typeof res.body.getReader !== "function") {
@@ -2936,17 +2977,157 @@
     });
   }
 
-  function startConnectedSession() {
-    appState.ended = false;
-    if (rescanCard) rescanCard.hidden = true;
+  function applyIncomingClipboardItem(item) {
+    if (!item || !item.content) return;
+    clipboardLatestItem = item;
+    if (clipboardLatestPreview) {
+      var snippet = item.content.length > 140 ? (item.content.slice(0, 140) + "…") : item.content;
+      clipboardLatestPreview.textContent = "Synced from " + (item.originName || "Desktop") + " (" + item.sizeBytes + " B): " + snippet;
+      clipboardLatestPreview.hidden = false;
+    }
+    if (clipboardCopyLatestBtn) {
+      clipboardCopyLatestBtn.hidden = false;
+    }
+  }
+
+  function refreshClipboardSyncStatus() {
+    if (!clipboardBadge) return;
+    api("/api/clipboard").then(function (st) {
+      if (!st || !st.enabled) {
+        clipboardBadge.textContent = "Off";
+        clipboardBadge.className = "badge badge--waiting";
+        if (clipboardPushBtn) clipboardPushBtn.disabled = true;
+        if (clipboardDesc) clipboardDesc.textContent = "Automatic clipboard sync is disabled on desktop. Turn it on in Settings or desktop Quick Text to sync with trusted devices.";
+        return;
+      }
+      if (st.paused) {
+        clipboardBadge.textContent = "Paused";
+        clipboardBadge.className = "badge badge--waiting";
+        if (clipboardPushBtn) clipboardPushBtn.disabled = true;
+        if (clipboardDesc) clipboardDesc.textContent = "Clipboard sync is currently paused on the desktop.";
+        return;
+      }
+      clipboardBadge.textContent = "Active";
+      clipboardBadge.className = "badge badge--approved";
+      if (clipboardPushBtn) clipboardPushBtn.disabled = false;
+      if (clipboardDesc) {
+        clipboardDesc.textContent = st.unsupportedReason
+          ? st.unsupportedReason + " You can still tap Send Phone Clipboard or Copy Received."
+          : "Enabled for this trusted browser. Tap Send Phone Clipboard to push mobile clipboard text (up to 64 KB); nothing is written to history.";
+      }
+      if (st.latest && st.latest.content) {
+        applyIncomingClipboardItem(st.latest);
+      }
+    }).catch(function (err) {
+      if (err && err.code === "trusted_device_required") {
+        clipboardBadge.textContent = "Trusted Only";
+        clipboardBadge.className = "badge badge--waiting";
+        if (clipboardPushBtn) clipboardPushBtn.disabled = true;
+        if (clipboardDesc) clipboardDesc.textContent = "Pair this browser under Trusted Devices below to opt into clipboard synchronization.";
+      }
+    });
+  }
+
+  if (clipboardCopyLatestBtn) {
+    clipboardCopyLatestBtn.addEventListener("click", function () {
+      if (!clipboardLatestItem || !clipboardLatestItem.content) return;
+      copyToClipboard(clipboardLatestItem.content, function () {
+        showAwarenessBanner("Copied synced clipboard text (" + clipboardLatestItem.sizeBytes + " B) to your device clipboard.");
+      }, function () {
+        showAwarenessBanner("Browser blocked automatic clipboard write — select the text above manually.");
+      });
+    });
+  }
+
+  if (clipboardPushBtn) {
+    clipboardPushBtn.addEventListener("click", function () {
+      if (!navigator.clipboard || typeof navigator.clipboard.readText !== "function") {
+        showAwarenessBanner("Your browser does not expose navigator.clipboard.readText() on this connection (HTTPS/user permission required). Use Quick Text instead.");
+        return;
+      }
+      clipboardPushBtn.disabled = true;
+      navigator.clipboard.readText().then(function (txt) {
+        if (!txt) {
+          showAwarenessBanner("Your clipboard is empty.");
+          return;
+        }
+        return api("/api/clipboard", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: txt })
+        }).then(function () {
+          showAwarenessBanner("Sent phone clipboard to desktop trusted sync.");
+        });
+      }).catch(function (err) {
+        showAwarenessBanner((err && err.message) || "Clipboard access denied by browser permissions.");
+      }).finally(function () {
+        clipboardPushBtn.disabled = false;
+      });
+    });
+  }
+
+  function finishPinUnlockFlow() {
+    if (pinUnlockCard) pinUnlockCard.hidden = true;
     setStatus("ready", "Connected — pick files to send or download the shared ones");
     flowEl.hidden = false;
     updateAwarenessUI();
     initTrustedPairingUI();
     refreshFiles();
     initQuickText();
+    refreshClipboardSyncStatus();
     connectEvents();
     scheduleTextPoll();
+    refreshShareTargetButtons();
+  }
+
+  function showPinUnlockError(msg) {
+    if (!pinUnlockError) return;
+    pinUnlockError.textContent = msg || "";
+    pinUnlockError.hidden = !msg;
+  }
+
+  if (pinUnlockForm && pinUnlockInput) {
+    pinUnlockForm.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var pin = pinUnlockInput.value;
+      if (!pin.trim()) {
+        showPinUnlockError("Enter the session PIN.");
+        return;
+      }
+      showPinUnlockError("");
+      if (pinUnlockBtn) pinUnlockBtn.disabled = true;
+      api("/api/pin/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: pin })
+      }).then(function () {
+        pinUnlockInput.value = "";
+        finishPinUnlockFlow();
+      }).catch(function (err) {
+        showPinUnlockError((err && err.message) || "Incorrect PIN.");
+      }).finally(function () {
+        if (pinUnlockBtn) pinUnlockBtn.disabled = false;
+      });
+    });
+  }
+
+  function startConnectedSession() {
+    appState.ended = false;
+    if (rescanCard) rescanCard.hidden = true;
+    api("/api/pin/status").then(function (st) {
+      if (st && st.pinRequired && !st.pinUnlocked) {
+        if (flowEl) flowEl.hidden = true;
+        if (pinUnlockCard) pinUnlockCard.hidden = false;
+        setStatus("checking", "Session PIN required");
+        if (pinUnlockInput) {
+          try { pinUnlockInput.focus(); } catch (_) {}
+        }
+        return;
+      }
+      finishPinUnlockFlow();
+    }).catch(function () {
+      finishPinUnlockFlow();
+    });
   }
 
   function showCodeError(msg) {
@@ -3002,9 +3183,281 @@
   }
 
   // ------------------------------------------------------------------
+  // PWA Registration & Web Share Target (G12)
+  // ------------------------------------------------------------------
+  var SHARE_DB_NAME = "flitnix-share-target";
+  var SHARE_STORE_NAME = "pending";
+  var pendingShare = null;
+  var deferredInstallPrompt = null;
+
+  var pwaStatusBadge = document.getElementById("pwa-status-badge");
+  var pwaStatusDesc = document.getElementById("pwa-status-desc");
+  var pwaActions = document.getElementById("pwa-actions");
+  var pwaInstallBtn = document.getElementById("pwa-install-btn");
+  var shareTargetCard = document.getElementById("share-target-card");
+  var shareTargetBadge = document.getElementById("share-target-badge");
+  var shareTargetSummary = document.getElementById("share-target-summary");
+  var shareTargetList = document.getElementById("share-target-list");
+  var shareTargetTextBox = document.getElementById("share-target-text-box");
+  var shareTargetConnectHint = document.getElementById("share-target-connect-hint");
+  var shareTargetConfirmFilesBtn = document.getElementById("share-target-confirm-files");
+  var shareTargetConfirmTextBtn = document.getElementById("share-target-confirm-text");
+  var shareTargetDiscardBtn = document.getElementById("share-target-discard");
+
+  function formatShareBytes(bytes) {
+    if (typeof bytes !== "number" || isNaN(bytes) || bytes < 0) return "0 B";
+    if (bytes < 1024) return bytes + " B";
+    if (bytes < 1048576) return (bytes / 1024).toFixed(1) + " KB";
+    if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + " MB";
+    return (bytes / 1073741824).toFixed(2) + " GB";
+  }
+
+  function isIOSBrowser() {
+    var ua = navigator.userAgent || "";
+    return /iPhone|iPad|iPod/i.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  }
+
+  function isStandalonePWA() {
+    return (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) ||
+      window.navigator.standalone === true;
+  }
+
+  function refreshShareTargetButtons() {
+    if (!shareTargetCard || !pendingShare) return;
+    var connected = !!(token && !appState.ended);
+    var hasFiles = !!(pendingShare.files && pendingShare.files.length > 0);
+    var combinedText = buildSharedText(pendingShare);
+    if (shareTargetConnectHint) shareTargetConnectHint.hidden = connected;
+    if (shareTargetConfirmFilesBtn) {
+      shareTargetConfirmFilesBtn.hidden = !hasFiles;
+      shareTargetConfirmFilesBtn.disabled = !connected;
+    }
+    if (shareTargetConfirmTextBtn) {
+      shareTargetConfirmTextBtn.hidden = !combinedText;
+      shareTargetConfirmTextBtn.disabled = !connected;
+    }
+    if (shareTargetBadge) {
+      shareTargetBadge.textContent = connected ? "Ready to confirm" : "Connect to send";
+    }
+  }
+
+  function buildSharedText(rec) {
+    if (!rec) return "";
+    var parts = [];
+    if (rec.title && rec.title.trim()) parts.push(rec.title.trim());
+    if (rec.text && rec.text.trim()) parts.push(rec.text.trim());
+    if (rec.url && rec.url.trim()) {
+      var u = rec.url.trim();
+      if (parts.indexOf(u) === -1 && (!rec.text || rec.text.indexOf(u) === -1)) {
+        parts.push(u);
+      }
+    }
+    return parts.join("\n").trim();
+  }
+
+  function clearShareTargetUI() {
+    pendingShare = null;
+    if (shareTargetCard) shareTargetCard.hidden = true;
+    if (shareTargetList) shareTargetList.innerHTML = "";
+    if (shareTargetTextBox) shareTargetTextBox.textContent = "";
+  }
+
+  function consumePendingShareFromIDB(shareId) {
+    if (typeof indexedDB === "undefined" || !shareId) return Promise.resolve(null);
+    return new Promise(function (resolve) {
+      var req = indexedDB.open(SHARE_DB_NAME, 1);
+      req.onupgradeneeded = function () {
+        var db = req.result;
+        if (!db.objectStoreNames.contains(SHARE_STORE_NAME)) {
+          db.createObjectStore(SHARE_STORE_NAME, { keyPath: "id" });
+        }
+      };
+      req.onerror = function () { resolve(null); };
+      req.onsuccess = function () {
+        var db = req.result;
+        try {
+          var tx = db.transaction(SHARE_STORE_NAME, "readwrite");
+          var store = tx.objectStore(SHARE_STORE_NAME);
+          var getReq = store.get(shareId);
+          getReq.onsuccess = function () {
+            var rec = getReq.result || null;
+            store.delete(shareId);
+            tx.oncomplete = function () { db.close(); resolve(rec); };
+            tx.onerror = function () { db.close(); resolve(rec); };
+          };
+          getReq.onerror = function () { db.close(); resolve(null); };
+        } catch (_) {
+          db.close();
+          resolve(null);
+        }
+      };
+    });
+  }
+
+  function showPendingShare(rec) {
+    if (!rec || !shareTargetCard) return;
+    var hasFiles = !!(rec.files && rec.files.length > 0);
+    var combinedText = buildSharedText(rec);
+    if (!hasFiles && !combinedText) return;
+
+    pendingShare = rec;
+    var summaryParts = [];
+    if (hasFiles) {
+      summaryParts.push(rec.files.length + (rec.files.length === 1 ? " shared file" : " shared files"));
+    }
+    if (combinedText) {
+      summaryParts.push("shared text/link");
+    }
+    if (shareTargetSummary) {
+      shareTargetSummary.textContent = "Received " + summaryParts.join(" and ") + " from your device Share Sheet. Confirm below before transmitting to desktop.";
+    }
+    if (shareTargetList) {
+      shareTargetList.innerHTML = "";
+      if (hasFiles) {
+        rec.files.forEach(function (f) {
+          var li = document.createElement("li");
+          li.textContent = (f.name || "file") + " (" + formatShareBytes(f.size) + ")";
+          shareTargetList.appendChild(li);
+        });
+        shareTargetList.hidden = false;
+      } else {
+        shareTargetList.hidden = true;
+      }
+    }
+    if (shareTargetTextBox) {
+      if (combinedText) {
+        shareTargetTextBox.textContent = combinedText;
+        shareTargetTextBox.hidden = false;
+      } else {
+        shareTargetTextBox.textContent = "";
+        shareTargetTextBox.hidden = true;
+      }
+    }
+    shareTargetCard.hidden = false;
+    refreshShareTargetButtons();
+  }
+
+  function initPWAAndShareTarget() {
+    var secure = !!window.isSecureContext;
+    var swSupported = secure && ("serviceWorker" in navigator);
+    var ios = isIOSBrowser();
+    var standalone = isStandalonePWA();
+
+    if (pwaStatusBadge && pwaStatusDesc) {
+      if (swSupported) {
+        navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch(function () {});
+        if (standalone) {
+          pwaStatusBadge.textContent = ios ? "Installed (iOS Web App)" : "Installed PWA";
+          pwaStatusBadge.className = "badge badge--ready";
+        } else {
+          pwaStatusBadge.textContent = "PWA & Share Ready";
+          pwaStatusBadge.className = "badge badge--ready";
+        }
+        if (ios) {
+          pwaStatusDesc.textContent = "Installed/secure origin active. On iOS Safari, you can add Flitnix via Share → Add to Home Screen; iOS does not support Web Share Target POST from the system Share Sheet, so pick files inside Flitnix.";
+        } else {
+          pwaStatusDesc.textContent = "Secure origin active. Install Flitnix on Android Chrome/Edge to appear in your phone's OS Share Sheet for photos, files, text, and links.";
+        }
+      } else {
+        pwaStatusBadge.textContent = "HTTP Origin";
+        pwaStatusBadge.className = "badge badge--waiting";
+        pwaStatusDesc.textContent = "Plain LAN HTTP origin: Add to Home Screen bookmark works, but Service Worker offline shell and OS Web Share Target require HTTPS (enable Optional Local HTTPS in Desktop Settings → Network) or localhost.";
+      }
+    }
+
+    window.addEventListener("beforeinstallprompt", function (e) {
+      e.preventDefault();
+      deferredInstallPrompt = e;
+      if (pwaActions && pwaInstallBtn) {
+        pwaActions.hidden = false;
+        pwaInstallBtn.onclick = function () {
+          if (!deferredInstallPrompt) return;
+          deferredInstallPrompt.prompt();
+          deferredInstallPrompt.userChoice.finally(function () {
+            deferredInstallPrompt = null;
+            if (pwaActions) pwaActions.hidden = true;
+          });
+        };
+      }
+    });
+
+    if (shareTargetConfirmFilesBtn) {
+      shareTargetConfirmFilesBtn.addEventListener("click", function () {
+        if (!pendingShare || !pendingShare.files || !pendingShare.files.length || !token || appState.ended) return;
+        var filesToSend = pendingShare.files.slice();
+        var hasText = !!buildSharedText(pendingShare);
+        if (!hasText) {
+          clearShareTargetUI();
+        } else {
+          pendingShare.files = [];
+          shareTargetConfirmFilesBtn.hidden = true;
+          if (shareTargetList) shareTargetList.hidden = true;
+        }
+        addFiles(filesToSend, "");
+      });
+    }
+
+    if (shareTargetConfirmTextBtn) {
+      shareTargetConfirmTextBtn.addEventListener("click", function () {
+        if (!pendingShare || !token || appState.ended || !textInput) return;
+        var sharedTxt = buildSharedText(pendingShare);
+        if (!sharedTxt) return;
+        textInput.value = sharedTxt.slice(0, 65536);
+        textInput.dispatchEvent(new Event("input"));
+        textInput.focus();
+        clearShareTargetUI();
+      });
+    }
+
+    if (shareTargetDiscardBtn) {
+      shareTargetDiscardBtn.addEventListener("click", clearShareTargetUI);
+    }
+
+    window.addEventListener("online", function () {
+      if (token && !appState.ended) {
+        reconcileAfterEventStream();
+      }
+    });
+    window.addEventListener("offline", function () {
+      showAwarenessBanner("Network connection offline. Flitnix will reconnect automatically when local Wi-Fi returns.");
+    });
+
+    try {
+      var params = new URLSearchParams(window.location.search || "");
+      var sharedId = params.get("shared");
+      var shareNotice = params.get("share_notice");
+      var shareError = params.get("share_error");
+      if (sharedId || shareNotice || shareError) {
+        var cleanUrl = window.location.pathname + (window.location.hash || "");
+        if (window.history && window.history.replaceState) {
+          window.history.replaceState(null, "", cleanUrl);
+        }
+      }
+      if (sharedId) {
+        consumePendingShareFromIDB(sharedId).then(function (rec) {
+          if (rec) showPendingShare(rec);
+        });
+      } else if (shareNotice === "sw_required") {
+        showAwarenessBanner("Web Share Target requires the HTTPS PWA Service Worker. Enable Local HTTPS in Desktop Settings and install the Flitnix PWA.");
+      } else if (shareError) {
+        showAwarenessBanner("Could not read shared items from your device. Please pick files directly inside Flitnix.");
+      }
+    } catch (_) {}
+  }
+
+  // ------------------------------------------------------------------
   // Boot
   // ------------------------------------------------------------------
   function boot() {
+    var footnote = document.getElementById("transport-footnote");
+    if (footnote) {
+      if (window.location.protocol === "https:") {
+        footnote.textContent = "Connected via Local HTTPS (TLS 1.3 encrypted transport on your local network).";
+      } else {
+        footnote.textContent = "Connected via LAN HTTP (unencrypted local network transport) — connect only on networks and devices you trust.";
+      }
+    }
+    initPWAAndShareTarget();
     setupConnectCodeForm();
     pickBtn.addEventListener("click", function () { fileInput.click(); });
     if (folderInput && pickFolderBtn &&

@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -189,10 +191,21 @@ func (c *ClientIdentity) SignAuthV2(hostID string, timestampUnix int64, transfer
 
 // PinnedHost represents a host that has been verified and pinned in known_hosts.json.
 type PinnedHost struct {
-	Name      string    `json:"name"`
-	PublicKey string    `json:"publicKey"` // 64-char lowercase hex
-	PairedAt  time.Time `json:"pairedAt"`
-	LastSeen  time.Time `json:"lastSeen"`
+	Name        string    `json:"name"`
+	PublicKey   string    `json:"publicKey"` // 64-char lowercase hex
+	LastAddress string    `json:"lastAddress,omitempty"`
+	PairedAt    time.Time `json:"pairedAt"`
+	LastSeen    time.Time `json:"lastSeen"`
+}
+
+// KnownHostEntry is a view of one pinned host including its HostID.
+type KnownHostEntry struct {
+	HostID      string    `json:"hostId"`
+	Name        string    `json:"name"`
+	PublicKey   string    `json:"publicKey"`
+	LastAddress string    `json:"lastAddress,omitempty"`
+	PairedAt    time.Time `json:"pairedAt"`
+	LastSeen    time.Time `json:"lastSeen"`
 }
 
 // KnownHosts manages trusted host public keys and TOFU pinning.
@@ -263,6 +276,11 @@ func (k *KnownHosts) Get(hostID string) (PinnedHost, bool) {
 
 // Pin registers or updates a host identity pinning in known_hosts.json.
 func (k *KnownHosts) Pin(hostID, name, publicKeyHex string) error {
+	return k.PinWithAddress(hostID, name, publicKeyHex, "")
+}
+
+// PinWithAddress registers or updates a host identity pin along with its observed address.
+func (k *KnownHosts) PinWithAddress(hostID, name, publicKeyHex, lastAddress string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 
@@ -272,15 +290,71 @@ func (k *KnownHosts) Pin(hostID, name, publicKeyHex string) error {
 	if ok && !existing.PairedAt.IsZero() {
 		pairedAt = existing.PairedAt
 	}
+	if lastAddress == "" && ok {
+		lastAddress = existing.LastAddress
+	}
 
 	k.Hosts[hostID] = PinnedHost{
-		Name:      name,
-		PublicKey: publicKeyHex,
-		PairedAt:  pairedAt,
-		LastSeen:  now,
+		Name:        name,
+		PublicKey:   publicKeyHex,
+		LastAddress: lastAddress,
+		PairedAt:    pairedAt,
+		LastSeen:    now,
 	}
 
 	return k.saveLocked()
+}
+
+// List returns all pinned hosts sorted by HostID.
+func (k *KnownHosts) List() []KnownHostEntry {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+
+	out := make([]KnownHostEntry, 0, len(k.Hosts))
+	for hid, h := range k.Hosts {
+		out = append(out, KnownHostEntry{
+			HostID:      hid,
+			Name:        h.Name,
+			PublicKey:   h.PublicKey,
+			LastAddress: h.LastAddress,
+			PairedAt:    h.PairedAt,
+			LastSeen:    h.LastSeen,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].HostID < out[j].HostID
+	})
+	return out
+}
+
+// HasPinnedAddress reports whether any pinned host previously used authority.
+func (k *KnownHosts) HasPinnedAddress(authority string) bool {
+	if authority == "" {
+		return false
+	}
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	for _, h := range k.Hosts {
+		if strings.EqualFold(h.LastAddress, authority) {
+			return true
+		}
+	}
+	return false
+}
+
+// VerifyAddressBinding detects if authority was previously pinned to a different hostID.
+func (k *KnownHosts) VerifyAddressBinding(authority, hostID string) error {
+	if authority == "" || hostID == "" {
+		return nil
+	}
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	for pinnedID, h := range k.Hosts {
+		if h.LastAddress != "" && strings.EqualFold(h.LastAddress, authority) && !strings.EqualFold(pinnedID, hostID) {
+			return fmt.Errorf("%w: address %s was previously pinned to host %s, now presenting %s (if host rotated keys, run 'flitnix known-hosts remove %s')", ErrHostMismatch, authority, pinnedID, hostID, pinnedID)
+		}
+	}
+	return nil
 }
 
 // Remove unpins a host from known_hosts.json.

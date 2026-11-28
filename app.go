@@ -37,6 +37,7 @@ import (
 	"github.com/itsyamin/flitnix/internal/audit"
 	"github.com/itsyamin/flitnix/internal/autostart"
 	"github.com/itsyamin/flitnix/internal/client"
+	"github.com/itsyamin/flitnix/internal/clipboard"
 	"github.com/itsyamin/flitnix/internal/devices"
 	"github.com/itsyamin/flitnix/internal/discovery"
 	"github.com/itsyamin/flitnix/internal/doctor"
@@ -64,11 +65,16 @@ import (
 // producer leaves it empty so the raw secret is available exactly once, to
 // the one code path that needs it.
 type SessionView struct {
-	Key             string    `json:"key"`
-	Created         time.Time `json:"created"`
-	ExpiresAt       time.Time `json:"expiresAt"`
-	PinnedTransfers int32     `json:"pinnedTransfers"`
-	Token           string    `json:"token,omitempty"`
+	Key                string    `json:"key"`
+	Created            time.Time `json:"created"`
+	ExpiresAt          time.Time `json:"expiresAt"`
+	HardExpiresAt      time.Time `json:"hardExpiresAt,omitempty"`
+	PinnedTransfers    int32     `json:"pinnedTransfers"`
+	PinRequired        bool      `json:"pinRequired"`
+	MaxDownloads       int       `json:"maxDownloads"`
+	CompletedDownloads int       `json:"completedDownloads"`
+	RemainingDownloads int       `json:"remainingDownloads"`
+	Token              string    `json:"token,omitempty"`
 
 	// InterfaceName and Address are populated by StartSession: the chosen
 	// network interface and the machine's own IPv4 address used for the
@@ -77,30 +83,53 @@ type SessionView struct {
 	Address       string `json:"address,omitempty"`
 }
 
+type SessionConfigView struct {
+	IP              string `json:"ip"`
+	PinCode         string `json:"pinCode,omitempty"`
+	MaxDownloads    int    `json:"maxDownloads,omitempty"`
+	DurationMinutes int    `json:"durationMinutes,omitempty"`
+	OneTimeAutoEnd  bool   `json:"oneTimeAutoEnd,omitempty"`
+}
+
 type GuestRoomView struct {
-	ID              string                      `json:"id"`
-	Date            string                      `json:"date"`
-	DestinationRoot string                      `json:"destinationRoot"`
-	RoomFolder      string                      `json:"roomFolder"`
-	Title           string                      `json:"title"`
-	Description     string                      `json:"description,omitempty"`
-	Deadline        *time.Time                  `json:"deadline,omitempty"`
-	CollisionPolicy string                      `json:"collisionPolicy"`
-	State           string                      `json:"state"`
-	DurationSeconds int                         `json:"durationSeconds"`
-	CreatedAt       time.Time                   `json:"createdAt"`
-	ExpiresAt       time.Time                   `json:"expiresAt"`
-	InviteSecret    string                      `json:"inviteSecret,omitempty"`
-	InviteURL       string                      `json:"inviteUrl,omitempty"`
-	QRDataURL       string                      `json:"qrDataUrl,omitempty"`
-	FormSchema      []guest.FormField           `json:"formSchema,omitempty"`
-	Roster          []guest.ExpectedParticipant `json:"roster,omitempty"`
-	HasRoster       bool                        `json:"hasRoster"`
+	ID                  string                      `json:"id"`
+	Date                string                      `json:"date"`
+	DestinationRoot     string                      `json:"destinationRoot"`
+	RoomFolder          string                      `json:"roomFolder"`
+	Mode                string                      `json:"mode"`
+	AllowsUpload        bool                        `json:"allowsUpload"`
+	AllowsDownload      bool                        `json:"allowsDownload"`
+	RequireJoinApproval bool                        `json:"requireJoinApproval"`
+	PinRequired         bool                        `json:"pinRequired"`
+	MaxDownloads        int                         `json:"maxDownloads"`
+	RemainingDownloads  int                         `json:"remainingDownloads"`
+	DownloadCount       int                         `json:"downloadCount"`
+	ActiveDownloads     int                         `json:"activeDownloads"`
+	Title               string                      `json:"title"`
+	Description         string                      `json:"description,omitempty"`
+	Deadline            *time.Time                  `json:"deadline,omitempty"`
+	CollisionPolicy     string                      `json:"collisionPolicy"`
+	State               string                      `json:"state"`
+	DurationSeconds     int                         `json:"durationSeconds"`
+	CreatedAt           time.Time                   `json:"createdAt"`
+	ExpiresAt           time.Time                   `json:"expiresAt"`
+	InviteSecret        string                      `json:"inviteSecret,omitempty"`
+	InviteURL           string                      `json:"inviteUrl,omitempty"`
+	QRDataURL           string                      `json:"qrDataUrl,omitempty"`
+	FormSchema          []guest.FormField           `json:"formSchema,omitempty"`
+	Roster              []guest.ExpectedParticipant `json:"roster,omitempty"`
+	HasRoster           bool                        `json:"hasRoster"`
+	SharedSources       []SharedSourceView          `json:"sharedSources,omitempty"`
 }
 
 type GuestRoomConfigView struct {
 	DestinationDir       string                      `json:"destinationDir"`
 	DurationMinutes      int                         `json:"durationMinutes"`
+	Mode                 string                      `json:"mode,omitempty"`
+	AutoApproveGuests    bool                        `json:"autoApproveGuests,omitempty"`
+	PinCode              string                      `json:"pinCode,omitempty"`
+	MaxDownloads         int                         `json:"maxDownloads,omitempty"`
+	SharedPaths          []string                    `json:"sharedPaths,omitempty"`
 	Title                string                      `json:"title"`
 	Description          string                      `json:"description,omitempty"`
 	DeadlineRFC3339      string                      `json:"deadlineRFC3339,omitempty"`
@@ -286,6 +315,23 @@ type SettingsView struct {
 	NotificationsSupported    bool   `json:"notificationsSupported,omitempty"`
 	HistoryRetentionDays      int    `json:"historyRetentionDays"`
 	HistoryMaxRecords         int    `json:"historyMaxRecords"`
+	RequireEncryptedTransport bool   `json:"requireEncryptedTransport"`
+	LocalHTTPSEnabled         bool   `json:"localHttpsEnabled"`
+	AutoClipboardSync         bool   `json:"autoClipboardSync"`
+}
+
+// LocalHTTPSStatus describes the opt-in Local CA HTTPS state for browser & PWA sharing.
+type LocalHTTPSStatus struct {
+	Enabled      bool     `json:"enabled"`
+	Active       bool     `json:"active"`
+	HasCA        bool     `json:"hasCa"`
+	CASHA256     string   `json:"caSha256,omitempty"`
+	CACertPath   string   `json:"caCertPath,omitempty"`
+	CADownload   string   `json:"caDownloadUrl,omitempty"`
+	MDNSHostname string   `json:"mdnsHostname,omitempty"`
+	HTTPSURL     string   `json:"httpsUrl,omitempty"`
+	MDNSHTTPSURL string   `json:"mdnsHttpsUrl,omitempty"`
+	SANs         []string `json:"sans,omitempty"`
 }
 
 // App owns the Flitnix core instances and the desktop lifecycle.
@@ -312,11 +358,13 @@ type App struct {
 	downloads     *transfer.DownloadRegistry
 	guestMgr      *guest.Manager
 	textStore     *textmsg.Store
+	clipboardMgr  *clipboard.Coordinator
 	auditStore    *audit.Store
 	historyStore  *history.Store
 	templateStore *guest.TemplateStore
 	devicesStore  *devices.Store
 	hostIdentity  *devices.HostIdentity
+	localHTTPS    *server.LocalHTTPSManager
 	pairing       *devices.PairingCoordinator
 	visibility    *devices.VisibilityManager
 	discovery     *discovery.Service
@@ -455,12 +503,39 @@ func NewApp() (*App, error) {
 		templateStore: templateStore,
 		devicesStore:  devicesStore,
 		hostIdentity:  hostIdentity,
+		localHTTPS:    server.NewLocalHTTPSManager(filepath.Join(dataDir, "local_ca")),
 		pairing:       pairingCoord,
 		visibility:    visMgr,
 		events:        events.NewHub(),
 		inhibitor:     power.New(),
 		source:        netenv.DefaultSource(),
 		updater:       update.New(update.Config{RepoOwner: "RobinMillford", RepoName: "flitnix"}),
+	}
+	hostIDForClip := ""
+	if hostIdentity != nil {
+		hostIDForClip = hostIdentity.HostID
+	}
+	hostNameForClip, _ := os.Hostname()
+	if strings.TrimSpace(hostNameForClip) == "" {
+		hostNameForClip = "Desktop"
+	}
+	a.clipboardMgr = clipboard.NewCoordinator(clipboard.Config{
+		HostDeviceID: hostIDForClip,
+		HostName:     hostNameForClip,
+		OnLocalSync: func(item clipboard.SyncItem) {
+			a.publishClipboardItem("", item)
+		},
+		OnRemoteSync: func(item clipboard.SyncItem) {
+			a.publishClipboardItem(item.OriginDeviceID, item)
+		},
+		OnState: func(st clipboard.StatusView) {
+			if a.events != nil {
+				a.events.PublishDesktop(events.TypeClipboardState, st)
+			}
+		},
+	})
+	if settingsStore != nil {
+		a.clipboardMgr.SetEnabled(settingsStore.Get().AutoClipboardSync)
 	}
 	a.downloads.SetEventHook(func(d transfer.Download, isProgress bool) {
 		if a.events == nil {
@@ -1322,6 +1397,16 @@ func (a *App) handleDesktopEvent(ev events.DesktopEvent) {
 				},
 			})
 		}
+		if state == string(guest.UploadCompleted) && uid != "" {
+			title, body := notify.FormatCompletedSummary(pol.HideFilenames, "upload", name, 1)
+			n.Notify(notify.Notification{
+				Key:           "guest:done:" + uid,
+				Category:      notify.CatTransferCompleted,
+				Title:         title,
+				Body:          body,
+				DefaultAction: notify.Action{Kind: notify.ActionOpenWindow},
+			})
+		}
 	}
 }
 
@@ -1423,6 +1508,9 @@ func (a *App) shutdown(ctx context.Context) {
 		if a.events != nil {
 			a.events.Close()
 		}
+		if a.clipboardMgr != nil {
+			a.clipboardMgr.Close()
+		}
 		if a.notify != nil {
 			a.notify.Close()
 		}
@@ -1500,13 +1588,18 @@ func sameListenAddr(a, b string) bool {
 	return false
 }
 
+func (a *App) isLocalHTTPSEnabled() bool {
+	return a.settingsStore != nil && a.settingsStore.Get().LocalHTTPSEnabled
+}
+
 // startServerLocked constructs and serves a new server on listen and
 // waits (bounded) for the listener to bind, so StartSession never hands
 // out a token before the server is reachable. Callers must hold srvMu.
 func (a *App) startServerLocked(listen string) error {
 	srv := server.New(server.Config{
-		ListenAddr:  listen,
-		RecoveryDir: a.recoveryDir,
+		ListenAddr:        listen,
+		RecoveryDir:       a.recoveryDir,
+		LocalHTTPSEnabled: a.isLocalHTTPSEnabled(),
 		Services: &server.Services{
 			Sessions:       a.sessions,
 			ShortCodes:     a.shortCodes,
@@ -1516,9 +1609,11 @@ func (a *App) startServerLocked(listen string) error {
 			Downloads:      a.downloads,
 			GuestManager:   a.guestMgr,
 			TextMessages:   a.textStore,
+			Clipboard:      a.clipboardMgr,
 			Audit:          a.auditStore,
 			Devices:        a.devicesStore,
 			HostIdentity:   a.hostIdentity,
+			LocalHTTPS:     a.localHTTPS,
 			Pairing:        a.pairing,
 			Visibility:     a.visibility,
 			Inhibitor:      a.inhibitor,
@@ -1610,10 +1705,14 @@ func (a *App) endAllSessions() {
 // the QR flow plus the interface and address the QR encodes; nothing else
 // ever sees the token.
 func (a *App) StartSession(ip string) (SessionView, error) {
+	return a.StartSessionWithConfig(SessionConfigView{IP: ip})
+}
+
+func (a *App) StartSessionWithConfig(cfg SessionConfigView) (SessionView, error) {
 	if a.ctx == nil {
 		return SessionView{}, errors.New("flitnix: the app is still starting")
 	}
-	view, err := a.resolveInterface(ip)
+	view, err := a.resolveInterface(cfg.IP)
 	if err != nil {
 		return SessionView{}, err
 	}
@@ -1624,7 +1723,16 @@ func (a *App) StartSession(ip string) (SessionView, error) {
 	if err := a.ensureServer(listen); err != nil {
 		return SessionView{}, err
 	}
-	s, err := a.sessions.Create()
+	var expiresIn time.Duration
+	if cfg.DurationMinutes > 0 {
+		expiresIn = time.Duration(cfg.DurationMinutes) * time.Minute
+	}
+	s, err := a.sessions.CreateWithPolicy(session.PolicyOptions{
+		PinCode:        cfg.PinCode,
+		MaxDownloads:   cfg.MaxDownloads,
+		ExpiresIn:      expiresIn,
+		OneTimeAutoEnd: cfg.OneTimeAutoEnd,
+	})
 	if err != nil {
 		// No session was created: keep the no-session-without-server
 		// invariant unless another session is still active.
@@ -1645,6 +1753,7 @@ func (a *App) StartSession(ip string) (SessionView, error) {
 	if a.events != nil {
 		a.events.PublishDesktop(events.TypeSessionCreated, sessionView(s, ""))
 	}
+	a.refreshClipboardAuthorizedPeers()
 	return out, nil
 }
 
@@ -1921,6 +2030,181 @@ func (a *App) SessionQR(key string) (string, error) {
 	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(png), nil
 }
 
+// SessionHTTPSQR renders an opt-in Local HTTPS QR code for the active session
+// when Local HTTPS is enabled, using the bound IP HTTPS URL (or .local mDNS URL
+// when preferMDNS is true).
+func (a *App) SessionHTTPSQR(key string, preferMDNS bool) (string, error) {
+	a.srvMu.Lock()
+	srv := a.srv
+	a.srvMu.Unlock()
+	if srv == nil {
+		return "", errors.New("flitnix: no session is running; start one first")
+	}
+	if !srv.LocalHTTPSActive() {
+		return "", errors.New("flitnix: Local HTTPS is not active; enable it in Settings -> Network")
+	}
+	baseURL := srv.HTTPSURL()
+	if preferMDNS {
+		if mURL := srv.MDNSHTTPSURL(); mURL != "" {
+			baseURL = mURL
+		}
+	}
+	var token string
+	for _, s := range a.sessions.ActiveSessions() {
+		if s.Key() == key {
+			token = s.Token()
+			break
+		}
+	}
+	if token == "" {
+		return "", errors.New("flitnix: no active session matches that identifier")
+	}
+	payload, err := qr.Payload(baseURL, token)
+	if err != nil {
+		return "", fmt.Errorf("flitnix: %w", err)
+	}
+	png, err := qr.PNG(payload, qr.DefaultSize)
+	if err != nil {
+		return "", fmt.Errorf("flitnix: rendering the HTTPS session QR: %w", err)
+	}
+	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(png), nil
+}
+
+// GetLocalHTTPSStatus reports the opt-in Local HTTPS and CA certificate status.
+func (a *App) GetLocalHTTPSStatus() LocalHTTPSStatus {
+	st := LocalHTTPSStatus{
+		Enabled: a.isLocalHTTPSEnabled(),
+	}
+	if a.hostIdentity != nil {
+		st.MDNSHostname = server.LocalMDNSHost(a.hostIdentity.HostID)
+	}
+	if a.localHTTPS != nil {
+		st.HasCA = a.localHTTPS.HasCA()
+		st.CACertPath = a.localHTTPS.CACertPath()
+		if st.Enabled || st.HasCA {
+			if a.hostIdentity != nil {
+				_, fp, err := a.localHTTPS.CACertPEM(a.hostIdentity.HostID)
+				if err == nil {
+					st.CASHA256 = fp
+					st.HasCA = true
+				}
+			} else {
+				st.CASHA256 = a.localHTTPS.CASHA256()
+			}
+		}
+	}
+	a.srvMu.Lock()
+	srv := a.srv
+	a.srvMu.Unlock()
+	if srv != nil {
+		st.Active = srv.LocalHTTPSActive()
+		if st.Active {
+			st.HTTPSURL = srv.HTTPSURL()
+			st.MDNSHTTPSURL = srv.MDNSHTTPSURL()
+			st.SANs = srv.LocalHTTPSSANs()
+			if base := srv.URL(); base != "" {
+				st.CADownload = base + "/local-ca.crt"
+			}
+		}
+	}
+	return st
+}
+
+// ExportLocalCACert saves the public Local Root CA certificate (never the private key)
+// so users can optionally trust Local HTTPS on their mobile devices without certificate warnings.
+func (a *App) ExportLocalCACert() (string, error) {
+	if a.localHTTPS == nil || a.hostIdentity == nil {
+		return "", errors.New("flitnix: local HTTPS manager unavailable")
+	}
+	pemBytes, _, err := a.localHTTPS.CACertPEM(a.hostIdentity.HostID)
+	if err != nil {
+		return "", err
+	}
+	dest := ""
+	if a.ctx != nil && a.ctx.Value("frontend") != nil {
+		chosen, dlgErr := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+			Title:           "Export Flitnix Local Root CA Certificate",
+			DefaultFilename: "flitnix-local-ca.crt",
+		})
+		if dlgErr != nil {
+			return "", dlgErr
+		}
+		if strings.TrimSpace(chosen) == "" {
+			return "", nil
+		}
+		dest = chosen
+	} else {
+		dest = filepath.Join(a.ReceiveDirectory(), "flitnix-local-ca.crt")
+		_ = os.MkdirAll(filepath.Dir(dest), 0o755)
+	}
+	if err := os.WriteFile(dest, pemBytes, 0o644); err != nil {
+		return "", err
+	}
+	return dest, nil
+}
+
+// RemoveLocalCACert deletes the Local Root CA key and certificate and disables Local HTTPS.
+func (a *App) RemoveLocalCACert() error {
+	if a.localHTTPS != nil {
+		if err := a.localHTTPS.RemoveCA(); err != nil {
+			return err
+		}
+	}
+	if a.settingsStore != nil {
+		cur := a.settingsStore.Get()
+		if cur.LocalHTTPSEnabled {
+			cur.LocalHTTPSEnabled = false
+			if err := a.settingsStore.Save(cur); err != nil {
+				return err
+			}
+		}
+	}
+	a.restartServerIfRunning()
+	return nil
+}
+
+func (a *App) restartServerIfRunning() {
+	a.srvMu.Lock()
+	defer a.srvMu.Unlock()
+	if a.srv == nil || a.srvListen == "" {
+		return
+	}
+	listen := a.srvListen
+	a.stopServerLocked()
+	_ = a.startServerLocked(listen)
+}
+
+// ListKnownHosts returns all pinned desktop/CLI peer host identities in known_hosts.json.
+func (a *App) ListKnownHosts() ([]client.KnownHostEntry, error) {
+	kh, err := client.LoadOrCreateKnownHosts(filepath.Join(a.dataDir, "known_hosts.json"))
+	if err != nil {
+		return nil, err
+	}
+	return kh.List(), nil
+}
+
+// RemoveKnownHost explicitly removes a pinned peer identity from known_hosts.json
+// (authenticated key-rotation recovery; the next connection requires fresh verification).
+func (a *App) RemoveKnownHost(hostID string) error {
+	hostID = strings.TrimSpace(hostID)
+	if hostID == "" {
+		return errors.New("flitnix: hostId is required")
+	}
+	kh, err := client.LoadOrCreateKnownHosts(filepath.Join(a.dataDir, "known_hosts.json"))
+	if err != nil {
+		return err
+	}
+	if err := kh.Remove(hostID); err != nil {
+		return err
+	}
+	if a.peerMgr != nil {
+		a.peerMgr.linksMu.Lock()
+		delete(a.peerMgr.links, strings.ToLower(hostID))
+		a.peerMgr.linksMu.Unlock()
+	}
+	return nil
+}
+
 // EndSession revokes the session identified by its non-secret key: its
 // uploads are canceled, its held download records are canceled with it, its
 // shared files unlisted and the token dies. When the last session ends, all
@@ -1970,6 +2254,7 @@ func (a *App) EndSession(key string) error {
 			a.stopServer()
 		}
 	}
+	a.refreshClipboardAuthorizedPeers()
 	return nil
 }
 
@@ -2705,6 +2990,9 @@ func (a *App) GetSettings() SettingsView {
 		NotificationsSupported:    notifySup,
 		HistoryRetentionDays:      s.HistoryRetentionDays,
 		HistoryMaxRecords:         s.HistoryMaxRecords,
+		RequireEncryptedTransport: s.RequireEncryptedTransport,
+		LocalHTTPSEnabled:         s.LocalHTTPSEnabled,
+		AutoClipboardSync:         s.AutoClipboardSync,
 	}
 }
 
@@ -2793,9 +3081,23 @@ func (a *App) SaveSettings(view SettingsView) error {
 		NotifyGuestRequests:       view.NotifyGuestRequests,
 		HistoryRetentionDays:      view.HistoryRetentionDays,
 		HistoryMaxRecords:         view.HistoryMaxRecords,
+		RequireEncryptedTransport: view.RequireEncryptedTransport,
+		LocalHTTPSEnabled:         view.LocalHTTPSEnabled,
+		AutoClipboardSync:         view.AutoClipboardSync,
 	}
+	prevLocalHTTPS := current.LocalHTTPSEnabled
 	if err := a.settingsStore.Save(s); err != nil {
 		return err
+	}
+	if a.clipboardMgr != nil {
+		a.clipboardMgr.SetEnabled(view.AutoClipboardSync)
+		a.refreshClipboardAuthorizedPeers()
+	}
+	if prevLocalHTTPS != view.LocalHTTPSEnabled {
+		if view.LocalHTTPSEnabled && a.localHTTPS != nil && a.hostIdentity != nil {
+			_ = a.localHTTPS.EnsureCA(a.hostIdentity.HostID)
+		}
+		a.restartServerIfRunning()
 	}
 	if a.notify != nil {
 		a.notify.SetPolicy(a.notifyPolicyFromSettings())
@@ -2888,12 +3190,18 @@ func (a *App) OpenDownloadFolder() error {
 // ---- Projections ----
 
 func sessionView(s *session.Session, token string) SessionView {
+	maxDL, compDL, remDL := s.DownloadQuotaStats()
 	return SessionView{
-		Key:             s.Key(),
-		Created:         s.Created(),
-		ExpiresAt:       s.ExpiresAt(),
-		PinnedTransfers: s.PinnedTransfers(),
-		Token:           token,
+		Key:                s.Key(),
+		Created:            s.Created(),
+		ExpiresAt:          s.ExpiresAt(),
+		HardExpiresAt:      s.HardExpiresAt(),
+		PinnedTransfers:    s.PinnedTransfers(),
+		PinRequired:        s.PINRequired(),
+		MaxDownloads:       maxDL,
+		CompletedDownloads: compDL,
+		RemainingDownloads: remDL,
+		Token:              token,
 	}
 }
 
@@ -3052,6 +3360,53 @@ func (a *App) StartGuestRoom(destinationDir string, durationMinutes int) (GuestR
 	})
 }
 
+func (a *App) buildGuestRoomView(room *guest.Room, srvURL string) GuestRoomView {
+	var qrDataURL string
+	inviteURL := ""
+	if srvURL != "" {
+		inviteURL = fmt.Sprintf("%s/guest#%s", srvURL, room.InviteSecret)
+		if qrPNG, err := qr.PNG(inviteURL, qr.DefaultSize); err == nil {
+			qrDataURL = "data:image/png;base64," + base64.StdEncoding.EncodeToString(qrPNG)
+		}
+	}
+	v := room.View()
+	sources := room.ListSharedSources()
+	sharedViews := make([]SharedSourceView, 0, len(sources))
+	for _, s := range sources {
+		sharedViews = append(sharedViews, sharedSourceView(s))
+	}
+	return GuestRoomView{
+		ID:                  v.ID,
+		Date:                v.Date,
+		DestinationRoot:     v.DestinationRoot,
+		RoomFolder:          v.RoomFolder,
+		Mode:                string(v.Mode),
+		AllowsUpload:        v.AllowsUpload,
+		AllowsDownload:      v.AllowsDownload,
+		RequireJoinApproval: v.RequireJoinApproval,
+		PinRequired:         v.PINRequired,
+		MaxDownloads:        v.MaxDownloads,
+		RemainingDownloads:  v.RemainingDownloads,
+		DownloadCount:       v.DownloadCount,
+		ActiveDownloads:     v.ActiveDownloads,
+		Title:               v.Title,
+		Description:         v.Description,
+		Deadline:            v.Deadline,
+		CollisionPolicy:     string(v.CollisionPolicy),
+		State:               string(v.State),
+		DurationSeconds:     v.DurationSeconds,
+		CreatedAt:           v.CreatedAt,
+		ExpiresAt:           v.ExpiresAt,
+		InviteSecret:        v.InviteSecret,
+		InviteURL:           inviteURL,
+		QRDataURL:           qrDataURL,
+		FormSchema:          v.FormSchema,
+		Roster:              v.Roster,
+		HasRoster:           v.HasRoster,
+		SharedSources:       sharedViews,
+	}
+}
+
 func (a *App) StartGuestRoomWithConfig(cfg GuestRoomConfigView) (GuestRoomView, error) {
 	if cfg.DestinationDir == "" {
 		cfg.DestinationDir = a.store.Dir()
@@ -3098,9 +3453,15 @@ func (a *App) StartGuestRoomWithConfig(cfg GuestRoomConfigView) (GuestRoomView, 
 		}
 	}
 
+	mode := guest.NormalizeRoomMode(guest.RoomMode(cfg.Mode))
 	room, err := a.guestMgr.CreateRoomWithConfig(guest.RoomConfig{
 		DestinationRoot:      cfg.DestinationDir,
 		Duration:             duration,
+		Mode:                 mode,
+		AutoApproveGuests:    cfg.AutoApproveGuests,
+		PinCode:              cfg.PinCode,
+		MaxDownloads:         cfg.MaxDownloads,
+		SharedPaths:          cfg.SharedPaths,
 		Title:                cfg.Title,
 		Description:          cfg.Description,
 		Deadline:             deadline,
@@ -3117,7 +3478,7 @@ func (a *App) StartGuestRoomWithConfig(cfg GuestRoomConfigView) (GuestRoomView, 
 			EventType: audit.EventRoomCreated,
 			RoomID:    room.ID,
 			Outcome:   audit.OutcomeSuccess,
-			Details:   fmt.Sprintf("title: %s, policy: %s", room.Title, room.CollisionPolicy),
+			Details:   fmt.Sprintf("title: %s, mode: %s, policy: %s", room.Title, room.Mode, room.CollisionPolicy),
 		})
 	}
 
@@ -3125,34 +3486,7 @@ func (a *App) StartGuestRoomWithConfig(cfg GuestRoomConfigView) (GuestRoomView, 
 	srvURL := a.srv.URL()
 	a.srvMu.Unlock()
 
-	inviteURL := fmt.Sprintf("%s/guest#%s", srvURL, room.InviteSecret)
-	qrPNG, err := qr.PNG(inviteURL, qr.DefaultSize)
-	var qrDataURL string
-	if err == nil {
-		qrDataURL = "data:image/png;base64," + base64.StdEncoding.EncodeToString(qrPNG)
-	}
-
-	v := room.View()
-	return GuestRoomView{
-		ID:              v.ID,
-		Date:            v.Date,
-		DestinationRoot: v.DestinationRoot,
-		RoomFolder:      v.RoomFolder,
-		Title:           v.Title,
-		Description:     v.Description,
-		Deadline:        v.Deadline,
-		CollisionPolicy: string(v.CollisionPolicy),
-		State:           string(v.State),
-		DurationSeconds: v.DurationSeconds,
-		CreatedAt:       v.CreatedAt,
-		ExpiresAt:       v.ExpiresAt,
-		InviteSecret:    v.InviteSecret,
-		InviteURL:       inviteURL,
-		QRDataURL:       qrDataURL,
-		FormSchema:      v.FormSchema,
-		Roster:          v.Roster,
-		HasRoster:       v.HasRoster,
-	}, nil
+	return a.buildGuestRoomView(room, srvURL), nil
 }
 
 func (a *App) GetGuestRoomState() (GuestRoomStateView, error) {
@@ -3168,37 +3502,9 @@ func (a *App) GetGuestRoomState() (GuestRoomStateView, error) {
 	}
 	a.srvMu.Unlock()
 
-	var qrDataURL string
-	inviteURL := ""
-	if srvURL != "" {
-		inviteURL = fmt.Sprintf("%s/guest#%s", srvURL, room.InviteSecret)
-		qrPNG, err := qr.PNG(inviteURL, qr.DefaultSize)
-		if err == nil {
-			qrDataURL = "data:image/png;base64," + base64.StdEncoding.EncodeToString(qrPNG)
-		}
-	}
-
 	rv := room.View()
-	roomView := &GuestRoomView{
-		ID:              rv.ID,
-		Date:            rv.Date,
-		DestinationRoot: rv.DestinationRoot,
-		RoomFolder:      rv.RoomFolder,
-		Title:           rv.Title,
-		Description:     rv.Description,
-		Deadline:        rv.Deadline,
-		CollisionPolicy: string(rv.CollisionPolicy),
-		State:           string(rv.State),
-		DurationSeconds: rv.DurationSeconds,
-		CreatedAt:       rv.CreatedAt,
-		ExpiresAt:       rv.ExpiresAt,
-		InviteSecret:    rv.InviteSecret,
-		InviteURL:       inviteURL,
-		QRDataURL:       qrDataURL,
-		FormSchema:      rv.FormSchema,
-		Roster:          rv.Roster,
-		HasRoster:       rv.HasRoster,
-	}
+	roomViewValue := a.buildGuestRoomView(room, srvURL)
+	roomView := &roomViewValue
 
 	var pendingGuests []GuestView
 	var approvedGuests []GuestView
@@ -3414,6 +3720,13 @@ func (a *App) EndGuestRoom() error {
 		roomID = room.ID
 	}
 	err := a.guestMgr.EndRoom()
+	if roomID != "" {
+		a.srvMu.Lock()
+		if a.srv != nil {
+			a.srv.RevokeRoomGrants(roomID)
+		}
+		a.srvMu.Unlock()
+	}
 	if err == nil && a.events != nil && roomID != "" {
 		a.events.PublishGuest(roomID, "", events.TypeGuestStatus, map[string]any{
 			"state": "ended",
@@ -3435,6 +3748,75 @@ func (a *App) EndGuestRoom() error {
 		})
 	}
 	return err
+}
+
+// PickGuestSharePaths lets the host choose files or a folder for Guest Drop Box sharing.
+func (a *App) PickGuestSharePaths(selectFolder bool) ([]string, error) {
+	if a.ctx == nil {
+		return []string{}, nil
+	}
+	if selectFolder {
+		dir, err := runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
+			Title: "Choose a folder to share with guests",
+		})
+		if err != nil || dir == "" {
+			return []string{}, nil
+		}
+		return []string{dir}, nil
+	}
+	paths, err := runtime.OpenMultipleFilesDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Choose files to share with guests",
+	})
+	if err != nil || len(paths) == 0 {
+		return []string{}, nil
+	}
+	return paths, nil
+}
+
+// AddGuestSharedPaths shares files or folders strictly inside the active guest room.
+func (a *App) AddGuestSharedPaths(paths []string) ([]SharedSourceView, error) {
+	room := a.guestMgr.ActiveRoom()
+	if room == nil {
+		return nil, errors.New("flitnix: no active guest room")
+	}
+	if !room.AllowsDownload() {
+		return nil, guest.ErrDownloadDisabled
+	}
+	added := make([]SharedSourceView, 0, len(paths))
+	for _, p := range paths {
+		source, err := room.AddSharedPath(p)
+		if err != nil {
+			return added, fmt.Errorf("%s: %w", filepath.Base(p), err)
+		}
+		added = append(added, sharedSourceView(source))
+	}
+	if len(added) > 0 && a.events != nil {
+		a.events.PublishGuest(room.ID, "", events.TypeGuestRoomUpdated, map[string]any{
+			"action": "shared_sources_updated",
+			"roomId": room.ID,
+			"count":  len(added),
+		})
+	}
+	return added, nil
+}
+
+// RemoveGuestSharedSource unlists a shared source from the active guest room.
+func (a *App) RemoveGuestSharedSource(id string) error {
+	room := a.guestMgr.ActiveRoom()
+	if room == nil {
+		return errors.New("flitnix: no active guest room")
+	}
+	if !room.RemoveSharedSource(id) {
+		return transfer.ErrNotFound
+	}
+	if a.events != nil {
+		a.events.PublishGuest(room.ID, "", events.TypeGuestRoomUpdated, map[string]any{
+			"action":   "shared_sources_updated",
+			"roomId":   room.ID,
+			"sourceId": id,
+		})
+	}
+	return nil
 }
 
 func (a *App) PickGuestDestination() (string, error) {
@@ -3826,6 +4208,7 @@ func (a *App) RemoveTrustedDevice(id string) error {
 			}
 		}
 	}
+	a.refreshClipboardAuthorizedPeers()
 	return nil
 }
 
@@ -3834,6 +4217,85 @@ func (a *App) SetDeviceAutoApprove(id string, autoApprove bool) error {
 		return nil
 	}
 	return a.devicesStore.SetAutoApprove(id, autoApprove)
+}
+
+func (a *App) publishClipboardItem(excludeDeviceID string, item clipboard.SyncItem) {
+	if a.events == nil {
+		return
+	}
+	if a.sessions != nil {
+		for _, s := range a.sessions.ActiveSessions() {
+			devID := s.DeviceID()
+			if devID == "" || devID == excludeDeviceID {
+				continue
+			}
+			if a.devicesStore != nil {
+				if _, ok := a.devicesStore.Get(devID); !ok {
+					continue
+				}
+			}
+			a.events.PublishPersonal(s.Key(), events.TypeClipboardUpdated, item)
+		}
+	}
+	a.events.PublishDesktop(events.TypeClipboardUpdated, item)
+}
+
+func (a *App) refreshClipboardAuthorizedPeers() {
+	if a.clipboardMgr == nil {
+		return
+	}
+	hasTrusted := false
+	if a.sessions != nil {
+		for _, s := range a.sessions.ActiveSessions() {
+			devID := s.DeviceID()
+			if devID == "" {
+				continue
+			}
+			if a.devicesStore == nil {
+				hasTrusted = true
+				break
+			}
+			if _, ok := a.devicesStore.Get(devID); ok {
+				hasTrusted = true
+				break
+			}
+		}
+	}
+	a.clipboardMgr.SetActiveAuthorizedPeers(hasTrusted)
+}
+
+// GetClipboardSyncStatus returns current opt-in automatic clipboard sync status.
+func (a *App) GetClipboardSyncStatus() clipboard.StatusView {
+	if a.clipboardMgr == nil {
+		return clipboard.StatusView{}
+	}
+	return a.clipboardMgr.Status()
+}
+
+// SetClipboardSyncEnabled turns opt-in automatic clipboard sync on or off and persists the setting.
+func (a *App) SetClipboardSyncEnabled(enabled bool) (clipboard.StatusView, error) {
+	if a.settingsStore != nil {
+		cur := a.settingsStore.Get()
+		cur.AutoClipboardSync = enabled
+		if err := a.settingsStore.Save(cur); err != nil {
+			return clipboard.StatusView{}, err
+		}
+	}
+	if a.clipboardMgr != nil {
+		a.clipboardMgr.SetEnabled(enabled)
+		a.refreshClipboardAuthorizedPeers()
+		return a.clipboardMgr.Status(), nil
+	}
+	return clipboard.StatusView{}, nil
+}
+
+// SetClipboardSyncPaused pauses or resumes clipboard sync without changing persistent settings.
+func (a *App) SetClipboardSyncPaused(paused bool) clipboard.StatusView {
+	if a.clipboardMgr == nil {
+		return clipboard.StatusView{}
+	}
+	a.clipboardMgr.SetPaused(paused)
+	return a.clipboardMgr.Status()
 }
 
 func (a *App) SetDevicePolicy(id string, policy devices.DevicePolicy) error {

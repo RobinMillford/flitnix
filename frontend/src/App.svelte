@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { t, setLocale, tFn } from './i18n'
-  import type { main, netenv, doctor, guest, audit, devices, power, version, update, transfer, session, discovery, client } from '../wailsjs/go/models'
+  import type { main, netenv, doctor, guest, audit, devices, power, version, update, transfer, session, discovery, client, clipboard } from '../wailsjs/go/models'
   import { OnFileDrop, OnFileDropOff, EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
   import logoUrl from './assets/images/logo-universal.png'
   import { createRefreshScheduler } from './refreshScheduler'
@@ -22,16 +22,18 @@
   import SettingsView from './views/SettingsView.svelte'
 
   import {
-    StartSession, EndSession, ListSessions, ListPendingUploads, RecentUploads,
+    StartSession, StartSessionWithConfig, EndSession, ListSessions, ListPendingUploads, RecentUploads,
     RecentDownloads, ApproveUpload, RejectUpload, CancelUpload, DiscardUpload,
     ListPendingBatches, ListBatches, ApproveBatch, RejectBatch, CancelBatch,
     PauseBatch, ResumeBatch, DiscardBatch,
     PickFilesForSharing, PickFolderForSharing, AddDroppedSources,
     ListSharedFiles, ListSharedSources, RevokeSharedFile, RevokeSharedSource, ReceiveDirectory,
-    ListNetworkInterfaces, SessionQR, ServerAddress, GetNetworkState, RefreshNetwork,
-    GetSessionShortCode, RegenerateSessionShortCode,
+    ListNetworkInterfaces, SessionQR, SessionHTTPSQR, ServerAddress, GetNetworkState, RefreshNetwork,
+    GetLocalHTTPSStatus, GetSessionShortCode, RegenerateSessionShortCode,
+    GetClipboardSyncStatus, SetClipboardSyncEnabled, SetClipboardSyncPaused,
     StartGuestRoomWithConfig, GetGuestRoomState, ApproveGuest, RejectGuest, RevokeGuest,
     ApproveGuestUpload, RejectGuestUpload, EndGuestRoom, PickGuestDestination, OpenGuestFolder,
+    PickGuestSharePaths, AddGuestSharedPaths, RemoveGuestSharedSource,
     PickExportDestination, ExportGuestCollection,
     ListGuestPresets, ListGuestTemplates, SaveGuestTemplate, DeleteGuestTemplate, DuplicateGuestTemplate, StartGuestRoomFromTemplate,
     ListAuditEvents, ClearAuditHistory,
@@ -90,6 +92,7 @@
   let storageStatus: transfer.StorageStatus | null = null
   let visibilityState: devices.VisibilityState | null = null
   let shortCode: session.ShortCodeView | null = null
+  let clipboardStatus: clipboard.StatusView | null = null
 
   // Desktop-to-Desktop (Computer Sharing) state
   let localPeerInfo: main.LocalPeerInfo | null = null
@@ -102,7 +105,7 @@
 
   // Persistent Settings state
   let settingsState: main.SettingsView = {
-    version: 6,
+    version: 8,
     theme: getInitialTheme(),
     locale: 'system',
     downloadDir: '',
@@ -125,7 +128,10 @@
     notifyGuestRequests: true,
     notificationsSupported: false,
     historyRetentionDays: 90,
-    historyMaxRecords: 5000
+    historyMaxRecords: 5000,
+    requireEncryptedTransport: false,
+    localHttpsEnabled: false,
+    autoClipboardSync: false
   }
   let settingsSavedAlert = ''
   let settingsError = ''
@@ -215,6 +221,8 @@
   let ifaceError = ''
   let selectedIp = ''
   let serverAddress = ''
+  let localHttpsStatus: main.LocalHTTPSStatus | null = null
+  let qrUseHttps = false
   let qrUrl = ''
   let qrError = ''
   let qrKey = ''
@@ -245,6 +253,14 @@
   let guestDescription = 'Submit your assignment files. Provide your student ID and notes.'
   let guestCollisionPolicy: 'preserve_both' | 'reject' = 'preserve_both'
   let guestFormSchema: guest.FormField[] = []
+  let guestMode: 'upload_only' | 'download_only' | 'two_way' = 'upload_only'
+  let guestAutoApproveGuests = false
+  let guestSharedPaths: string[] = []
+  let guestPinCode = ''
+  let guestMaxDownloads = 0
+  let sessionPinCode = ''
+  let sessionMaxDownloads = 0
+  let sessionDurationMinutes = 0
   let exporting = false
   let exportSuccessMsg = ''
 
@@ -288,9 +304,9 @@
       ListSharedFiles(), ListSharedSources(), ReceiveDirectory(), ServerAddress(),
       ListPendingBatches(), ListBatches(), GetGuestRoomState(), GetPairingStatus(),
       SleepInhibition(), GetStorageStatus(), GetVisibilityState(),
-      ListNearbyPeers(), ListPeerTransfers(), GetLocalPeerInfo()
+      ListNearbyPeers(), ListPeerTransfers(), GetLocalPeerInfo(), GetLocalHTTPSStatus(), GetClipboardSyncStatus()
     ]),
-    ([s, p, u, d, f, sourceList, dir, addr, b, allBatches, grState, pStatus, sleepStatus, stStatus, visState, peersList, peerJobs, localPeer]) => {
+    ([s, p, u, d, f, sourceList, dir, addr, b, allBatches, grState, pStatus, sleepStatus, stStatus, visState, peersList, peerJobs, localPeer, httpsSt, clipSt]) => {
       sessions = s ?? []; pending = p ?? []; uploads = u ?? []; downloads = d ?? []
       files = f ?? []; sources = sourceList ?? []; pendingBatches = b ?? []
       batches = allBatches ?? []
@@ -303,6 +319,11 @@
       nearbyPeers = peersList ?? []
       peerTransfers = peerJobs ?? []
       localPeerInfo = localPeer ?? null
+      localHttpsStatus = httpsSt ?? null
+      clipboardStatus = clipSt ?? null
+      if (!localHttpsStatus?.active && qrUseHttps) {
+        qrUseHttps = false
+      }
       if (!guestDestDir && dir) guestDestDir = dir
 
       const currentPendingTotal = (pending?.length ?? 0) + (pendingBatches?.length ?? 0) + (guestRoomState?.pendingUploads?.length ?? 0)
@@ -362,10 +383,19 @@
     if (!key) return
     qrKey = key
     try {
-      const data = await SessionQR(key)
+      const data = (qrUseHttps && localHttpsStatus?.active)
+        ? await SessionHTTPSQR(key, false)
+        : await SessionQR(key)
       if (qrKey === key) { qrUrl = data; qrError = '' }
     } catch (err) {
       if (qrKey === key) { qrUrl = ''; qrError = stringOfError(err) }
+    }
+  }
+
+  function toggleQrHttpsAction(useHttps: boolean): void {
+    qrUseHttps = useHttps
+    if (qrKey) {
+      void fetchQR(qrKey)
     }
   }
 
@@ -440,7 +470,17 @@
       if (interfaces.length > 1 && !selectedIp) {
         throw new Error('Choose the network interface that connects to the phone, then start.')
       }
-      const v = await StartSession(selectedIp)
+      const pinClean = sessionPinCode.trim()
+      const hasPolicy = Boolean(pinClean) || sessionMaxDownloads > 0 || sessionDurationMinutes > 0
+      const v = hasPolicy
+        ? await StartSessionWithConfig({
+            ip: selectedIp,
+            pinCode: pinClean,
+            maxDownloads: sessionMaxDownloads,
+            durationMinutes: sessionDurationMinutes,
+            oneTimeAutoEnd: sessionMaxDownloads === 1
+          } as any)
+        : await StartSession(selectedIp)
       activeInterfaceName = v.interfaceName ?? ''; activeAddress = v.address ?? ''
       await fetchQR(v.key)
       liveAnnouncement = tFn('announcements.sessionStarted')
@@ -588,6 +628,29 @@
   }
 
   // Quick Text actions
+  async function toggleClipboardSyncAction(): Promise<void> {
+    try {
+      const next = !(clipboardStatus?.enabled ?? false)
+      clipboardStatus = await SetClipboardSyncEnabled(next)
+      if (settingsState) {
+        settingsState = { ...settingsState, autoClipboardSync: next } as main.SettingsView
+      }
+      showToast(next ? 'Auto-Clipboard Sync enabled for trusted devices' : 'Auto-Clipboard Sync disabled', 'info')
+    } catch (err) {
+      report(err)
+    }
+  }
+
+  async function toggleClipboardPauseAction(): Promise<void> {
+    try {
+      const nextPause = !(clipboardStatus?.paused ?? false)
+      clipboardStatus = await SetClipboardSyncPaused(nextPause)
+      showToast(nextPause ? 'Clipboard Sync paused' : 'Clipboard Sync resumed', 'info')
+    } catch (err) {
+      report(err)
+    }
+  }
+
   async function sendTextAction(): Promise<void> {
     if (!textInput.trim() || sendingText || !sessions.length) return
     sendingText = true
@@ -700,6 +763,38 @@
     guestFormSchema = p.formSchema || []
   }
 
+  async function pickGuestShareAction(selectFolder: boolean): Promise<void> {
+    try {
+      const picked = await PickGuestSharePaths(selectFolder)
+      if (!picked || picked.length === 0) return
+      const isLive = Boolean(guestRoomState?.room && guestRoomState.room.state !== 'ended' && guestRoomState.room.state !== 'expired')
+      if (isLive) {
+        await AddGuestSharedPaths(picked)
+        showToast(selectFolder ? 'Shared folder added to room' : `Shared ${picked.length} file(s) with guests`, 'success')
+        refresh()
+      } else {
+        const merged = new Set([...guestSharedPaths, ...picked])
+        guestSharedPaths = Array.from(merged)
+      }
+    } catch (err) {
+      report(err)
+    }
+  }
+
+  function removeStagedGuestSharePath(index: number): void {
+    guestSharedPaths = guestSharedPaths.filter((_, i) => i !== index)
+  }
+
+  async function removeGuestSharedSourceAction(sourceId: string): Promise<void> {
+    try {
+      await RemoveGuestSharedSource(sourceId)
+      showToast('Removed shared item from room', 'info')
+      refresh()
+    } catch (err) {
+      report(err)
+    }
+  }
+
   async function startGuestRoomAction(): Promise<void> {
     if (guestStarting) return
     guestStarting = true
@@ -707,6 +802,11 @@
       await StartGuestRoomWithConfig({
         destinationDir: guestDestDir,
         durationMinutes: guestDurationMinutes,
+        mode: guestMode,
+        autoApproveGuests: guestAutoApproveGuests,
+        pinCode: guestPinCode.trim(),
+        maxDownloads: guestMode === 'upload_only' ? 0 : guestMaxDownloads,
+        sharedPaths: guestMode === 'upload_only' ? [] : guestSharedPaths,
         title: guestTitle,
         description: guestDescription,
         collisionPolicy: guestCollisionPolicy,
@@ -1697,6 +1797,12 @@
               onRefreshNetwork={refreshNetwork}
               {selectedIp}
               {serverAddress}
+              {localHttpsStatus}
+              {qrUseHttps}
+              bind:sessionPinCode
+              bind:sessionMaxDownloads
+              bind:sessionDurationMinutes
+              {toggleQrHttpsAction}
               {qrUrl}
               {qrError}
               {qrKey}
@@ -1730,6 +1836,9 @@
               {handleOpenDownloadFolder}
               {visibilityState}
               {shortCode}
+              {clipboardStatus}
+              {toggleClipboardSyncAction}
+              {toggleClipboardPauseAction}
               {setVisibilityModeAction}
               {setQRSharingPausedAction}
               {revokeAllSessionsAction}
@@ -1784,6 +1893,11 @@
               bind:guestFormSchema
               bind:guestDestDir
               bind:guestDurationMinutes
+              bind:guestMode
+              bind:guestAutoApproveGuests
+              bind:guestPinCode
+              bind:guestMaxDownloads
+              {guestSharedPaths}
               {guestStarting}
               {guestCopiedLink}
               {exporting}
@@ -1797,6 +1911,10 @@
               rejectUpload={rejectGuestUploadAction}
               pickDestination={chooseGuestDestination}
               openFolder={openGuestFolderAction}
+              pickShareFiles={() => pickGuestShareAction(false)}
+              pickShareFolder={() => pickGuestShareAction(true)}
+              removeStagedSharePath={removeStagedGuestSharePath}
+              removeSharedSource={removeGuestSharedSourceAction}
               exportCollection={exportCollectionAction}
               copyGuestLink={copyGuestLink}
               {copyTextToClipboard}

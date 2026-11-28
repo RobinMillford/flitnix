@@ -16,12 +16,14 @@ import (
 	"syscall"
 
 	"github.com/itsyamin/flitnix/internal/client"
+	"github.com/itsyamin/flitnix/internal/devices"
 	"github.com/itsyamin/flitnix/internal/doctor"
 	"github.com/itsyamin/flitnix/internal/events"
 	"github.com/itsyamin/flitnix/internal/netenv"
 	"github.com/itsyamin/flitnix/internal/qr"
 	"github.com/itsyamin/flitnix/internal/server"
 	"github.com/itsyamin/flitnix/internal/session"
+	"github.com/itsyamin/flitnix/internal/settings"
 	"github.com/itsyamin/flitnix/internal/transfer"
 	"github.com/itsyamin/flitnix/internal/version"
 )
@@ -82,6 +84,10 @@ func handleCLI(args []string, stdout, stderr io.Writer) (bool, int, []string) {
 		code := runServeCLI(args[2:], stdout, stderr)
 		return true, code, nil
 
+	case "known-hosts":
+		code := runKnownHostsCLI(args[2:], stdout, stderr)
+		return true, code, nil
+
 	default:
 		// Check if arguments are file or directory paths to be shared immediately
 		cwd, _ := os.Getwd()
@@ -103,16 +109,18 @@ func printHelp(out io.Writer) {
 	fmt.Fprintf(out, "  flitnix [files or directories to share...]\n")
 	fmt.Fprintf(out, "  flitnix send [flags] <files or directories...>\n")
 	fmt.Fprintf(out, "  flitnix pair [flags] <session-url>\n")
+	fmt.Fprintf(out, "  flitnix known-hosts [list | remove <hostId>]\n")
 	fmt.Fprintf(out, "  flitnix doctor [--json]\n")
 	fmt.Fprintf(out, "  flitnix serve [-addr <host:port>] [-dir <receive-dir>]\n")
 	fmt.Fprintf(out, "  flitnix version\n\n")
 	fmt.Fprintf(out, "Commands:\n")
-	fmt.Fprintf(out, "  send      Send files or directories to a recipient Flitnix instance\n")
-	fmt.Fprintf(out, "  pair      Pair client as a cryptographically trusted device with host\n")
-	fmt.Fprintf(out, "  doctor    Run Connection Doctor diagnostics and report network readiness\n")
-	fmt.Fprintf(out, "  serve     Run headless transfer server on loopback or network address\n")
-	fmt.Fprintf(out, "  version   Display version and architecture information\n")
-	fmt.Fprintf(out, "  help      Show this help text\n")
+	fmt.Fprintf(out, "  send         Send files or directories to a recipient Flitnix instance\n")
+	fmt.Fprintf(out, "  pair         Pair client as a cryptographically trusted device with host\n")
+	fmt.Fprintf(out, "  known-hosts  Inspect or remove pinned TLS peer identities\n")
+	fmt.Fprintf(out, "  doctor       Run Connection Doctor diagnostics and report network readiness\n")
+	fmt.Fprintf(out, "  serve        Run headless transfer server on loopback or network address\n")
+	fmt.Fprintf(out, "  version      Display version and architecture information\n")
+	fmt.Fprintf(out, "  help         Show this help text\n")
 }
 
 func runDoctorCLI(args []string, stdout, stderr io.Writer) int {
@@ -161,12 +169,61 @@ func runDoctorCLI(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+func runKnownHostsCLI(args []string, stdout, stderr io.Writer) int {
+	kh, err := client.LoadOrCreateKnownHosts("")
+	if err != nil {
+		fmt.Fprintf(stderr, "Error loading known_hosts: %v\n", err)
+		return ExitLocalPathError
+	}
+	sub := "list"
+	if len(args) > 0 {
+		sub = strings.ToLower(strings.TrimSpace(args[0]))
+	}
+	switch sub {
+	case "list", "ls":
+		entries := kh.List()
+		if len(entries) == 0 {
+			fmt.Fprintln(stdout, "No pinned peer hosts in known_hosts.")
+			return ExitSuccess
+		}
+		for _, e := range entries {
+			addr := e.LastAddress
+			if addr == "" {
+				addr = "-"
+			}
+			fmt.Fprintf(stdout, "%s  addr=%s  name=%q  key=%s\n", e.HostID, addr, e.Name, e.PublicKey)
+		}
+		return ExitSuccess
+	case "remove", "rm", "delete":
+		if len(args) < 2 || strings.TrimSpace(args[1]) == "" {
+			fmt.Fprintln(stderr, "Usage: flitnix known-hosts remove <hostId>")
+			return ExitUsageError
+		}
+		targetID := strings.TrimSpace(args[1])
+		if _, ok := kh.Get(targetID); !ok {
+			fmt.Fprintf(stderr, "Host ID %s is not present in known_hosts.\n", targetID)
+			return ExitLocalPathError
+		}
+		if err := kh.Remove(targetID); err != nil {
+			fmt.Fprintf(stderr, "Error removing host pin: %v\n", err)
+			return ExitLocalPathError
+		}
+		fmt.Fprintf(stdout, "Removed pinned identity for host %s. This address is no longer pinned; use --host-id (or enable RequireEncryptedTransport) to force strict verification on the next CLI connection.\n", targetID)
+		return ExitSuccess
+	default:
+		fmt.Fprintln(stderr, "Usage: flitnix known-hosts [list | remove <hostId>]")
+		return ExitUsageError
+	}
+}
+
 func runServeCLI(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	dataDir := resolveDataDir()
 	addr := fs.String("addr", server.DefaultListenAddr, "listen address (host:port)")
 	receiveDir := fs.String("dir", "", "directory to store received files (default: ~/Downloads/Flitnix)")
-	recoveryDir := fs.String("recovery-dir", filepath.Join(resolveDataDir(), "recovery"), "durable state directory for session and upload recovery (empty disables recovery)")
+	recoveryDir := fs.String("recovery-dir", filepath.Join(dataDir, "recovery"), "durable state directory for session and upload recovery (empty disables recovery)")
+	localHTTPSFlag := fs.Bool("local-https", false, "enable opt-in Local CA HTTPS alongside plain HTTP on the same port")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -175,6 +232,24 @@ func runServeCLI(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "flitnix serve: %v\n", err)
 		return 1
+	}
+
+	hostIdentity, err := devices.LoadOrCreateHostIdentity(filepath.Join(dataDir, "host_identity.json"))
+	if err != nil {
+		fmt.Fprintf(stderr, "flitnix serve: failed to load host identity: %v\n", err)
+		return 1
+	}
+	devStore, err := devices.NewStore(filepath.Join(dataDir, "trusted_devices.json"))
+	if err != nil {
+		fmt.Fprintf(stderr, "flitnix serve: failed to load trusted devices: %v\n", err)
+		return 1
+	}
+	localHTTPSMgr := server.NewLocalHTTPSManager(filepath.Join(dataDir, "local_ca"))
+	localHTTPSEnabled := *localHTTPSFlag
+	if !localHTTPSEnabled {
+		if stStore, stErr := settings.NewStore(filepath.Join(dataDir, "settings.json")); stErr == nil {
+			localHTTPSEnabled = stStore.Get().LocalHTTPSEnabled
+		}
 	}
 
 	sessMgr := session.NewManager(session.Config{})
@@ -189,12 +264,15 @@ func runServeCLI(args []string, stdout, stderr io.Writer) int {
 	defer eventsHub.Close()
 
 	svcs := &server.Services{
-		Sessions:    sessMgr,
-		Transfers:   transfers,
-		Coordinator: coord,
-		Registry:    reg,
-		Downloads:   dls,
-		Events:      eventsHub,
+		Sessions:     sessMgr,
+		Transfers:    transfers,
+		Coordinator:  coord,
+		Registry:     reg,
+		Downloads:    dls,
+		Devices:      devStore,
+		HostIdentity: hostIdentity,
+		LocalHTTPS:   localHTTPSMgr,
+		Events:       eventsHub,
 		OnBatchPending: func(sessionKey string, batch transfer.BatchView, remoteAddr string) {
 			select {
 			case pendingBatches <- pendingServeBatch{sessionKey: sessionKey, batch: batch, remoteAddr: remoteAddr}:
@@ -204,9 +282,10 @@ func runServeCLI(args []string, stdout, stderr io.Writer) int {
 	}
 
 	srv := server.New(server.Config{
-		ListenAddr:  *addr,
-		Services:    svcs,
-		RecoveryDir: *recoveryDir,
+		ListenAddr:        *addr,
+		Services:          svcs,
+		RecoveryDir:       *recoveryDir,
+		LocalHTTPSEnabled: localHTTPSEnabled,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -236,7 +315,13 @@ func runServeCLI(args []string, stdout, stderr io.Writer) int {
 		} else {
 			fmt.Fprintf(stdout, "Notice: Server is bound to loopback %s (local testing only).\n", *addr)
 		}
-		fmt.Fprintf(stdout, "Serving on: %s\n", srv.URL())
+		fmt.Fprintf(stdout, "Serving on: %s (TLS 1.3 peer transport active, Host ID: %s)\n", srv.URL(), hostIdentity.HostID)
+		if srv.LocalHTTPSActive() {
+			fmt.Fprintf(stdout, "Local HTTPS: %s (CA: %s/local-ca.crt)\n", srv.HTTPSURL(), srv.URL())
+			if mdnsURL := srv.MDNSHTTPSURL(); mdnsURL != "" {
+				fmt.Fprintf(stdout, "mDNS HTTPS:  %s\n", mdnsURL)
+			}
+		}
 		fmt.Fprintf(stdout, "Receive dir: %s\n", store.Dir())
 		fmt.Fprintf(stdout, "Transfer URL: %s\n\n", transferURL)
 		if qrTerm != "" {

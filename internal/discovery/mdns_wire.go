@@ -276,6 +276,72 @@ func isMDNSFlitnixQuery(pkt []byte) bool {
 	return false
 }
 
+// isMDNSHostQuery reports whether pkt asks for A/AAAA/ANY records for targetHost (e.g. flitnix-<16hex>.local.).
+func isMDNSHostQuery(pkt []byte, targetHost string) bool {
+	if targetHost == "" || len(pkt) < 12 || len(pkt) > maxDNSPacketBytes {
+		return false
+	}
+	flags := binary.BigEndian.Uint16(pkt[2:4])
+	if (flags & 0x8000) != 0 {
+		return false
+	}
+	qdCount := int(binary.BigEndian.Uint16(pkt[4:6]))
+	if qdCount <= 0 || qdCount > 16 {
+		return false
+	}
+	want := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(targetHost)), ".") + "."
+	off := 12
+	for i := 0; i < qdCount; i++ {
+		name, next, err := decodeDNSName(pkt, off)
+		if err != nil || next+4 > len(pkt) {
+			return false
+		}
+		qType := binary.BigEndian.Uint16(pkt[next : next+2])
+		if strings.EqualFold(name, want) && (qType == dnsTypeA || qType == dnsTypeAAAA || qType == 255) {
+			return true
+		}
+		off = next + 4
+	}
+	return false
+}
+
+// buildMDNSHostAddressResponse builds an mDNS A/AAAA response for targetHost.
+func buildMDNSHostAddressResponse(targetHost string, ips []net.IP, ttlSeconds uint32) ([]byte, error) {
+	if targetHost == "" || len(ips) == 0 {
+		return nil, errors.New("discovery: incomplete host address response")
+	}
+	fqdn := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(targetHost)), ".") + "."
+	var answers []byte
+	var rrCount uint16
+	for _, ip := range ips {
+		if ip4 := ip.To4(); ip4 != nil {
+			var err error
+			answers, err = appendDNSRR(answers, fqdn, dnsTypeA, ttlSeconds, ip4)
+			if err != nil {
+				return nil, err
+			}
+			rrCount++
+		} else if ip16 := ip.To16(); ip16 != nil {
+			var err error
+			answers, err = appendDNSRR(answers, fqdn, dnsTypeAAAA, ttlSeconds, ip16)
+			if err != nil {
+				return nil, err
+			}
+			rrCount++
+		}
+	}
+	if rrCount == 0 {
+		return nil, errors.New("discovery: no valid IPs for host address response")
+	}
+	var hdr [12]byte
+	binary.BigEndian.PutUint16(hdr[2:4], 0x8400)
+	binary.BigEndian.PutUint16(hdr[6:8], rrCount)
+	pkt := make([]byte, 0, len(hdr)+len(answers))
+	pkt = append(pkt, hdr[:]...)
+	pkt = append(pkt, answers...)
+	return pkt, nil
+}
+
 // parseMDNSResponse parses an mDNS response packet and returns sanitized announcement data if valid.
 func parseMDNSResponse(pkt []byte) (mdnsAnnouncement, bool) {
 	if len(pkt) < 12 || len(pkt) > maxDNSPacketBytes {

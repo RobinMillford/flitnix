@@ -132,7 +132,7 @@
         <span class="badge badge--uploading" style="margin-top: 0.2rem;">Guest Drop Box</span>
       </div>
     </div>
-    <p class="tagline">Upload-only file drop to host desktop</p>
+    <p class="tagline" id="room-mode-tagline">Local room · No cloud relays</p>
   </header>
 
   <!-- Room Info Header (Title, Instructions, Deadline) -->
@@ -175,6 +175,10 @@
         <label for="nickname-input" class="input-label" id="nickname-label">Your Nickname (Optional)</label>
         <input type="text" id="nickname-input" class="text-input" placeholder="e.g. Alex (Pixel 8)" maxlength="30" autocomplete="name">
       </div>
+      <div class="input-group" id="guest-pin-group" hidden>
+        <label for="guest-pin-input" class="input-label">Room PIN *</label>
+        <input type="password" id="guest-pin-input" class="text-input" placeholder="Enter PIN shared by host" maxlength="32" autocomplete="off">
+      </div>
       <button type="submit" id="join-btn" class="btn-primary">Request to Join</button>
     </form>
   </section>
@@ -191,7 +195,7 @@
     <p id="rejected-msg">Your request was rejected or access has ended.</p>
   </section>
 
-  <!-- Step 4: Approved & Upload Area -->
+  <!-- Step 4: Approved Workspace (Upload &/or Download depending on room mode) -->
   <section class="flow" id="upload-view" hidden>
     <section class="card awareness-card" id="awareness-card">
       <div class="awareness-card__header">
@@ -204,7 +208,30 @@
       <div class="awareness-card__control" id="wake-lock-container"></div>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="shared-files-panel" hidden>
+      <div class="panel__head">
+        <h2>Shared by Host</h2>
+        <div style="display:flex; gap:0.4rem; align-items:center;">
+          <button type="button" class="badge badge--waiting" id="guest-download-selected-btn" style="cursor:pointer; border:1px solid var(--border);" hidden>Download Selected (ZIP)</button>
+          <button type="button" class="badge badge--approved" id="guest-refresh-shared-btn" style="cursor:pointer; border:1px solid var(--border);">Refresh</button>
+        </div>
+      </div>
+      <p class="muted" id="shared-files-subtitle">Files and folders shared by the host for this room.</p>
+      <div id="shared-folder-bar" style="display:flex; align-items:center; justify-content:space-between; margin:0.5rem 0;" hidden>
+        <span class="muted" id="shared-folder-crumb" style="font-size:0.82rem;"></span>
+        <div style="display:flex; gap:0.4rem;">
+          <button type="button" class="badge badge--waiting" id="shared-folder-back-btn" style="cursor:pointer; border:1px solid var(--border);">Back</button>
+          <button type="button" class="badge badge--approved" id="shared-folder-dl-btn" style="cursor:pointer; border:1px solid var(--border);">Download Folder</button>
+        </div>
+      </div>
+      <ul id="shared-files-list" style="padding:0; margin:0.75rem 0 0;"></ul>
+      <div id="guest-download-status" class="meta-row" style="margin-top:0.6rem;" hidden>
+        <span id="guest-download-status-text">Preparing download…</span>
+        <span id="guest-download-digest"></span>
+      </div>
+    </section>
+
+    <section class="panel" id="guest-upload-panel">
       <div class="panel__head">
         <h2>Drop Files Here</h2>
         <span id="guest-badge" class="badge badge--approved">Connected</span>
@@ -228,7 +255,7 @@
       <ul id="upload-queue" style="padding: 0; margin: 1rem 0 0;" aria-live="polite"></ul>
     </section>
 
-    <p class="footnote">Guest Drop Box is upload-only. Files are transferred directly over your local Wi-Fi or LAN.</p>
+    <p class="footnote" id="guest-mode-footnote">Guest Drop Box · Files transfer directly over your local Wi-Fi or LAN.</p>
   </section>
 
   <footer class="app__footer">

@@ -5,8 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
 <meta name="theme-color" content="#07111f">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="description" content="Flitnix phone transfer page: send files to the desktop and download shared files over the local network.">
 <title>Flitnix</title>
+<link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" type="image/png" href="/static/favicon.png">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <link rel="stylesheet" href="/static/styles.css">
@@ -39,6 +43,23 @@
     <button type="button" class="awareness-banner__close" id="awareness-banner-close" aria-label="Dismiss">&times;</button>
   </aside>
 
+  <!-- Pending Web Share Target confirmation card (shown when launched via OS Share Sheet) -->
+  <section class="card share-target-card" id="share-target-card" hidden aria-live="polite">
+    <div class="awareness-card__header">
+      <h2 style="margin: 0; font-size: 1.05rem;">Shared to Flitnix</h2>
+      <span class="badge badge--waiting" id="share-target-badge">Confirmation required</span>
+    </div>
+    <p class="muted" id="share-target-summary" style="margin: 0.4rem 0 0.65rem;"></p>
+    <ul class="share-target-list" id="share-target-list" hidden></ul>
+    <div id="share-target-text-box" class="share-target-text" hidden></div>
+    <p class="muted" id="share-target-connect-hint" hidden>Connect to your desktop below, then confirm sending your shared items.</p>
+    <div class="panel__actions" style="margin-top: 0.75rem;">
+      <button type="button" class="btn btn--small" id="share-target-confirm-files" hidden>Confirm &amp; Send Files</button>
+      <button type="button" class="btn btn--small" id="share-target-confirm-text" hidden>Load into Quick Text</button>
+      <button type="button" class="btn btn--ghost btn--small" id="share-target-discard">Discard</button>
+    </div>
+  </section>
+
   <!-- Shown only when there is no usable session token: either the page was
        opened without a QR link or the session it belonged to has ended. -->
   <section class="card card--warn" id="rescan" hidden>
@@ -69,6 +90,21 @@
         <li>If pages fail to load, open Connection Doctor on desktop to verify TCP port 43821 in your host firewall.</li>
       </ul>
     </details>
+  </section>
+
+  <section class="card" id="pin-unlock-card" hidden aria-live="polite">
+    <div class="awareness-card__header">
+      <h2 style="margin: 0; font-size: 1.05rem;">Session PIN Required</h2>
+      <span class="badge badge--waiting">Locked</span>
+    </div>
+    <p class="muted" style="margin: 0.4rem 0 0.7rem;">Enter the PIN shown on your desktop host to unlock files and transfers.</p>
+    <form id="pin-unlock-form" class="code-form" autocomplete="off">
+      <div class="code-row">
+        <input id="pin-unlock-input" class="text-input" type="password" maxlength="32" placeholder="Enter session PIN" aria-label="Session PIN">
+        <button type="submit" class="btn" id="pin-unlock-btn">Unlock</button>
+      </div>
+      <p class="code-error" id="pin-unlock-error" hidden role="alert"></p>
+    </form>
   </section>
 
   <section class="flow" id="flow" hidden>
@@ -112,6 +148,18 @@
         </div>
       </form>
       <ul class="text-messages" id="text-messages" aria-live="polite"></ul>
+      <div id="clipboard-sync-box" style="margin-top:0.85rem; padding-top:0.75rem; border-top:1px solid var(--line);">
+        <div class="awareness-card__header" style="margin-bottom:0.35rem;">
+          <strong style="font-size:0.9rem;">Automatic Clipboard Sync (Opt-In · Trusted Devices)</strong>
+          <span class="badge badge--waiting" id="clipboard-sync-badge">Off</span>
+        </div>
+        <p class="muted" id="clipboard-sync-desc" style="font-size:0.8rem; margin:0 0 0.55rem;">Disabled by default. Enable on your desktop and pair this browser to sync UTF-8 text (up to 64 KB) ephemerally without saving to history.</p>
+        <div class="panel__actions" id="clipboard-sync-actions">
+          <button type="button" class="btn btn--small" id="clipboard-push-btn" disabled>Send Phone Clipboard</button>
+          <button type="button" class="btn btn--ghost btn--small" id="clipboard-copy-latest-btn" hidden>Copy Received</button>
+        </div>
+        <p class="muted" id="clipboard-latest-preview" style="font-size:0.8rem; margin:0.45rem 0 0; word-break:break-word;" hidden></p>
+      </div>
     </section>
 
     <section class="panel">
@@ -155,7 +203,18 @@
       <p class="code-error" id="pair-error" hidden role="alert"></p>
     </section>
 
-    <p class="footnote">Transfers run over plain HTTP inside your own hotspot network — connect only devices you trust.</p>
+    <p class="footnote" id="transport-footnote">Connected via LAN HTTP (unencrypted local network transport) — connect only on networks and devices you trust.</p>
+  </section>
+
+  <section class="card pwa-card" id="pwa-card">
+    <div class="awareness-card__header">
+      <h2 class="awareness-card__title" style="margin: 0;">Mobile App &amp; Share Sheet (PWA)</h2>
+      <span class="badge badge--waiting" id="pwa-status-badge">Checking…</span>
+    </div>
+    <p class="muted" id="pwa-status-desc" style="margin: 0.4rem 0 0; font-size: 0.84rem; line-height: 1.45;"></p>
+    <div class="panel__actions" id="pwa-actions" style="margin-top: 0.65rem;" hidden>
+      <button type="button" class="btn btn--small" id="pwa-install-btn">Install Flitnix App</button>
+    </div>
   </section>
 
   <footer class="app__footer">

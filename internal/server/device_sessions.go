@@ -40,6 +40,17 @@ func newDeviceSessionLimiter() *deviceSessionLimiter {
 	}
 }
 
+func newPINLimiter() *deviceSessionLimiter {
+	return &deviceSessionLimiter{
+		maxAttempts: 5,
+		window:      1 * time.Minute,
+		lockout:     2 * time.Minute,
+		maxIPs:      1024,
+		now:         time.Now,
+		entries:     make(map[string]*devSessionLimitEntry),
+	}
+}
+
 func (l *deviceSessionLimiter) checkAllowed(ip string) (bool, time.Duration) {
 	if l == nil {
 		return true, 0
@@ -256,6 +267,7 @@ func handleDeviceSessionVerify(svcs *Services, limiter *deviceSessionLimiter) ht
 		}
 		limiter.clear(clientIP)
 		svcs.RecordContact("device-reconnect")
+		refreshClipboardAuthorizedPeers(svcs)
 
 		writeJSON(w, http.StatusOK, map[string]any{
 			"token":       sess.Token(),

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { main, netenv, transfer, devices, session } from '../../wailsjs/go/models'
+  import type { main, netenv, transfer, devices, session, clipboard } from '../../wailsjs/go/models'
   import { formatBytes, percent, speed, calcEta, fmtTime, openExternalURL } from '../utils'
   import ProgressBar from '../components/ProgressBar.svelte'
 
@@ -18,6 +18,12 @@
   export let onRefreshNetwork: () => void = () => {}
   export let selectedIp: string = ''
   export let serverAddress: string = ''
+  export let localHttpsStatus: main.LocalHTTPSStatus | null = null
+  export let qrUseHttps: boolean = false
+  export let sessionPinCode: string = ''
+  export let sessionMaxDownloads: number = 0
+  export let sessionDurationMinutes: number = 0
+  export let toggleQrHttpsAction: (useHttps: boolean) => void = () => {}
   export let qrUrl: string = ''
   export let qrError: string = ''
   export let qrKey: string = ''
@@ -52,6 +58,9 @@
   export let handleOpenDownloadFolder: () => void = () => {}
   export let visibilityState: devices.VisibilityState | null = null
   export let shortCode: session.ShortCodeView | null = null
+  export let clipboardStatus: clipboard.StatusView | null = null
+  export let toggleClipboardSyncAction: () => void = () => {}
+  export let toggleClipboardPauseAction: () => void = () => {}
   export let setVisibilityModeAction: (mode: string) => void = () => {}
   export let setQRSharingPausedAction: (paused: boolean) => void = () => {}
   export let revokeAllSessionsAction: () => void = () => {}
@@ -137,7 +146,9 @@
 
   function copySessionUrl() {
     if (!serverAddress) return
-    const url = serverAddress.startsWith('http') ? serverAddress : `http://${serverAddress}`
+    const url = (qrUseHttps && localHttpsStatus?.active && localHttpsStatus?.httpsUrl)
+      ? localHttpsStatus.httpsUrl
+      : (serverAddress.startsWith('http') ? serverAddress : `http://${serverAddress}`)
     copyTextToClipboard(url)
     showToast('Copied connection address to clipboard', 'success')
   }
@@ -257,6 +268,42 @@
               </dl>
             </div>
           {/if}
+
+          <div class="network-details-drawer" style="margin-top: 10px;">
+            <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end;">
+              <div style="min-width:140px; flex:1;">
+                <label for="session-pin-input" style="font-size:11.5px; font-weight:600; display:block; margin-bottom:4px;">Access PIN (Optional)</label>
+                <input
+                  id="session-pin-input"
+                  type="password"
+                  class="text-input compact"
+                  maxlength="32"
+                  bind:value={sessionPinCode}
+                  placeholder="4-32 chars (blank = none)"
+                />
+              </div>
+              <div style="min-width:130px;">
+                <label for="session-dl-limit" style="font-size:11.5px; font-weight:600; display:block; margin-bottom:4px;">Download Limit</label>
+                <select id="session-dl-limit" class="text-input compact" bind:value={sessionMaxDownloads}>
+                  <option value={0}>Unlimited</option>
+                  <option value={1}>1-Time Self-Destruct</option>
+                  <option value={3}>3 Downloads</option>
+                  <option value={5}>5 Downloads</option>
+                  <option value={10}>10 Downloads</option>
+                </select>
+              </div>
+              <div style="min-width:130px;">
+                <label for="session-expiry-select" style="font-size:11.5px; font-weight:600; display:block; margin-bottom:4px;">Session Expiry</label>
+                <select id="session-expiry-select" class="text-input compact" bind:value={sessionDurationMinutes}>
+                  <option value={0}>Default (10m idle)</option>
+                  <option value={5}>5 Minutes</option>
+                  <option value={15}>15 Minutes</option>
+                  <option value={60}>1 Hour</option>
+                  <option value={1440}>24 Hours</option>
+                </select>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div class="hub-action-col">
@@ -358,10 +405,30 @@
             {:else}
               <span class="hub-status-chip online">
                 <span class="chip-pulse active"></span>
-                Session Live & Listening
+                Session Live &amp; Listening
+              </span>
+            {/if}
+            {#if qrUseHttps && localHttpsStatus?.active}
+              <span class="hub-status-chip ready" title="TLS 1.3 encrypted local HTTPS origin (Local Root CA)">
+                🔒 Local HTTPS (TLS 1.3)
+              </span>
+            {:else}
+              <span class="hub-network-chip" title="Unencrypted local network HTTP for zero-install QR scanning">
+                LAN HTTP
               </span>
             {/if}
             <span class="muted" style="font-size: 12px;">Port 43821 · Ephemeral Token</span>
+            {#if sessions[0]?.pinRequired}
+              <span class="hub-status-chip ready" title="Phone/browser must verify the session PIN before accessing files">🔐 PIN Protected</span>
+            {/if}
+            {#if (sessions[0]?.maxDownloads ?? 0) > 0}
+              <span class="hub-network-chip" title="Completed and remaining download allowance for this session">
+                {sessions[0].maxDownloads === 1 ? '1-Time Self-Destruct' : `${sessions[0].remainingDownloads}/${sessions[0].maxDownloads} DL left`}
+              </span>
+            {/if}
+            {#if sessions[0]?.hardExpiresAt && !String(sessions[0].hardExpiresAt).startsWith('0001-')}
+              <span class="hub-network-chip tabular">Expires {fmtTime(sessions[0].hardExpiresAt)}</span>
+            {/if}
             <button
               type="button"
               class="hub-refresh-btn"
@@ -393,12 +460,33 @@
             {#if networkState?.status === 'no_network' || !serverAddress}
               <span class="url-text" style="color: var(--danger-text); font-style: italic;">Waiting for network reconnection…</span>
             {:else}
-              <span class="url-text">http://{serverAddress}</span>
+              <span class="url-text">{qrUseHttps && localHttpsStatus?.active && localHttpsStatus?.httpsUrl ? localHttpsStatus.httpsUrl : `http://${serverAddress}`}</span>
               <button type="button" class="button ghost small copy-btn" on:click={copySessionUrl}>
                 Copy Address
               </button>
             {/if}
           </div>
+
+          {#if localHttpsStatus?.active}
+            <div class="active-controls-row" style="margin-bottom: 6px;">
+              <button
+                type="button"
+                class="button {qrUseHttps ? 'primary' : 'ghost'} small"
+                on:click={() => toggleQrHttpsAction(!qrUseHttps)}
+              >
+                {qrUseHttps ? 'Using Local HTTPS QR (Switch to LAN HTTP)' : 'Use Local HTTPS QR (PWA / TLS 1.3)'}
+              </button>
+              {#if localHttpsStatus.caDownloadUrl}
+                <button
+                  type="button"
+                  class="button ghost small"
+                  on:click={() => { copyTextToClipboard(localHttpsStatus?.caDownloadUrl || ''); showToast('Copied Local CA download link', 'info') }}
+                >
+                  Copy CA Link
+                </button>
+              {/if}
+            </div>
+          {/if}
 
           <div class="active-controls-row">
             <button type="button" class="button ghost small" on:click={() => fetchQR(qrKey)}>
@@ -848,11 +936,32 @@
             <span class="eyebrow-neutral">Quick Text & Links</span>
             <h3>Notes & Clipboard</h3>
           </div>
-          {#if textMessages.length > 0}
-            <button type="button" class="button ghost small clear-btn" on:click={clearTextAction}>
-              Clear
-            </button>
-          {/if}
+          <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+            {#if clipboardStatus}
+              <button
+                type="button"
+                class="button {clipboardStatus.enabled && !clipboardStatus.paused ? 'secondary' : 'ghost'} small"
+                on:click={toggleClipboardSyncAction}
+                title="Opt-in automatic UTF-8 clipboard sync with paired trusted devices (64 KiB max, never saved to history)"
+              >
+                {clipboardStatus.enabled ? 'Auto-Clipboard: On' : 'Auto-Clipboard: Off'}
+              </button>
+              {#if clipboardStatus.enabled}
+                <button
+                  type="button"
+                  class="button ghost small"
+                  on:click={toggleClipboardPauseAction}
+                >
+                  {clipboardStatus.paused ? 'Resume' : 'Pause'}
+                </button>
+              {/if}
+            {/if}
+            {#if textMessages.length > 0}
+              <button type="button" class="button ghost small clear-btn" on:click={clearTextAction}>
+                Clear
+              </button>
+            {/if}
+          </div>
         </div>
 
         <div class="quick-text-widget">

@@ -387,6 +387,8 @@ func (s *Service) run(ctx context.Context) {
 				if kind == PacketMDNS {
 					if isMDNSFlitnixQuery(pkt) {
 						s.respondIfAllowed(sc)
+					} else if s.localMDNSHost() != "" && isMDNSHostQuery(pkt, s.localMDNSHost()) {
+						s.respondHostAddressIfAllowed(sc)
 					} else if ann, ok := parseMDNSResponse(pkt); ok {
 						s.handleAnnouncement(ann, srcIP)
 					}
@@ -443,6 +445,35 @@ func (s *Service) sendQueries(sock PacketSocket) {
 	}
 	if b, err := json.Marshal(beaconEnvelope{Kind: "query"}); err == nil {
 		_ = sock.SendBeacon(b)
+	}
+}
+
+func (s *Service) localMDNSHost() string {
+	if s.cfg.HostIdentity == nil || s.cfg.HostIdentity.HostID == "" {
+		return ""
+	}
+	prefix := strings.ToLower(s.cfg.HostIdentity.HostID)
+	if len(prefix) > 16 {
+		prefix = prefix[:16]
+	}
+	return "flitnix-" + prefix + ".local."
+}
+
+func (s *Service) respondHostAddressIfAllowed(sock PacketSocket) {
+	if sock == nil || s.visibilityMode() == devices.VisibilityHidden {
+		return
+	}
+	host := s.localMDNSHost()
+	if host == "" {
+		return
+	}
+	ep := s.localEndpoint()
+	ip := net.ParseIP(ep.LocalIP)
+	if ip == nil {
+		return
+	}
+	if pkt, err := buildMDNSHostAddressResponse(host, []net.IP{ip}, 20); err == nil {
+		_ = sock.SendMDNS(pkt)
 	}
 }
 

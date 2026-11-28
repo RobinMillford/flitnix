@@ -613,6 +613,29 @@ select:focus-visible,
   line-height: 1.45;
 }
 
+.share-target-card {
+  border-color: var(--accent);
+}
+.share-target-list {
+  margin: 0.5rem 0 0;
+  padding-left: 1.15rem;
+  font-size: 0.88rem;
+  color: var(--text);
+}
+.share-target-text {
+  margin-top: 0.5rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  font-size: 0.86rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.pwa-card {
+  margin-top: 1rem;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
