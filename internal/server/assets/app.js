@@ -734,6 +734,18 @@
           endUnauthorized(body && body.code);
         });
       }
+      if (res.status === 403) {
+        return readBody(res).then(function (body) {
+          sseState.connecting = false;
+          if (body && body.code === "pin_required") {
+            if (flowEl) flowEl.hidden = true;
+            if (pinUnlockCard) pinUnlockCard.hidden = false;
+            setStatus("checking", "Session PIN required");
+            return;
+          }
+          throw new Error("event stream status " + res.status);
+        });
+      }
       if (!res.ok || !res.body || typeof res.body.getReader !== "function") {
         throw new Error("event stream status " + res.status);
       }

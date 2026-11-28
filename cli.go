@@ -208,7 +208,7 @@ func runKnownHostsCLI(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "Error removing host pin: %v\n", err)
 			return ExitLocalPathError
 		}
-		fmt.Fprintf(stdout, "Removed pinned identity for host %s. Next connection will require explicit verification.\n", targetID)
+		fmt.Fprintf(stdout, "Removed pinned identity for host %s. This address is no longer pinned; use --host-id (or enable RequireEncryptedTransport) to force strict verification on the next CLI connection.\n", targetID)
 		return ExitSuccess
 	default:
 		fmt.Fprintln(stderr, "Usage: flitnix known-hosts [list | remove <hostId>]")

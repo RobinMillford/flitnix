@@ -360,7 +360,9 @@ func newAPIMux(services *Services, stall time.Duration, grants *DownloadGrantSto
 	gate := func(fn http.HandlerFunc) http.Handler {
 		return requirePINUnlocked(services, fn)
 	}
-	mux.HandleFunc("GET /api/events", handlePersonalEvents(services, shutdownCh))
+	// The event stream exposes transfer metadata, so it is subject to the same
+	// PIN gate as the file and grant endpoints. Status/verify stay outside it.
+	mux.Handle("GET /api/events", gate(handlePersonalEvents(services, shutdownCh)))
 	mux.HandleFunc("GET /api/pin/status", handleSessionPINStatus(services))
 	mux.HandleFunc("POST /api/pin/verify", handleSessionPINVerify(services, pinLimiter))
 	mux.Handle("POST /api/uploads", gate(handleUploadDeclare(services, stall)))

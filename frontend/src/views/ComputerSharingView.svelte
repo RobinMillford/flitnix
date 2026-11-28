@@ -195,7 +195,7 @@
           {serverAddress ? `🔒 TLS 1.3 Pinned + HTTP on ${serverAddress}` : 'Starting local peer listener…'}
         </span>
         {#if localPeerInfo?.requireEncrypted}
-          <span class="trust-badge trusted" title="Unencrypted peer fallback is disabled in Settings">Encrypted Required</span>
+          <span class="trust-badge trusted" title="Desktop peer transfers always use TLS 1.3 with Ed25519 host identity verification">Encrypted Required</span>
         {/if}
         {#if localPeerInfo}
           <span class="peer-fp-chip tabular" title="Cryptographic Ed25519 Host ID">
