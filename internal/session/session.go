@@ -129,6 +129,10 @@ type Config struct {
 	// resurrecting the session.
 	OnRevoke func(SessionRecord) error
 
+	// OnUpdate durably records state changes that affect access policy, such
+	// as consuming a download slot. It must not block for long.
+	OnUpdate func(SessionRecord) error
+
 	// Verifier derives the durable token verifier. The composition root wires
 	// it to the installation-keyed HMAC-SHA256 from the recovery store, so a
 	// persisted record never contains the raw token and cannot be verified
@@ -159,6 +163,13 @@ type SessionRecord struct {
 	CreatedAt time.Time
 	ExpiresAt time.Time
 	RevokedAt time.Time
+
+	// Policy state must survive process restarts: a PIN-protected, limited or
+	// short-lived share must not come back as an open, unlimited link.
+	PIN            PinVerifierRecord   `json:"pin,omitempty"`
+	DownloadLimit  DownloadQuotaRecord `json:"downloadLimit,omitempty"`
+	OneTimeAutoEnd bool                `json:"oneTimeAutoEnd,omitempty"`
+	HardExpiresAt  time.Time           `json:"hardExpiresAt,omitempty"`
 }
 
 // EndReason categorizes why a session ended. Values are stable identifiers
@@ -226,6 +237,7 @@ type Session struct {
 	pinVerifier    PinVerifier
 	dlQuota        DownloadQuota
 	oneTimeAutoEnd bool
+	onUpdate       func()
 	unlockMu       sync.Mutex
 	unlocks        map[string]time.Time
 }
@@ -247,6 +259,7 @@ type Manager struct {
 	onEnd    func(EndEvent)
 	onCreate func(SessionRecord) error
 	onRevoke func(SessionRecord) error
+	onUpdate func(SessionRecord) error
 	ended    []EndEvent // end events awaiting OnEnd, in end order
 
 	// verifier is immutable after construction, so readers need no lock.
@@ -268,6 +281,23 @@ func (m *Manager) SetRevokeHook(hook func(SessionRecord) error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.onRevoke = hook
+}
+
+// SetUpdateHook installs the durable sink for access-policy state changes.
+func (m *Manager) SetUpdateHook(hook func(SessionRecord) error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onUpdate = hook
+}
+
+func (m *Manager) persistUpdate(s *Session) {
+	m.mu.Lock()
+	hook := m.onUpdate
+	m.mu.Unlock()
+	if hook == nil {
+		return
+	}
+	_ = hook(m.recordFor(s, StatusActive))
 }
 
 // SetVerifier installs the installation-keyed token verifier. It is only
@@ -307,7 +337,7 @@ func NewManager(cfg Config) *Manager {
 	return &Manager{
 		idle: cfg.IdleTimeout, max: cfg.MaxSessions, now: now,
 		onExpire: cfg.OnExpire, onEnd: cfg.OnEnd, onCreate: cfg.OnCreate,
-		onRevoke: cfg.OnRevoke, verifier: cfg.Verifier,
+		onRevoke: cfg.OnRevoke, onUpdate: cfg.OnUpdate, verifier: cfg.Verifier,
 	}
 }
 
@@ -332,13 +362,17 @@ func newSessionID() (string, error) {
 // recordFor projects a live session into its durable record.
 func (m *Manager) recordFor(s *Session, status Status) SessionRecord {
 	rec := SessionRecord{
-		SessionID:  s.id,
-		SessionKey: s.Key(),
-		Verifier:   s.verifier,
-		Generation: s.generation,
-		Status:     status,
-		CreatedAt:  s.created,
-		ExpiresAt:  s.ExpiresAt(),
+		SessionID:      s.id,
+		SessionKey:     s.Key(),
+		Verifier:       s.verifier,
+		Generation:     s.generation,
+		Status:         status,
+		CreatedAt:      s.created,
+		ExpiresAt:      s.ExpiresAt(),
+		PIN:            s.pinVerifier.Record(),
+		DownloadLimit:  s.dlQuota.Record(),
+		OneTimeAutoEnd: s.oneTimeAutoEnd,
+		HardExpiresAt:  s.HardExpiresAt(),
 	}
 	if status == StatusRevoked {
 		rec.RevokedAt = m.now()
@@ -422,6 +456,7 @@ func (m *Manager) createWithKind(kind, deviceID string, opts PolicyOptions) (*Se
 		pinVerifier:    pinVerifier,
 		oneTimeAutoEnd: opts.OneTimeAutoEnd,
 	}
+	s.onUpdate = func() { m.persistUpdate(s) }
 	s.dlQuota.Init(opts.MaxDownloads)
 	s.expiresN.Store(now.Add(m.idle).UnixNano())
 	if opts.ExpiresIn > 0 {
@@ -455,6 +490,10 @@ func (m *Manager) Restore(record SessionRecord) error {
 	}
 	var digest [sha256.Size]byte
 	copy(digest[:], keyBytes)
+	var pinVerifier PinVerifier
+	if err := pinVerifier.Load(record.PIN); err != nil {
+		return err
+	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -490,7 +529,11 @@ func (m *Manager) Restore(record SessionRecord) error {
 		return errors.New("session: invalid restore status")
 	}
 
-	if !record.ExpiresAt.IsZero() && !record.ExpiresAt.After(m.now()) {
+	expired := !record.ExpiresAt.IsZero() && !record.ExpiresAt.After(m.now())
+	if !record.HardExpiresAt.IsZero() && !record.HardExpiresAt.After(m.now()) {
+		expired = true
+	}
+	if expired {
 		m.hist = append(m.hist, histItem{verifier: record.Verifier, status: StatusExpired})
 		return nil
 	}
@@ -507,8 +550,16 @@ func (m *Manager) Restore(record SessionRecord) error {
 		created:    record.CreatedAt,
 		idle:       m.idle,
 		nowFactory: m.now,
+
+		pinVerifier:    pinVerifier,
+		oneTimeAutoEnd: record.OneTimeAutoEnd,
 	}
+	s.dlQuota.Load(record.DownloadLimit)
 	s.expiresN.Store(record.ExpiresAt.UnixNano())
+	if !record.HardExpiresAt.IsZero() {
+		s.hardExpiresN.Store(record.HardExpiresAt.UnixNano())
+	}
+	s.onUpdate = func() { m.persistUpdate(s) }
 	m.active = append(m.active, s)
 	return nil
 }
@@ -902,6 +953,9 @@ func (s *Session) ConsumeDownload(reservationID string) (exhausted bool, autoEnd
 		return false, false
 	}
 	_, exhausted = s.dlQuota.Consume(reservationID)
+	if s.onUpdate != nil {
+		s.onUpdate()
+	}
 	return exhausted, exhausted && s.oneTimeAutoEnd
 }
 
