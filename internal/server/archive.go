@@ -1292,6 +1292,13 @@ func streamSingleFileWithSnapshot(ctx context.Context, method string, w http.Res
 	buf := *bufPtr
 	n, err := io.CopyBuffer(teeOut, src, buf)
 	src.flush()
+	// A client that received the whole body can close the connection before
+	// the final read returns io.EOF. In that case the read layer reports a
+	// cancellation even though every byte was already written; treating it as
+	// a failure would leave the quota reservation orphaned and skip auto-end.
+	if err != nil && n == size && (errors.Is(err, errDownloadCanceled) || errors.Is(err, context.Canceled)) {
+		err = nil
+	}
 	if err != nil {
 		finishProgressWithDigest(progress, err, "")
 		return true, err
