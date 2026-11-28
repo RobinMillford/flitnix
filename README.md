@@ -34,9 +34,9 @@ Flitnix combines the performance and concurrency safety of Go with a modern Svel
 
 ---
 
-## Key Features & Phase 4 Highlights (v0.3.1.0 Target)
+## Key Features
 
-Flitnix provides high-speed, private local file transfers between desktop computers and phones. Building on **v0.3.0**, Phase 4 adds hardened transport security, installable PWA Share Target workflows, multi-recipient room modes, PIN/download-limited shares, and opt-in trusted clipboard sync:
+Flitnix provides high-speed, private local file transfers between desktop computers and phones. Alongside the core sharing engine, it includes encrypted desktop and CLI transfers, an installable mobile web app with Share Sheet support, multi-recipient rooms, private expiring links, and optional trusted-device clipboard sync:
 
 - **Encrypted Peer/CLI Transport & Opt-In Local HTTPS**:
   - Desktop-to-Desktop sharing always uses TLS 1.3 with Ed25519 host identity and TOFU pinning. `flitnix send` and `flitnix pair` upgrade opportunistically when the peer advertises TLS; the optional `RequireEncryptedTransport` setting makes those CLI commands refuse plaintext fallback. `flitnix known-hosts` manages local pins, and `flitnix serve` serves over plain LAN HTTP unless Local CA HTTPS is enabled. Opt-in Local CA HTTPS (`flitnix-<host>.local`) runs alongside zero-setup QR sharing.

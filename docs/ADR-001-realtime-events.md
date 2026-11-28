@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (Phase 3)
+Accepted
 
 ## Context
 

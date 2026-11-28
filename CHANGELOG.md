@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added — Phase 4: Secure & Advanced Sharing (`v0.3.1.0` target)
+### Added — Secure & Advanced Sharing
 - **Encrypted Peer/CLI Transport & Optional Local HTTPS**:
   - Extended TLS 1.3 with Ed25519 host identity verification and `LastAddress` TOFU pinning for Desktop-to-Desktop transfers and the `flitnix send` / `flitnix pair` CLI commands. Added opt-in `RequireEncryptedTransport` strict mode that refuses plaintext CLI fallback; `flitnix known-hosts` manages local pins, and `flitnix serve` honours `LocalHTTPSEnabled`. Desktop peer transfers always use TLS 1.3 and have no plaintext fallback.
   - Added opt-in Local Root CA HTTPS (`internal/server/local_https.go`, `LocalHTTPSEnabled`) with SNI routing on port `43821`, LAN IP + `flitnix-<host>.local` SAN certificates, `GET /local-ca.crt`, and Settings Local CA Export/Removal while preserving zero-friction LAN HTTP for guest QR sharing.
@@ -50,7 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Device Visibility & Conditional Auto-Approval**:
   - Added a persistent 4-mode visibility state machine (`hidden`, `trusted`, `temporary_everyone` with 10-minute auto-revert, `everyone`) in `internal/devices/visibility.go` and `internal/settings` (`CurrentSchemaVersion = 3`), plus independent QR pause/revoke controls (`SetQRPaused`, `RevokeByDeviceID`).
   - Added per-device conditional auto-approval (`internal/devices/policy.go`) with configurable byte size limits and executable/script blocking (`AutoApproveMaxBytes`, `BlockExecutables`, `BlockScripts`), trust/reason badges, and policy controls in `TrustedDevicesView.svelte` and `PersonalTransferView.svelte`.
-- **QR-First Mobile Hardening (Phase 2 — Priority Zero)**:
+- **QR-First Mobile Hardening**:
   - Fixed iOS Safari single-file download fallback, mobile `fmtBytes` reference error, and drag-and-drop styling on `#send-panel`.
 - **Original Modification Timestamp Preservation**:
   - Propagated validated sender modification timestamps (`lastModifiedMs`) from the mobile browser (`File.lastModified`) and Go CLI (`client.BuildManifest`) through `POST /api/batches` and `POST /api/uploads`, persisting them in recovery journals and resumable `.meta` sidecars across pauses and restarts.
@@ -71,7 +71,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Resumable Chunked Uploads & Crash-Safe Offset Recovery**:
   - Implemented `HEAD` / `PATCH` resumable chunked upload endpoints on `/api/batches/{batchID}/items/{itemID}/content` and `/api/uploads/{id}/content` using `Upload-Offset`, `Upload-Length`, `Upload-Chunk-Size`, and `409 Conflict` offset-mismatch reconciliation while keeping legacy `PUT` streams compatible.
   - Added crash-safe chunk durability (`fsync(.part)` → HMAC-authenticated `.meta.tmp` with incremental SHA-256 hash state → `fsync` → atomic rename → `syncDir`) using an installation-derived `staging-meta-v1` subkey, rolling back uncommitted torn tails automatically.
-  - Wired `RecoveryDir` into both desktop (`App`) and `flitnix serve` CLI, completing startup recovery Phases 6–10 (`recovery_startup.go`): per-upload quarantine isolation, quota reservation reconstruction, session/coordinator reconciliation, and Phase 10 TTL/orphan staging cleanup.
+  - Wired `RecoveryDir` into both desktop (`App`) and `flitnix serve` CLI (`recovery_startup.go`): per-upload quarantine isolation, quota reservation reconstruction, session/coordinator reconciliation, and TTL/orphan staging cleanup.
   - Added non-destructive `PauseBatch`, `ResumeBatch`, `DiscardBatch`, and `DiscardUpload` lifecycle controls in Coordinator, Transfer Service, Wails adapter, and Desktop Svelte UI (`Uploading`, `Paused`, `Interrupted`, `Resuming`, `Completed`, `Failed`, `Discarded`), plus Web Worker `File.slice()` chunking in mobile `upload-worker.js` / `upload-client.js` / `app.js` and Go CLI `internal/client`.
 - **Storage Quota & Disk-Space Protection**:
   - Cross-platform filesystem free-space probing (`unix.Statfs` / `GetDiskFreeSpaceEx`) with configurable minimum disk reserve buffer (`BufferReserveBytes`, default `1 GiB`) and optional hard receive cap (`MaxReceiveBytes`).
