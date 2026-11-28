@@ -342,11 +342,18 @@ func TestGuestRoomConcurrentBroadcastScale(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Clients observe the response body before the server's deferred quota
+	// accounting has necessarily run. Wait for the handlers to finish before
+	// asserting on room counters.
+	deadline := time.Now().Add(5 * time.Second)
+	for room.View().ActiveDownloads > 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
 	rv := room.View()
+	if rv.ActiveDownloads != 0 {
+		t.Fatalf("ActiveDownloads = %d; want 0", rv.ActiveDownloads)
+	}
 	if rv.DownloadCount != attendees {
 		t.Fatalf("DownloadCount = %d; want %d", rv.DownloadCount, attendees)
-	}
-	if rv.ActiveDownloads != 0 {
-		t.Fatalf("ActiveDownloads = %d; want 0 after completion", rv.ActiveDownloads)
 	}
 }
