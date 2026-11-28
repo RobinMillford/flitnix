@@ -38,15 +38,15 @@ Flitnix combines the performance and concurrency safety of Go with a modern Svel
 
 Flitnix provides high-speed, private local file transfers between desktop computers and phones. Building on **v0.3.0**, Phase 4 adds hardened transport security, installable PWA Share Target workflows, multi-recipient room modes, PIN/download-limited shares, and opt-in trusted clipboard sync:
 
-- **Encrypted Peer/CLI Transport & Opt-In Local HTTPS (G11)**:
-  - Fail-closed TLS 1.3 with Ed25519 host identity + TOFU pinning across desktop GUI and CLI (`flitnix send`, `flitnix pair`, `flitnix known-hosts`), plus opt-in Local CA HTTPS (`flitnix-<host>.local`) alongside zero-setup LAN HTTP QR sharing.
-- **Installable Mobile PWA & OS Share Target (G12)**:
+- **Encrypted Peer/CLI Transport & Opt-In Local HTTPS**:
+  - Desktop-to-Desktop sharing always uses TLS 1.3 with Ed25519 host identity and TOFU pinning. `flitnix send` and `flitnix pair` upgrade opportunistically when the peer advertises TLS; the optional `RequireEncryptedTransport` setting makes those CLI commands refuse plaintext fallback. `flitnix known-hosts` manages local pins, and `flitnix serve` serves over plain LAN HTTP unless Local CA HTTPS is enabled. Opt-in Local CA HTTPS (`flitnix-<host>.local`) runs alongside zero-setup QR sharing.
+- **Installable Mobile PWA & OS Share Target**:
   - Installable mobile shell (`/manifest.webmanifest`, `/sw.js`) and `POST /share-target` OS Share Sheet receiver over IndexedDB with explicit send confirmation.
-- **Multi-Recipient Guest Drop Box Rooms (G19)**:
+- **Multi-Recipient Guest Drop Box Rooms**:
   - `upload_only`, `download_only`, and `two_way` modes extending Guest Drop Box with room-isolated host shared files/folders, bounded concurrent streaming downloads, and unchanged dual join + upload approval gates.
-- **PIN Protection, Custom Expiry & Download Limits (G23)**:
+- **PIN Protection, Custom Expiry & Download Limits**:
   - Optional salted PIN access with brute-force lockouts, custom absolute expiration windows, and atomic one-time/download-limited links for personal sessions and guest rooms.
-- **Opt-In Trusted Clipboard Sync (G17)**:
+- **Opt-In Trusted Clipboard Sync**:
   - Disabled by default; ephemeral 64 KiB UTF-8 clipboard sync over authenticated trusted-device channels with echo suppression and sensitive/concealed OS item filtering.
 
 ### What's New in v0.3.0
