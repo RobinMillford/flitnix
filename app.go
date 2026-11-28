@@ -1397,6 +1397,16 @@ func (a *App) handleDesktopEvent(ev events.DesktopEvent) {
 				},
 			})
 		}
+		if state == string(guest.UploadCompleted) && uid != "" {
+			title, body := notify.FormatCompletedSummary(pol.HideFilenames, "upload", name, 1)
+			n.Notify(notify.Notification{
+				Key:           "guest:done:" + uid,
+				Category:      notify.CatTransferCompleted,
+				Title:         title,
+				Body:          body,
+				DefaultAction: notify.Action{Kind: notify.ActionOpenWindow},
+			})
+		}
 	}
 }
 
